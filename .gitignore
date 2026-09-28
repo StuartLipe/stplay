@@ -1,0 +1,56 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+release
+vendor/cache
+vendor/players
+vendor/tools
+*.local
+
+# Binarios grandes de runtime / empacotamento (nao vao para o repo)
+resources/mpv/
+.icon-ico/
+*.exe
+!iniciar.bat
+
+# Notas de backup pessoal.
+#
+# O `LEIA-ME-DRIVE.txt` era um mapa da maquina do dono — pastas, onde os
+# instaladores ficavam, hash de uma versao que nao existe mais. Ficou obsoleto
+# na 1.0.3 enquanto o app ja tinha saido daquela numeracao. Backup e problema
+# de quem tem o backup, nao de quem le o repositorio.
+LEIA-ME-DRIVE*.txt
+SOURCE-BACKUP-*/
+
+# Diario de sessao, com mojibake e estado de maquina. O que foi corrigido e
+# util no historico de commits, que e onde ele esta.
+PLAYER-FIX-LOG.md
+
+# Design interno de spike, nunca virou documentacao do produto.
+docs/superpowers/
+
+# Build output do electron-builder, caso mude de pasta
+builder-debug.yml
+
+# Relatorios gerados (nao sao codigo)
+git-status.html
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

@@ -1,0 +1,1 @@
+export { createMpvOnePlayer } from './embeddedBridge'

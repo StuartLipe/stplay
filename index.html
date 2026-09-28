@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Sem CSP em 1.0.5. Este é um app que renderiza dado vindo de painel de
+      IPTV (terceiro, não confiável) e consome URLs de stream arbitrárias, então
+      XSS aqui é o vetor de entrada.
+
+      A CSP é injetada em tempo de build pelo plugin `csp-inject` do
+      vite.config.ts, e NÃO fica aqui de propósito: o Vite dev injeta um script
+      inline do React Refresh, que `script-src 'self'` bloquearia — e o dev
+      quebraria. No build de produção não existe script inline.
+
+      connect-src e media-src ficam abertos porque é app de streaming. A
+      restrição útil é script-src, que barra execução de string e injeção.
+    -->
+    <link rel="icon" type="image/png" href="/hamster.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>ST PLAY</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

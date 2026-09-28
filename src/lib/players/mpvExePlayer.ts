@@ -1,0 +1,1 @@
+export { createMpvExePlayer } from './embeddedBridge'

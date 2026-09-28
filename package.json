@@ -1,0 +1,141 @@
+{
+  "name": "stplay",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Player IPTV desktop",
+  "author": "Felipe",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/StuartLipe/stplay.git"
+  },
+  "homepage": "https://github.com/StuartLipe/stplay",
+  "license": "MIT",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --open --port 5173",
+    "typecheck": "tsc -b",
+    "lint": "oxlint src electron",
+    "test": "node --test --experimental-strip-types \"src/**/*.test.ts\" \"electron/**/*.test.cjs\"",
+    "verify": "npm run typecheck && npm run lint && npm run test",
+    "build": "npm run typecheck && vite build",
+    "prepack": "node scripts/guard-build.mjs",
+    "desktop": "concurrently -k \"vite --port 5173\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron electron/main.cjs\"",
+    "desktop:internal-test": "concurrently -k \"vite --port 5173\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 STPLAY_DEV_RENDERER_TEST=1 electron electron/main.cjs\"",
+    "desktop:mpv-test": "concurrently -k \"vite --port 5173\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 STPLAY_DEV_OPEN=\\\"C:/Users/Administrator/Desktop/Nova pasta/1.mp4\\\" STPLAY_DEV_ENGINE=mpv electron electron/main.cjs\"",
+    "pack": "vite build && electron-builder --win",
+    "release": "node scripts/release.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "ffmpeg-static": "^5.3.0",
+    "koffi": "^3.1.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
+    "hls.js": "^1.7.1",
+    "lucide-react": "^1.33.0",
+    "oxlint": "^1.75.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0",
+    "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.sturplay.desktop",
+    "productName": "ST PLAY",
+    "copyright": "Copyright Ã‚Â© Felipe",
+    "publish": {
+      "provider": "github",
+      "owner": "StuartLipe",
+      "repo": "stplay"
+    },
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "!**/*.map",
+      "!electron/**/*.test.cjs",
+      "!electron/players/dev-*.cjs",
+      "!electron/players/validate-mpv-modes.cjs",
+      "!electron/mpv-window.ps1",
+      "!**/node_modules/**/*.md",
+      "!**/node_modules/**/*.lib",
+      "!**/node_modules/koffi/doc/**",
+      "!**/node_modules/koffi/lib/**",
+      "!**/node_modules/koffi/src/koffi/CMakeLists.txt",
+      "!**/node_modules/koffi/src/koffi/src/abi/**",
+      "!**/node_modules/koffi/src/koffi/CMakeLists.txt",
+      "!**/node_modules/ffmpeg-static/install.js",
+      "!**/node_modules/ffmpeg-static/example.js",
+      "!**/node_modules/ffmpeg-static/ffmpeg.exe.README",
+      "!**/node_modules/ffmpeg-static/ffmpeg.exe.LICENSE"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/mpv",
+        "to": "mpv",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/ffmpeg.exe",
+      "node_modules/koffi/index.cjs",
+      "node_modules/koffi/src/koffi/index.cjs",
+      "node_modules/koffi/src/koffi/indirect.cjs",
+      "node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node"
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ST PLAY 1.0.0",
+      "uninstallDisplayName": "ST PLAY 1.0.0",
+      "artifactName": "ST-PLAY-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "ST-PLAY-${version}.exe"
+    },
+    "asar": true,
+    "electronDist": "node_modules/electron/dist",
+    "afterPack": "scripts/prune-locales.cjs"
+  },
+  "allowScripts": {
+    "electron@39.2.7": true,
+    "ffmpeg-static@5.3.0": true,
+    "koffi@3.1.6": true
+  }
+}

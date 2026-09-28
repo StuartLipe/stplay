@@ -1,0 +1,1 @@
+export { createLibmpvPlayer } from './embeddedBridge'
