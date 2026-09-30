@@ -582,6 +582,27 @@ function registerPlayerIpc() {
       getMainWindow() ||
       (senderWin && !senderWin.isDestroyed() ? senderWin.getParentWindow() : null)
     if (!win || win.isDestroyed()) return { ok: false }
+    // DIAGNOSTICO do ESC. O overlay decide o que o ESC faz lendo o campo
+    // `fullscreen` do meta. Se esse campo divergir do estado real da janela, o
+    // ESC faz a coisa errada - e o sintoma e "apertei ESC e o video sumiu".
+    //
+    // Filtrado de proposito: arrastar o volume gerava 23 linhas seguidas de
+    // `type: 'volume'` e enterrava o resto. So interessa `back` (o ramo que
+    // derruba o video) e qualquer caso em que os dois lados discordam — que e
+    // exatamente o bug.
+    try {
+      const dica = overlay.getFullscreenHint?.() ?? null
+      const real = win.isFullScreen()
+      if (action?.type === 'back' || dica !== real) {
+        log.info('fs', 'overlay action', {
+          type: action?.type,
+          overlayAchaFullscreen: dica,
+          janelaRealFullscreen: real,
+        })
+      }
+    } catch {
+      // ignore
+    }
     try {
       win.webContents.send('player:overlay-action', action)
       return { ok: true }
@@ -610,6 +631,16 @@ function registerPlayerIpc() {
 
   ipcMain.handle('overlay:ui-fullscreen', () => {
     const win = getMainWindow()
+    // DIAGNOSTICO: o botao de sair da tela cheia do overlay cai aqui. Log do
+    // estado real no instante do clique, porque o caminho passa pelo renderer
+    // (`toggleFullscreen`) e um erro la dentro nao aparece em lugar nenhum.
+    try {
+      log.info('fs', 'ui-fullscreen pedido', {
+        janelaRealFullscreen: win && !win.isDestroyed() ? win.isFullScreen() : null,
+      })
+    } catch {
+      // ignore
+    }
     if (win && !win.isDestroyed()) {
       win.webContents.send('player:ui-fullscreen')
     }
@@ -730,6 +761,13 @@ function bindFullscreenHooks(win) {
   const refresh = () => {
     if (win.isDestroyed()) return
     const fs = win.isFullScreen()
+    // DIAGNOSTICO: toda mudanca de tela cheia da JANELA, com o valor real. Sem
+    // isto nao da para dizer se o overlay foi avisado ou se so a janela mudou.
+    try {
+      log.info('fs', 'janela fullscreen', { fullscreen: fs })
+    } catch {
+      // ignore
+    }
     try {
       win.webContents.send('window:fullscreen-changed', { fullscreen: fs })
     } catch {

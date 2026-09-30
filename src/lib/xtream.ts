@@ -1,5 +1,6 @@
 import type { Channel, ContentDetails, Playlist, SeriesInfo, ShortEpg, XtreamProfile } from '../types'
 import { parseM3u } from './m3u'
+import { matchLiveStream } from './live-stream-match'
 import { fetchJson, fetchText, PANEL_LARGE_TIMEOUT_MS } from './proxy'
 import {
   coalesceSeriesInfoLoad,
@@ -524,6 +525,43 @@ export async function loadXtreamLive(playlist: Playlist): Promise<Channel[]> {
   })
 }
 
+/**
+ * URL de live ATUAL do mesmo canal, re-consultando o painel.
+ *
+ * O painel rotaciona stream_id: nesta conta 709056 virou 404 e o mesmo
+ * canal passou a responder em 709057/709058. O catalogo guarda a URL
+ * montada no load e nunca mais re-resolve, entao abrir um canal que morreu ha
+ * dez minutos insistia no ID morto.
+ *
+ * O casamento (tvg-id, depois nome normalizado) e a trava contra devolver o
+ * proprio id estao em live-stream-match.ts, puros e testados. Aqui so
+ * falta a parte de rede.
+ *
+ * @returns o canal com URL nova, ou 
+ull se nao mudou / nao achou / falhou
+ */
+export async function resolveFreshLiveChannel(
+  playlist: Playlist,
+  channel: Channel,
+): Promise<Channel | null> {
+  if (!playlist.xtream || channel.kind !== 'live') return null
+  const streams = asArray<LiveStream>(
+    await fetchJson<LiveStream[]>(apiUrl(playlist, 'action=get_live_streams')).catch(
+      (): LiveStream[] => [],
+    ),
+  )
+  if (streams.length === 0) return null
+  const match = matchLiveStream(streams, channel)
+  if (!match) return null
+  return {
+    ...channel,
+    id: 'live-' + String(match.stream_id),
+    url: liveUrl(playlist, match.stream_id),
+    streamId: String(match.stream_id),
+    tvgId: match.epg_channel_id ?? channel.tvgId,
+    logo: absLogo(playlist, match.stream_icon) ?? channel.logo,
+  }
+}
 export type XtreamCategory = { id: string; name: string }
 
 const xtreamM3uCache = new Map<string, Channel[]>()

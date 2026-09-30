@@ -19,6 +19,17 @@ let lastRect = null
 let lastPlaybackEvent = null
 let overlaySuspended = false
 let listPanelOpen = false
+/**
+ * O overlay precisa do retangulo INTEIRO do video so em dois momentos: com o
+ * spinner de carregamento centralizado, e com o drawer de canais aberto.
+ *
+ * Fora disso ele e so a barra de controle, porque cobrir o video com uma
+ * segunda janela transparente do Chromium, na mesma regiao e acima na z-order,
+ * quebra a apresentacao do swapchain do mpv — o video continua tocando embaixo
+ * e o usuario ve o quadro parado. Ver a medicao em overlay-bounds.cjs.
+ */
+let loadingShell = false
+let lastFullscreenHint = null
 let overlayReady = false
 /** @type {ReturnType<typeof setTimeout> | null} */
 let flushTimer = null
@@ -28,7 +39,7 @@ let ignoringMouse = true
 
 function activeOverlayRect() {
   if (!lastRect) return null
-  return overlayShellRect(lastRect, { listOpen: listPanelOpen })
+  return overlayShellRect(lastRect, { full: listPanelOpen || loadingShell })
 }
 
 function getLoadUrl() {
@@ -230,12 +241,21 @@ function canReshow() {
 
 function setMeta(meta = {}) {
   const merged = mergeMeta(meta)
+  // O overlay decide o que o ESC faz pelo campo `fullscreen`. Guardar o valor
+  // aqui deixa o processo principal comparar "o que o overlay acha" com "o que a
+  // janela real esta" no mesmo instante do ESC, que e a unica forma de achar
+  // divergencia em vez de deduzir.
+  if (typeof merged.fullscreen === 'boolean') lastFullscreenHint = merged.fullscreen
   if (!overlayWin || overlayWin.isDestroyed()) return
   try {
     overlayWin.webContents.send('player:overlay-meta', merged)
   } catch {
     // ignore
   }
+}
+
+function getFullscreenHint() {
+  return lastFullscreenHint
 }
 
 function sendEvent(payload) {
@@ -263,6 +283,7 @@ function sendEvent(payload) {
 function hide() {
   overlaySuspended = true
   listPanelOpen = false
+  loadingShell = false
   contentRect = null
   lastRect = null
   lastAppliedBoundsKey = ''
@@ -376,6 +397,29 @@ function bindMouseWake(win) {
 
 function sendUi(payload = {}) {
   if (!overlayWin || overlayWin.isDestroyed()) return
+  // A janela alterna entre barra e retangulo inteiro conforme a FASE, e nao
+  // conforme a acao.
+  //
+  // O bug anterior: eu testava `action === 'boot'` e tratava todo o resto como
+  // "nao e boot", o que encolhia a janela de volta para a barra. Mas
+  // `presentLoadingShell()` manda as duas em sequencia —
+  //   sendUi({action:'boot'})          -> retangulo inteiro
+  //   sendUi({action:'show-controls'}) -> barra
+  // — entao o 'show-controls' desfazia o 'boot' na mesma volta e o indicador de
+  // "carregando..." aparecia la embaixo, dentro da barra de 148px, em vez de
+  // no centro da area de video. Era o que o usuario mandou print.
+  //
+  // Agora so as acoes que realmente mudam de fase mexem na geometria.
+  const action = payload && payload.action
+  const isBoot = action === 'boot'
+  const isPresentable =
+    action === 'playback-ready' || action === 'hide-loading' || action === 'playback'
+  const wantsFull = isBoot || (!isPresentable && loadingShell)
+  if (wantsFull !== loadingShell) {
+    loadingShell = wantsFull
+    lastAppliedBoundsKey = ''
+    applyOverlayLayout()
+  }
   try {
     overlayWin.webContents.send('player:overlay-ui', payload)
   } catch {
@@ -401,4 +445,5 @@ module.exports = {
   relayoutToParent,
   setListPanelOpen,
   setIgnoreMouse,
+  getFullscreenHint,
 }

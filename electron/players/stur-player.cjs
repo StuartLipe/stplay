@@ -14,14 +14,17 @@ const { net: electronNet } = require('electron')
 const { findSturMpv } = require('../find-player.cjs')
 const sturProxy = require('../stur-ffmpeg-proxy.cjs')
 const { localPlayUrl, resolveRedirectUrl } = require('../stream-proxy.cjs')
+const normalizer = require('./hls-normalizer.cjs')
 const { vodUrlVariants } = require('./vod-url-variants.cjs')
 const {
   shouldPreResolveRedirect,
   shouldTryHttpFallback,
-  liveEdgeSeekArgs,
+  loadModeOrder,
   liveStopWaitMs,
   liveConnReleaseMs,
-  liveStreamLavfO,
+  liveDemuxerLavfO,
+  liveStartIndex,
+  networkTimeoutSecs,
 } = require('./live-load-policy.cjs')
 const { profileFor, diffProfile, commitApplied } = require('./playback-profile.cjs')
 const hwndHelper = require('./hwnd-helper.cjs')
@@ -61,6 +64,7 @@ const winApi =
           GetWindowLongPtrW: user32.func('intptr __stdcall GetWindowLongPtrW(intptr, int)'),
           GetParent: user32.func('intptr __stdcall GetParent(intptr)'),
           EnableWindow: user32.func('bool __stdcall EnableWindow(intptr, bool)'),
+          IsWindowVisible: user32.func('bool __stdcall IsWindowVisible(intptr)'),
           MoveWindow: user32.func('bool __stdcall MoveWindow(intptr, int, int, int, int, bool)'),
           ShowWindow: user32.func('bool __stdcall ShowWindow(intptr, int)'),
           SetWindowPos: user32.func('bool __stdcall SetWindowPos(intptr, intptr, int, int, int, int, uint32)'),
@@ -107,10 +111,111 @@ let userPausedLive = false
 // continuava "tocando" com o quadro congelado.
 let userPausedVod = false
 // Tempo sem avanço de `time-pos` antes de considerar o live travado.
-// 12s era curto demais: canais com buffer grande ficavam sem avanço por 15s+
-// e o mpv fazia reload desnecessário. 30s cobre a maioria dos casos sem
-// deixar o usuário esperando demais num canal realmente travado.
-const LIVE_STALL_MS = 30000
+//
+// calibração: o canal publica um segmento a cada 10s (TARGETDURATION=10), e
+// entre um segmento e outro o `time-pos` fica parado por construção. Qualquer
+// limiar menor que o intervalo de publicação mata canais vivos. A história
+// deste número registra duas vezes em que isso aconteceu:
+//
+//   12000 -> 30000 : subiu achando que cobria "canal lento", e o log continuou
+//                    mostrando o mesmo congelamento (ms: 12070 vs ms: 30524).
+//   6000            : abaixo do TARGETDURATION. Disparam 3.6s antes do segmento
+//                    Due, e o sintoma vira o ciclo "trava -> carrega -> volta".
+//
+// 20s dá 2x de folga sobre o intervalo de publicação, e ainda corta o pior caso
+// de 60s pela metade. Os dois limites vivem juntos com
+// `LIVE_SILENCE_FULL_CACHE_SECS`, que impede o disparo quando o buffer está
+// cheio — porque aí o playhead na borda não é defeito, é live.
+const LIVE_STALL_MS = 20000
+
+/**
+ * Quantas vezes tentar recuperar antes de desistir. 1, de propósito.
+ *
+ * A ordem antiga era:
+ *   1º disparo -> `set_property pause false`  (no-op: o stream não está pausado)
+ *   2º disparo -> softReloadLive() no MESMO processo
+ *
+ * O no-op custava um ciclo inteiro de espera, e o soft reload no mesmo processo
+ * é justamente a operação que não funciona (ver `softReloadLive`). Agora a
+ * primeira constatação já mata o mpv e reabre, porque reabrir com socket novo é
+ * a única coisa que conserta.
+ */
+const LIVE_STALL_MAX_RECOVER = 1
+
+/**
+ * Detecção de SILÊNCIO — a mais importante das três, e a que não existia.
+ *
+ * `time-pos` é o SINTOMA. O demuxer estar bloqueado num socket morto é a CAUSA,
+ * e ele se anuncia muito antes: `demuxer-cache-time` para de crescer.
+ *
+ * Medido no congelamento real: `demuxer-cache-time` congelado, `pause=no`,
+ * `paused-for-cache=false`, `eof-reached=false`, e a conexão TCP do processo em
+ * `Established` com 0 bytes/s. Três sinais de "parado" que valem exatamente zero
+ * para o `time-pos`, e `paused-for-cache` é justamente a property que o
+ * perfil antigo desligava.
+ *
+ * Com buffer de 30s, exigir 5s sem crescimento de cache é folgado: mesmo num
+ * canal parado de verdade, cache-pause segura a posição e o buffer não enche.
+ * O que estamos olhando é "o demuxer parou de COMER", não "não tem vídeo".
+ * 5s parado é curto demais para declarar, e curto o bastante para o usuário não
+ * perceber a diferença.
+ */
+const LIVE_SILENCE_MS = 20000
+
+/**
+ * Acima deste buffer congelado, o video esta PRONTO e o problema nao e rede.
+ *
+ * O log mediu 9.88s de video parado por 19.4s de relogio. Havia material
+ * pronto e ninguem consumindo. Matar o processo nesse caso e pior do que nao
+ * fazer nada: joga fora o buffer, reabre a conexao e recomeca o ciclo de 20s.
+ *
+ * 3s e folgado para separar os dois: canal de verdade sem dados drena o buffer
+ * ate zero, e sobra video pronto quando o problema e apresentacao.
+ */
+const LIVE_PRESENTABLE_CACHE_SECS = 3
+/**
+ * Avanco MINIMO do playhead para contar como tempo andando.
+ *
+ * O 	ime-pos do mpv tem ruido de float: oscila nos ultimos digitos mesmo
+ * parado. Comparar por !== media jitter, nao avanco, e o relogio de stall
+ * nunca crescia. Medido: 60s congelados em 26.399667 com 	imePosParadoMs travado
+ * em ~1,8s, sem o detector perceber.
+ *
+ * 0,15s esta bem abaixo de qualquer avanco real (o painel publica a cada ~10s)
+ * e bem acima do ruido.
+ */
+const LIVE_TIME_POS_MIN_STEP = 0.15
+
+/**
+ * Buffer cheio + playback parado NÃO é congelamento — é a borda viva.
+ *
+ * O log do primeiro teste com este sensor mediu, e os dois números contam a
+ * história inteira:
+ *
+ *   cacheTime: 58.813745   timePos: 58.824838   timePosMs: 5234
+ *
+ * `time-pos` e `demuxer-cache-time` são IGUAIS. O demuxer leu a janela HLS
+ * inteira e o playhead está no fim dela — ou seja, grudado na borda, com zero
+ * de folga, esperando o próximo segmento. Isso é o comportamento CORRETO de um
+ * player de live, não uma falha.
+ *
+ * E o canal publica um segmento a cada 10s (TARGETDURATION=10). O primeiro
+ * quadro foi 03:49:36.342 e o "congelamento" foi declarado 03:49:49.997:
+ * 13.6s depois. Com folga de 5s, o detector disparou 3.6s ANTES do segmento
+ * 다음 ser Due.
+ *
+ * Erro do mesmo tipo que o do network-timeout: um limiar calibrado sem olhar o
+ * intervalo de publicação da origem. Um canal vivo é morto por esse número.
+ *
+ * Consequência: buffer cheio NUNCA reinicia o processo. Quem decide é o
+ * `cache-pause` do mpv, que pausa e reaninha, e o usuário vê o indicador de
+ * buffering por 1-3s enquanto o segmento chega. Isso é o comportamento normal
+ * de live e é o que "suavidade" quer dizer aqui.
+ *
+ * Só buffer VAZIO e parado é problema de rede, e aí reiniciar o processo é o
+ * remédio certo.
+ */
+const LIVE_SILENCE_FULL_CACHE_SECS = 10
 // `ensureMpv` em voo — ver isBusy().
 let starting = false
 /** Após 1º frame: evita relayout/buffer espúrio (ao vivo e VOD). */
@@ -188,6 +293,8 @@ let sourceUrl = null
  * para lembrar o canal original).
  */
 let livePlayUrl = null
+/** URL do PAINEL em live, separada da URL resolvida. O reload parte daqui. */
+let livePanelUrl = null
 let propertiesObserved = false
 /** @type {Promise<boolean> | null} */
 let ensurePromise = null
@@ -426,6 +533,11 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
   if (liveMode) {
     lastLiveTimePosAt = 0
     liveStallRecoverCount = 0
+    // Zera o relógio de silêncio pelo mesmo motivo: no zape os dois ficam com
+    // o valor do canal ANTERIOR, e o detector dispararia antes de o canal novo
+    // ter chance de encher o buffer de 30s.
+    lastCacheTime = -1
+    lastCacheTimeAt = 0
   }
 
   // Descoberta de rede e demolicao local sao INDEPENDENTES, entao rodam juntas.
@@ -448,17 +560,17 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
     const hadLiveFile = liveMode && fileLoaded
     if (hadLiveFile) {
       releasingLiveSlot = true
-      // Sem reconnect o socket cai; senao a conta de 1 tela ainda ve o canal antigo.
-      const releaseLavfO = liveStreamLavfO(false)
-      const releaseRes = await sendIpc(['set_property', 'stream-lavf-o', releaseLavfO])
-      // O memo do perfil precisa saber disso. Esta escrita muda a property FORA
-      // do perfil, e sem o update o memo continuaria affirming que
-      // `stream-lavf-o` esta com reconnect=1 (valor da live anterior). Aí o
-      // diff do perfil pularia o comando por "ja esta aplicado" e o canal
-      // abriria com reconnect=0 — que e exatamente o modo que segura o socket
-      // velho e ocupa a unica tela. Sintoma: alguns canais nao abrem de jeito
-      // nenhum depois de um zape, sem erro no log.
-      if (releaseRes.ok !== false) appliedProfile.set('stream-lavf-o', releaseLavfO)
+      // Nao escreve mais `stream-lavf-o` aqui. A ideia original era soltar o
+      // socket velho para a conta de 1 tela ver o canal novo, mas essa property
+      // NAO aceita a option: `reconnect` e do AVFormatContext, e o manual do
+      // mpv diz que `stream-lavf-o` descarta option desconhecida "silently".
+      // O comando voltava `success` e nada acontecia — e o memo do perfil era
+      // atualizado com um valor que nunca teve efeito, o que ainda por cima
+      // fazia o diff seguinte pular o reenvio por "ja esta aplicado".
+      //
+      // O que solta o slot e o `stop` abaixo: fecha o demuxer, o SO larga o
+      // socket, e o end-file + os 400ms de respiro dao a origem tempo de
+      // contar a tela como livre.
       log.info('stur', 'live slot release', { stopWait: liveStopWaitMs(), extra: liveConnReleaseMs() })
     }
     await sendIpc(['stop'])
@@ -493,7 +605,26 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
     }
   }
 
-  if (mode === 'http') {
+  if (mode === 'normalize') {
+    // Playlist canonica por cima do painel. O painel nao publica HLS
+    // canonico (medido: 24 respostas, 24 conjuntos de URL, zero sobreposicao), e
+    // o demuxer HLS do ffmpeg identifica segmento pelo numero de sequencia — por
+    // isso ele para de buscar e a imagem congela com `buffer 100%`.
+    // Justificativa completa e medicao em `live-load-policy.cjs`.
+    try {
+      playUrl = await normalizer.canonicalUrl(url)
+    } catch (error) {
+      log.warn('stur', 'normalizador indisponivel', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      await releaseP
+      return null
+    }
+    if (gen !== loadGeneration) {
+      await releaseP
+      return null
+    }
+  } else if (mode === 'http') {
     try {
       playUrl = await localPlayUrl(url)
     } catch (error) {
@@ -571,6 +702,14 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
   // Em live, esta e a URL que o mpv esta realmente recebendo — inclusive quando
   // a preflight desviou para o .ts. Registrar aqui e o unico ponto confiavel.
   if (liveMode) livePlayUrl = playUrl
+  // A URL do PAINEL, separada da resolvida. O reload tem que partir desta.
+  //
+  // Recarregar a partir de `livePlayUrl` alimentava o normalizador com a propria
+  // saida: ele tratava a propria saida como painel e embrulhava de novo, uma
+  // camada por recarga. Medido: `cacheTime=91143.696522`, `timePos=0`, e a URL
+  // do reload era `http://127.0.0.1:PORT/m/aHR0cDovLzIyMDhhaHNn...` (o
+  // base64 do proprio base64).
+  if (liveMode && /^https?:\/\/(?!127\.0\.0\.1|localhost)/i.test(url)) livePanelUrl = url
   const res = await sendIpc(['loadfile', playUrl, 'replace'])
   releasingLiveSlot = false
   if (!res.ok) {
@@ -649,6 +788,27 @@ function armLoadWatchdog(gen = loadGeneration) {
     }
 
     if (fileLoadedAt > 0 && Date.now() - fileLoadedAt > (liveMode ? 15000 : 6000)) {
+      if (liveMode) {
+        // Live NAO ganha quadro falso. Esta era a linha que transformava um
+        // canal sem conteudo em um canal "funcionando": onFirstFrame() emite
+        // playing, marca livePlaybackReady e mostra a UI de video. O
+        // usuario via os controles, o titulo do canal e uma tela preta —
+        // precisamente a segunda captura.
+        //
+        // Em live, o quadro verdadeiro vem do mpv ou nao vem. Se chegou ate
+        // aqui sem ele, o manifesto abriu e nao entregou segmento, e o certo e
+        // contar a tentativa como má e ir para a recuperacao, que sabe
+        // reabrir e — no fim — declarar "indisponivel".
+        liveUnhealthyLoads += 1
+        log.warn('stur', 'live sem quadro apos watchdog', {
+          tentativas: liveUnhealthyLoads,
+          max: LIVE_MAX_UNHEALTHY_LOADS,
+          url: (livePlayUrl || sourceUrl || '').slice(0, 100),
+        })
+        waitingFirstFrame = false
+        void recoverLiveStall('sem primeiro quadro')
+        return
+      }
       log.warn('stur', 'forcing first frame after watchdog')
       void sendIpc(['set_property', 'pause', false])
       onFirstFrame()
@@ -832,15 +992,45 @@ function scaleFactor() {
   }
 }
 
-function findMpvHwnd(pid) {
+/**
+ * Procura a janela de video do mpv.
+ *
+ * O `FindWindowExW(0, ...)` original so enxergava janelas TOP-LEVEL. Com
+ * `--wid=<pai>` isso passou a ser insuficiente: o manual diz que o mpv "creates
+ * its own window and sets the wid window as parent", entao a janela nasce como
+ * FILHA da janela do Electron e `FindWindowExW(0, ...)` nunca a encontrava.
+ * Medido: `ipc/adopt failed { ipcOk: true, adopted: false }` em toda abertura
+ * de canal, com o mpv vivo e o IPC conectado — o HWND existia, a busca que nao
+ * via.
+ *
+ * Agora varre os filhos do pai primeiro (caminho ancorado) e so depois cai no
+ * top-level (caminho sem `--wid`, onde a janela nasce solta).
+ *
+ * @param {number} pid
+ * @param {number} [parent] HWND do pai, quando conhecido
+ */
+function findMpvHwnd(pid, parent) {
   if (!winApi) return 0
+  const matches = (hwnd) => {
+    const pidOut = [0]
+    winApi.GetWindowThreadProcessId(hwnd, pidOut)
+    return pidOut[0] === pid ? Number(hwnd) : 0
+  }
+  if (parent) {
+    let child = 0
+    for (let i = 0; i < 64; i++) {
+      child = Number(winApi.FindWindowExW(parent, child, 'mpv', null))
+      if (!child) break
+      const hit = matches(child)
+      if (hit) return hit
+    }
+  }
   let cur = 0
   for (let i = 0; i < 64; i++) {
     cur = Number(winApi.FindWindowExW(0, cur, 'mpv', null))
     if (!cur) break
-    const pidOut = [0]
-    winApi.GetWindowThreadProcessId(cur, pidOut)
-    if (pidOut[0] === pid) return cur
+    const hit = matches(cur)
+    if (hit) return hit
   }
   return 0
 }
@@ -858,10 +1048,24 @@ function applyMpvWindowStyle(hwnd, show) {
 }
 
 function adoptMpvWindow(pid, parent) {
-  const hwnd = findMpvHwnd(pid)
+  const hwnd = findMpvHwnd(pid, parent)
   if (!hwnd) return 0
+  // NAO FAZ SetParent AQUI.
+  //
+  // Com `--wid=<pai>` na linha de comando, o mpv ja criou a janela com o pai
+  // certo — medido: `hwnd=0x14061E parent=0x907D4` batendo com a janela do
+  // Electron. O `SetParent` que existia aqui era o reparenting pos-facto do
+  // caminho antigo, e era ele que deixava o `vo=gpu` com um swapchain D3D11
+  // apontando para uma janela que ja tinha sido destruida: o demuxer seguia
+  // enchendo buffer e o quadro nunca chegava na tela.
+  //
+  // `parent` continua na assinatura porque, sem `--wid` (fallback), ainda é
+  // preciso ancorar.
+  const realParent = Number(winApi.GetParent(hwnd))
+  if (parent && realParent !== parent) {
+    winApi.SetParent(hwnd, parent)
+  }
   applyMpvWindowStyle(hwnd, false)
-  winApi.SetParent(hwnd, parent)
   winApi.EnableWindow(hwnd, false)
   winApi.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED)
   winApi.ShowWindow(hwnd, SW_HIDE)
@@ -895,7 +1099,12 @@ function ensureEmbedded(show) {
   }
   if (!parentHwnd) return false
   applyMpvWindowStyle(mpvHwnd, show)
-  winApi.SetParent(mpvHwnd, parentHwnd)
+  // Rede de seguranca, nao o caminho normal: com `--wid` o pai ja esta certo e
+  // esta comparacao nao executa nada. Ela existe para o fallback sem `--wid`,
+  // onde a janela do mpv ainda pode ter nascido top-level.
+  if (Number(winApi.GetParent(mpvHwnd)) !== parentHwnd) {
+    winApi.SetParent(mpvHwnd, parentHwnd)
+  }
   winApi.SetWindowPos(mpvHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED)
   return true
 }
@@ -922,6 +1131,34 @@ function hideVideo() {
 function isMpvDetached() {
   if (!mpvHwnd || !winApi || !parentHwnd) return false
   return Number(winApi.GetParent(mpvHwnd)) !== parentHwnd
+}
+
+/**
+ * A superfície do vídeo está perdida?
+ *
+ * `isMpvDetached()` sozinho era insuficiente, e o snapshot do app travado prova
+ * por quê: o HWND do mpv continuava com o pai CERTO — parentado no overlay, que
+ * era o que `ensureEmbedded` tinha reancorado — e mesmo assim o vídeo estava
+ * fora da tela, em -32000, com o overlay `iconic`. `GetParent()` dizia " tudo
+ * certo" enquanto o usuário via um quadro congelado.
+ *
+ * Então a checagem é: pai errado, OU janela escondida, OU jogada no parking de
+ * -32000. Os três são a mesma coisa na prática — ninguém está vendo o vídeo.
+ */
+function isSurfaceLost() {
+  if (!mpvHwnd || !winApi) return false
+  if (isMpvDetached()) return true
+  let visible = false
+  try {
+    visible = Boolean(winApi.IsWindowVisible(mpvHwnd))
+  } catch {
+    visible = true
+  }
+  if (!visible) return true
+  if (videoHidden) return true
+  // `hideVideo()` estaciona em -32000 e marca videoHidden. A coordenada é a
+  // assinatura: nenhum outro caminho do app escreve -32000.
+  return lastPlacedKey.startsWith('-32000,')
 }
 
 function showVideo(bounds) {
@@ -996,6 +1233,7 @@ function killMpv(opts = {}) {
   }
   sourceUrl = null
   livePlayUrl = null
+  livePanelUrl = null
   firstFrameBase = null
   cachePercent = 0
   knownDuration = 0
@@ -1010,9 +1248,13 @@ function killMpv(opts = {}) {
   clearLiveShowTimer()
   liveMode = false
   lastLiveTimePos = -1
+  lastLiveTimePosAtPos = -1
   lastLiveTimePosAt = 0
+  lastCacheTime = -1
+  lastCacheTimeAt = 0
   liveStallRecoverBusy = false
   liveStallRecoverCount = 0
+  liveUnhealthyLoads = 0
   for (const [, cb] of pendingRequests) {
     try {
       cb({ error: 'killed' })
@@ -1087,8 +1329,25 @@ function connectIpcOnce() {
         }
       })
       socket.on('close', () => {
-        if (ipcSocket === socket) ipcSocket = null
-        if (running) emitFailed('STUR IPC disconnected')
+        // Só um socket que AINDA É o socket ativo pode derrubar a reprodução.
+        //
+        // `socket.destroy()` é assíncrono: o evento `close` chega depois. No
+        // caminho de recuperação de live o processo é morto e reaberto na
+        // sequencia, e o `start()` já voltou `running = true` quando o `close`
+        // do socket VELHO chega. O guard antigo era só `if (running)`, então o
+        // socket da geração anterior derrubava a reprodução que já estava
+        // nascendo. O log mostra o crime com precisão de milissegundo:
+        //
+        //   03:46:51.862  live reload com processo novo
+        //   03:46:51.878  start
+        //   03:46:51.895  failed  { reason: 'STUR IPC disconnected' }   <- 33ms
+        //
+        // `ipcSocket === socket` é a pergunta certa: quando o socket novo já
+        // conectou, o `ipcSocket` global é outro, e o `close` antigo não tem
+        // autoridade nenhuma sobre a reprodução atual.
+        const isCurrent = ipcSocket === socket
+        if (isCurrent) ipcSocket = null
+        if (running && isCurrent) emitFailed('STUR IPC disconnected')
       })
       resolve(true)
     })
@@ -1168,6 +1427,8 @@ function syncOverlayLayout() {
 let pausedForCache = false
 /** Último time-pos visto (detecção de stall no ao vivo). */
 let lastLiveTimePos = -1
+/** Último `time-pos` que realmente contou como avanço (ver LIVE_TIME_POS_MIN_STEP). */
+let lastLiveTimePosAtPos = -1
 let lastLiveTimePosAt = 0
 let liveStallRecoverBusy = false
 let liveStallRecoverCount = 0
@@ -1175,15 +1436,177 @@ let liveStallRecoverCount = 0
 let pausedForCacheSince = 0
 let softReloadBusy = false
 
+/**
+ * Tentativas de reabertura do MESMO canal sem o canal ficar saudável.
+ *
+ * O log mostrou o buraco: o app estava em `709056`, cujo manifesto volta 200 com
+ * UM segmento e `MEDIA-SEQUENCE: 0` — canal morto que ainda não começou. O
+ * `.ts` dele abre e fica pendurado entregando 2s de vídeo em 22s. Nenhum dos
+ * dois produz vídeo, e nenhum dos dois dá `end-file error`, então o watchdog de
+ * stall fazia o que sabia: reiniciava o processo. Para sempre. O usuário via a
+ * bolinha de "carregando" parada, exatamente o sintoma reportado — e a UI nunca
+ * tinha como sair disso, porque o estado nunca chegava em `failed`.
+ *
+ * Agora cada reabertura que não entrega um buffer real conta um fracasso, e no
+ * terceiro o app desiste e mostra "canal indisponível". Recuperação serve para
+ * um socket que caiu; não serve para um canal que não existe.
+ */
+let liveUnhealthyLoads = 0
+
+/**
+ * Buffer que um canal precisa ter para ser considerado saudável.
+ *
+ * Abaixo disso, o primeiro quadro que apareceu foi de um buffer de 2s que nunca
+ * vai encher — o suficiente para o mpv declarar `file-loaded` e enganar o
+ * `onFirstFrame`, e insuficiente para assistir.
+ */
+const LIVE_HEALTHY_CACHE_SECS = 5
+
+/** Quantas aberturas unhealthy o canal aguenta antes de virar "indisponível". */
+const LIVE_MAX_UNHEALTHY_LOADS = 3
+
+/** Registro a saúde do canal assim que o primeiro quadro aparece. */
+function noteLiveLoadHealth() {
+  if (!liveMode) return
+  // -1 = ainda nao chegou leitura de cache. O log provou que o guess aqui
+  // custa caro: canal subiu sem buffer utilizavel { cacheTime: -1 } num
+  // canal saudavel, com o contador subindo a cada zape ate o app declarar
+  // "canal indisponivel" com o canal no ar. Nao-saber nao e evidencia contra.
+  if (lastCacheTime < 0) return
+  const healthy = lastCacheTime >= LIVE_HEALTHY_CACHE_SECS
+  if (healthy) liveUnhealthyLoads = 0
+  else liveUnhealthyLoads += 1
+  if (!healthy) {
+    log.warn('stur', 'canal subiu sem buffer utilizavel', {
+      cacheTime: lastCacheTime,
+      tentativa: liveUnhealthyLoads,
+      max: LIVE_MAX_UNHEALTHY_LOADS,
+    })
+  }
+}
+
+/**
+ * Detecção de SILÊNCIO: último `demuxer-cache-time` e quando mudou.
+ *
+ * É o sensor que pega o congelamento real. O `time-pos` é o sintoma, e para
+ * depois. No congelamento medido: `demuxer-cache-time` congelado, `pause=no`,
+ * `paused-for-cache=false`, `eof-reached=false`, e a conexão TCP do processo em
+ * `Established` com 0 bytes/s. Três sinais de "parado" que valem zero para o
+ * `time-pos` — e `paused-for-cache`, que diria exatamente o que houve, estava
+ * desligada no perfil antigo.
+ */
+let lastCacheTime = -1
+let lastCacheTimeAt = 0
+
+function noteLiveCacheTime(secs) {
+  if (!liveMode || typeof secs !== 'number') return
+  if (secs !== lastCacheTime) {
+    lastCacheTime = secs
+    lastCacheTimeAt = Date.now()
+  }
+}
+
+/** O demuxer está bloqueado num socket que não entrega nada? */
+function isLiveDemuxerSilent() {
+  if (!liveMode || !livePlaybackReady || userPausedLive) return false
+  if (!fileLoaded || pausedForCache) return false
+  if (lastCacheTimeAt === 0) return false
+  return Date.now() - lastCacheTimeAt > LIVE_SILENCE_MS
+}
+
+/**
+ * Na borda viva, o playhead anda mesmo com o relogio do demuxer parado.
+ *
+ * Este e o discriminador que faltava, e ele separa os dois casos que antes
+ * eram tratados como o mesmo:
+ *
+ *   - BORDA VIVA: o demuxer esta no fim da janela esperando o proximo segmento.
+ *     `time-pos` avanca. O canal esta saudavel, e matar o processo aqui produz o
+ *     ciclo "trava -> carrega -> volta -> trava".
+ *   - SOCKET MORTO: `time-pos` parado E relogio do demuxer parado. O demuxer
+ *     esta bloqueado numa conexao que nao entrega byte. So uma conexao nova
+ *     resolve; reancorar a superficie nao resolve nada.
+ *
+ * Medido no congelamento real: o mpv com `Established` para 186.233.119.14:80 e
+ * 0 bytes/s, enquanto requisicao nova na mesma URL devolvia HTTP 200. Esse e
+ * exatamente o socket que produz "buffer cheio e tempo parado".
+ */
+function isLiveEdgeAdvancing() {
+  if (lastLiveTimePosAt === 0) return false
+  return Date.now() - lastLiveTimePosAt <= LIVE_STALL_MS
+}
+
+/**
+ * O demuxer travou E o playhead travou: conexao morta, precisa de socket novo.
+ *
+ * Antes disto nao existia. Os dois guards do raise timer faziam
+ * `if (lastCacheTime >= LIVE_SILENCE_FULL_CACHE_SECS) return` — e como a janela
+ * deste painel tem 6 segmentos de 11s (~60s), `lastCacheTime` ficava
+ * permanentemente acima de 10. Ou seja: o watchdog era NAO exercido neste
+ * painel, e um canal com socket morto ficava travado indefinido com o log
+ * calmo. O sintoma era "travou e nao faz nada".
+ */
+function isLiveUpstreamDead() {
+  if (!isLiveDemuxerSilent()) return false
+  return !isLiveEdgeAdvancing()
+}
+
 function noteLiveTimePos(pos) {
   if (!liveMode || typeof pos !== 'number') return
-  if (pos !== lastLiveTimePos) {
-    lastLiveTimePos = pos
+  lastLiveTimePos = pos
+  // O AVANCO TEM DE SER REAL, NAO QUALQUER DIFERENCA.
+  //
+  // A comparacao anterior era `pos !== lastLiveTimePos`. O `time-pos` do mpv tem
+  // ruido de float: ele oscila nos ultimos digitos mesmo com o playhead parado,
+  // entao `!==` era quase sempre verdadeiro e `lastLiveTimePosAt` se reatualizava
+  // sem parar. Resultado: o relogio de "ha quanto tempo o tempo nao anda" media
+  // JITTER, e nunca crescia.
+  //
+  // Medido, 60 segundos de congelamento que o detector nao viu:
+  //   11:19:22  timePos=26.399667  timePosParadoMs=1733
+  //   11:19:37  timePos=26.399667  timePosParadoMs=1767
+  //   11:19:52  timePos=26.399667  timePosParadoMs=1804
+  //   11:20:07  timePos=26.399667  timePosParadoMs=1838
+  //   11:20:22  timePos=26.399667  timePosParadoMs=1875
+  //
+  // O tempo estava parado no MESMO valor por um minuto, e a idade do relogio
+  // ficava travada em ~1,8s. `isLiveEdgeAdvancing()` respondia "esta avancando" e
+  // o `isLiveUpstreamDead()` nunca armava. So que: um congelamento de 60s
+  // passou batendo, e se recuperou sozinho.
+  //
+  // Agora o relogio so anda quando o playhead anda de verdade. O piso de 0,15s
+  // esta bem abaixo de qualquer avanco real (o painel publica a cada ~10s) e bem
+  // acima do ruido do float.
+  if (Math.abs(pos - lastLiveTimePosAtPos) >= LIVE_TIME_POS_MIN_STEP) {
+    lastLiveTimePosAtPos = pos
     lastLiveTimePosAt = Date.now()
     liveStallRecoverCount = 0
   }
 }
 
+/**
+ * Reabrir o live MATANDO o processo.
+ *
+ * Este é o ponto que decide se o congelamento some. A versão anterior aqui era
+ * `openUrl()` no mesmo processo, e a medição mostra por que ela nunca curou:
+ *
+ *   O congelamento é um socket morto. Não é o mpv, não é a URL, não é o demuxer:
+ *   é a conexão TCP que o processo segurava, em `Established`, com 0 bytes/s,
+ *   apontando para uma instância de stream que a origem já tinha descartado.
+ *
+ *   `loadfile` no MESMO processo não abre socket novo. O ffmpeg reaproveita o
+ *   keep-alive e manda o GET novo pelo mesmo tubo morto. Daí o ciclo de 72s
+ *   se repetindo para sempre: 10s de vídeo, 60s de espera, reload, 10s de
+ *   vídeo — e o socket continuava exatamente o mesmo.
+ *
+ *   `reconnect=1` não salva: reconnect só dispara quando a conexão QUEBRA. Um
+ *   socket aberto que não entrega nada nunca quebra, nunca dá timeout, nunca
+ *   vira `end-file error`. Fica ali, mudo, e o app não recebe evento nenhum.
+ *
+ * Matar o processo é o que fecha a conexão: o SO entrega o socket morto, a
+ * origem libera a tela, e o mpv novo abre uma conexão nova — que medi rodando
+ * 80s seguidos contra o mesmo canal.
+ */
 async function softReloadLive() {
   if (softReloadBusy || !running || !liveMode || !sourceUrl || !mainWindow || mainWindow.isDestroyed()) {
     return false
@@ -1191,35 +1614,97 @@ async function softReloadLive() {
   softReloadBusy = true
   pausedForCacheSince = 0
   liveStallRecoverCount = 0
+  // URL do PAINEL primeiro: livePlayUrl e a saida do normalizador, e normalizar
+  // ela de novo encadeia saidas (medido: cache de 91.143s com time-pos 0).
+  const url = livePanelUrl || livePlayUrl || sourceUrl
+  const win = mainWindow
+  const bounds = lastBounds
   try {
-    // A variante que estava TOCANDO, nao a original. Recarregar a original
-    // devolvia o canal para a URL que a preflight ja tinha reprovado.
-    const url = livePlayUrl || sourceUrl
-    const bounds = lastBounds
-    log.warn('stur', 'soft reload live', {
-      url: url.slice(0, 100),
-      original: url === sourceUrl ? undefined : sourceUrl.slice(0, 100),
-    })
-    nextLoadSoft = true
-    bumpLoadGeneration()
-    const opened = await openUrl(mainWindow, url, 0, bounds, { live: true })
-    return Boolean(opened)
+    log.warn('stur', 'live reload com processo novo', { url: url.slice(0, 100) })
+    // Matar ANTES de reabrir, e ESPERAR a morte. `killMpv` devolve a promise do
+    // `forceKillProc` justamente para isso.
+    //
+    // Sem o await, o processo velho continuava vivo enquanto o novo nascia, e o
+    // `ensureMpv` do novo batia no limite de 50 tentativas do `connectIpc`:
+    //   03:46:51.878  start
+    //   03:47:01.914  ipc/adopt failed   <- 10s depois, 50 x 200ms
+    //   03:47:01.914  start failed: ensureMpv not ready
+    // O mpv velho segurando o named pipe e o HWND pai faz o novo nunca abrir o
+    // pipe dele. Isso somava ao bug do `close` acima e transformava a
+    // recuperação em "não foi possível reproduzir o vídeo".
+    await killMpv()
+    nextLoadSoft = false
+    const opened = await start(win, url, 0, bounds, { live: true })
+    return Boolean(opened && opened.ok)
   } finally {
     softReloadBusy = false
   }
 }
 
-async function recoverLiveStall() {
+/**
+ * Recuperação de live travado.
+ *
+ * `LIVE_STALL_MAX_RECOVER = 1`: a primeira constatação já reabre. A ordem
+ * antiga era `set_property pause false` no primeiro disparo — no-op num stream
+ * que não está pausado, custando um ciclo de espera inteiro antes de qualquer
+ * ação real.
+ *
+ * @param {string} reason o que disparou: 'sem time-pos' ou 'demuxer silencioso'
+ */
+async function recoverLiveStall(reason) {
   if (liveStallRecoverBusy || softReloadBusy || !running || !liveMode || !livePlaybackReady || userPausedLive) {
     return
   }
   if (!sourceUrl || pausedForCache) return
+
+  // Teto de tentativas. Um canal que subiu sem buffer utilizável duas vezes
+  // followed não vai melhorar na terceira: está fora do ar. Reabrir o processo
+  // indefinidamente é o que produzia a bolinha parada em "carregando" pra
+  // sempre, sem nunca chegar em `failed`.
+  if (liveUnhealthyLoads >= LIVE_MAX_UNHEALTHY_LOADS) {
+    log.warn('stur', 'desistindo do canal', {
+      tentativas: liveUnhealthyLoads,
+      url: (livePlayUrl || sourceUrl || '').slice(0, 100),
+    })
+    emitFailed('Canal indisponível no momento (offline ou ainda não começou)')
+    killMpv()
+    return
+  }
+
   liveStallRecoverBusy = true
   liveStallRecoverCount += 1
   lastLiveTimePosAt = Date.now()
+  lastCacheTimeAt = Date.now()
   try {
-    log.warn('stur', 'live stall recover', { count: liveStallRecoverCount })
-    if (liveStallRecoverCount >= 2) {
+    log.warn('stur', 'live stall recover', { count: liveStallRecoverCount, reason })
+
+    // COM VIDEO BUFFERIZADO, MATAR O PROCESSO NAO E A RESPOSTA.
+    //
+    // O log mediu o caso: live sem dados com o buffer vazio { cacheTime: 9.88,
+    // timePos: 9.96, timePosMs: 19407 }. Nove segundos e meio de video
+    // prontos, parados ha dezenove, com o demuxer esperando e o decoder parado.
+    // Nao faltava rede: faltava alguem puxar os quadros. Matar o mpv joga
+    // fora esses 9.88s, reabre a conexao, perde a janela de segmentos e repete
+    // o ciclo de 20s — que e exatamente o sintoma de rodar 20 segundos e
+    // recomecar.
+    //
+    // Quem consome(video bufferizado) e o VO. A resposta certa e reancorar a
+    // superficie e cutucar o presentation, que e barato e reversivel.
+    if (lastCacheTime >= LIVE_PRESENTABLE_CACHE_SECS) {
+      log.info('stur', 'reapresentando: ha video bufferizado, nao e rede', {
+        cacheTime: lastCacheTime,
+      })
+      if (lastBounds) {
+        lastPlacedKey = ''
+        videoHidden = true
+        showVideo(lastBounds)
+      }
+      await sendIpc(['set_property', 'pause', false])
+      return
+    }
+
+    // Buffer vazio: aqui sim a rede nao entrega e processo novo resolve.
+    if (liveStallRecoverCount >= LIVE_STALL_MAX_RECOVER) {
       liveStallRecoverCount = 0
       await softReloadLive()
       return
@@ -1245,6 +1730,13 @@ function onFirstFrame() {
   // time-pos diferente viria, o campo ficava 0, e o guard `> 0` do raise timer
   // desligava a recuperação de stall para o resto daquela sessão.
   if (liveMode) lastLiveTimePosAt = Date.now()
+  // Mesmo relógio para o sensor de silêncio. Sem isto o `isLiveDemuxerSilent`
+  // continuaria com o carimbo do canal ANTERIOR e dispararia na hora, durante o
+  // warm-up do buffer, matando um canal que está começando.
+  if (liveMode) lastCacheTimeAt = Date.now()
+  // Julga a saúde do canal que acabou de subir. É aqui que se descobre que o
+  // `file-loaded` veio de um manifesto de 1 segmento com 2s de buffer.
+  if (liveMode) noteLiveLoadHealth()
   if (liveMode && !userPausedLive) void sendIpc(['set_property', 'pause', false])
   if (!liveMode) {
     // VOD: cache-pause no meio do filme pausava pra encher buffer — desliga após 1º frame
@@ -1335,9 +1827,12 @@ function handleIpcMessage(msg) {
     }
     if (msg.name === 'demuxer-cache-time' && typeof msg.data === 'number') {
       cacheTickSinceLoad = true
-      if (liveMode && livePlaybackReady && !pausedForCache && msg.data > 0.2) {
-        lastLiveTimePosAt = Date.now()
-      }
+      noteLiveCacheTime(msg.data)
+      // NÃO renova `lastLiveTimePosAt`. O código antigo fazia isso, e aí o
+      // "stall de time-pos" só podia disparar quando o cache TAMBÉM parava de
+      // crescer — ou seja, o detector já era um detector de silêncio
+      // disfarçado, só que com 30s de atraso. Agora os dois relógios são
+      // independentes e o log diz qual dos dois quebrou.
       if (!playbackStable) armLoadWatchdog(loadGeneration)
     }
   }
@@ -1346,7 +1841,27 @@ function handleIpcMessage(msg) {
     if (liveMode && livePlaybackReady) {
       log.info('stur', 'file-loaded live refresh', { live: true })
       lastLiveTimePosAt = Date.now()
+      lastCacheTimeAt = Date.now()
       pausedForCache = false
+      // ARMA O WATCHDOG AQUI TAMBEM. Este return desligava a unica rede de
+      // seguranca do caminho de soft-zap, e o log mediu o preco exato:
+      //
+      //   04:24:07.913  file-loaded live refresh
+      //   04:26:44        2min37s depois, nada. nem watchdog, nem stall, nem
+      //                   falha. so a tela preta com os controles
+      //
+      // O canal entregou um manifesto que abre e nao produz segmento nenhum:
+      // 709056.m3u8 voltava 200 com UM segmento e MEDIA-SEQUENCE 0. O mpv
+      // reporta file-loaded e nunca da quadro, nunca emite
+      // demuxer-cache-time e nunca da end-file. Como o ramo de zape retornava
+      // antes de armLoadWatchdog, nao sobrava timeout nenhum -- e
+      // livePlaybackReady ja vinha true do canal anterior, entao o sensor de
+      // silencio e o contador de saude, que dependem de quadro, tambem nao
+      // tinham como rodar.
+      waitingFirstFrame = true
+      firstFrameBase = null
+      fileLoadedAt = Date.now()
+      armLoadWatchdog(loadGeneration)
       void (async () => {
         await sendIpc(['set_property', 'cache-pause', false])
         await sendIpc(['set_property', 'pause', false])
@@ -1368,7 +1883,13 @@ function handleIpcMessage(msg) {
     if (!liveMode && pendingVodSeekSec > 0) {
       void applyPendingVodSeek(loadGeneration)
     } else if (liveMode) {
-      void sendIpc(['seek', ...liveEdgeSeekArgs()])
+      // SEM seek de "borda ao vivo". Era `[100, 'absolute-percent']` e medido
+      // contra o painel real ele jogava o canal ~49s PARA TRAS: `time-pos`
+      // caía de 50.9 para 1.99, porque 100% do manifesto é o segmento mais
+      // VELHO da janela, não a borda. Pior, seek reinicia o demuxer, e o manual
+      // do mpv diz que `cache-pause-initial` "also triggers when playback is
+      // restarted after seeking" — então cada abertura de canal reentrava
+      // tocando com o buffer vazio. `live_start_index=-1` já entrega a borda.
       armLiveShowSoon()
     } else {
       emit({ type: 'preview' })
@@ -1388,7 +1909,14 @@ function handleIpcMessage(msg) {
     resolveEndFileWaiters()
     if (msg.reason === 'eof') {
       if (liveMode && sourceUrl && !userPausedLive) {
-        log.warn('stur', 'live eof — soft reload')
+        // Mesmo teto: EOF de um canal que não entrega é sinal de fora do ar,
+        // não de socket que caiu. Reabrir para sempre só repete a espera.
+        if (liveUnhealthyLoads >= LIVE_MAX_UNHEALTHY_LOADS) {
+          emitFailed('Canal indisponível no momento (offline ou ainda não começou)')
+          killMpv()
+          return
+        }
+        log.warn('stur', 'live eof — reabrindo', { tentativas: liveUnhealthyLoads })
         void softReloadLive()
       } else {
         emit({ type: 'ended' })
@@ -1549,6 +2077,42 @@ async function tryFallbackLoad(url, startSec) {
   try {
     const asTs = (u) => (/\.m3u8(\?|$)/i.test(u) ? u.replace(/\.m3u8(\?|$)/i, '.ts$1') : null)
 
+    if (currentLoadMode === 'normalize') {
+      // Em live, NAO ha plano B. O `direct` neste painel nao e alternativa: e o
+      // MESMO problema que o normalizer resolve, so mais devagar.
+      //
+      // Medido: caindo para `direct` num canal cujo encoder demora, o mpv encheu
+      // 89.98s de cache e parou —
+      //
+      //   socket do demuxer morto
+      //     cacheTime=89.9846   cacheParadoMs=90631
+      //     timePos=90.030011   timePosParadoMs=20450
+      //
+      // O `timePos` colado no fim de um cache que nao cresce ha 90 segundos e a
+      // assinatura classica: ~90 segundos de tela parada. E o `ffmpeg` usa o mesmo
+      // demuxer HLS sobre a mesma playlist nao canonica, entao cai no mesmo
+      // buraco.
+      //
+      // `normalize` e o unico caminho que funciona com playlist nao canonica, e
+      // ele tambem serve bem playlist canonica (e so um intermediario a mais). Se
+      // ele falha, o canal nao presta: o certo e falhar rapido e deixar o
+      // renderer trocar o `stream_id`, que e o que o painel rotaciona.
+      if (liveMode) {
+        const info = normalizer.inspecionar(url)
+        log.warn('stur', 'live sem plano B apos o normalizador', {
+          publicados: info ? info.publicados : 0,
+          janela: info ? info.janela.length : 0,
+          motivo: info ? info.ultimaFalha : null,
+          tentativas: info ? info.falhas : 0,
+        })
+        return false
+      }
+      currentLoadMode = 'direct'
+      if (await loadStream(url, startSec, 'direct')) {
+        armLoadWatchdog(loadGeneration)
+        return true
+      }
+    }
     if (currentLoadMode === 'direct') {
       // Ao vivo: muitos painéis abrem melhor em MPEG-TS (.ts) do que em .m3u8 no mpv
       if (liveMode) {
@@ -1598,6 +2162,24 @@ async function tryFallbackLoad(url, startSec) {
 
     if (currentLoadMode === 'http') {
       if (liveMode) {
+        // O proxy virou o caminho PRIMARIO no live (`loadModeOrder`), entao
+        // precisa ter para onde cair. Antes ele era o ultimo da fila e podia
+        // simplesmente desistir; agora uma falha dele derrubaria o canal sem
+        // tentar o `direct` — o proxy viraria ponto unico de falha.
+        //
+        // O live continua preferindo o proxy (e nao o contrario), so deixa de
+        // depender dele.
+        currentLoadMode = 'direct'
+        log.info('stur', 'live fallback → direct (proxy falhou)')
+        if (await loadStream(url, startSec, 'direct')) {
+          armLoadWatchdog(loadGeneration)
+          return true
+        }
+        currentLoadMode = 'ffmpeg'
+        if (await loadStream(url, startSec, 'ffmpeg')) {
+          armLoadWatchdog(loadGeneration)
+          return true
+        }
         return false
       }
       currentLoadMode = 'ffmpeg'
@@ -1612,7 +2194,30 @@ async function tryFallbackLoad(url, startSec) {
   }
 }
 
-function buildMpvArgs(url) {
+/**
+ * Argumentos do mpv.
+ *
+ * @param {string} url
+ * @param {number} [wid] HWND do pai. Quando informado, o mpv ANCORA SOZINHO:
+ *   o manual diz que mpv always creates its own window, and sets the wid
+ *   window as parent, e que a janela will always be resized to cover the
+ *   parent window fully.
+ *
+ *   Isso substitui o caminho antigo — spawnar com --force-window=yes, achar a
+ *   janela com FindWindowEx e aplicar SetParent depois. O reparenting
+ *   pos-facto e o que quebrava: a janela nasce top-level, o o=gpu monta o
+ *   swapchain D3D11 para aquela janela, e so depois ela e reparentada. O VO
+ *   fica com um swapchain de janela que nao existe mais, e o quadro para de
+ *   chegar na tela enquanto o demuxer segue enchendo buffer.
+ *
+ *   Medido com o caminho suportado, pai = janela do Electron:
+ *     hwnd=0x14061E  parent=0x907D4  visivel=True  titulo=709057.m3u8 - mpv
+ *   O pai bate com a janela do Electron, o mpv criou a janela e setou o pai
+ *   sem intervencao. O app so posiciona com MoveWindow depois.
+ *
+ * @param {number} [options.cachePauseInitial] override de cache-pause-initial
+ */
+function buildMpvArgs(url, wid = 0) {
   let origin = ''
   const isHls = /\.m3u8(\?|$)/i.test(url || '')
   try {
@@ -1620,12 +2225,29 @@ function buildMpvArgs(url) {
   } catch {
     origin = ''
   }
+  const anchored = Number.isFinite(wid) && wid > 0
   const args = [
     `--input-ipc-server=${pipePath}`,
     '--idle=yes',
     '--keep-open=yes',
-    '--force-window=yes',
-    '--geometry=320x180+20000+20000',
+    // Com `--wid`, o mpv gerencia a propria janela e a ancora no pai, mas SOB
+    // UMA CONDIÇÃO: ele só cria a janela do VO quando há vídeo. Como o app
+    // adota a janela no spawn, ANTES de mandar o arquivo, isso travava o
+    // Adopt: medido `ipc/adopt failed { ipcOk: true, adopted: false }` e
+    // `spawn failed: ipc or adopt failed` em toda abertura de canal — o
+    // findMpvHwnd voltava 0 porque o mpv ainda não tinha janela nenhuma.
+    //
+    // O `--force-window=immediate` resolve: o manual diz que `yes` cria a janela
+    // "only after initialization", e `immediate` cria antes. O `--geometry` não
+    // entra aqui porque com wid a janela "will always be resized to cover the
+    // parent window fully".
+    //
+    // Sem wid (fallback), os dois antigos voltam: ai o mpv cria a janela
+    // top-level e precisa de tamanho inicial e de `--force-window` para abrir
+    // janela antes de haver video.
+    ...(anchored
+      ? [`--wid=${wid}`, '--force-window=immediate']
+      : ['--force-window=yes', '--geometry=320x180+20000+20000']),
     '--no-border',
     '--osc=no',
     '--osd-level=0',
@@ -1643,13 +2265,18 @@ function buildMpvArgs(url) {
     liveMode ? '--cache-secs=8' : '--cache-secs=30',
     '--volume=100',
     '--user-agent=VLC/3.0.21 LibVLC/3.0.21',
-    '--network-timeout=60',
+    // 10s no live, 60s no VOD. O valor importava: um socket aberto que não
+    // entrega byte NUNCA quebra, então reconnect não dispara e o ffmpeg não dá
+    // erro. O timeout de leitura é o único mecanismo que fecha isso, e a 60s
+    // ele segurava um minuto de tela parada antes de reagir.
+    `--network-timeout=${networkTimeoutSecs(liveMode)}`,
     '--tls-verify=no',
     '--no-terminal',
   ]
-  if (liveMode || isHls) {
-    args.push('--demuxer-lavf-o=live_start_index=-1')
-    args.push(`--stream-lavf-o=${liveStreamLavfO(true)}`)
+  if (liveMode) {
+    args.push(`--demuxer-lavf-o=${liveDemuxerLavfO(true)}`)
+  } else if (isHls) {
+    args.push(`--demuxer-lavf-o=${liveStartIndex()}`)
   }
   if (origin && !/127\.0\.0\.1/i.test(url)) args.push(`--referrer=${origin}/`)
   return args
@@ -1688,17 +2315,38 @@ async function spawnMpvCore(win, bounds) {
 
   const mpvPath = findSturMpv()
   pipePath = `\\\\.\\pipe\\stplay-stur-${process.pid}-${++pipeCounter}`
-  const args = buildMpvArgs(sourceUrl || 'http://127.0.0.1/')
+  // O pai vai NA LINHA DE COMANDO. O mpv cria a propria janela e se ancora
+  // nele; o app nao precisa reparentar nada depois.
+  const args = buildMpvArgs(sourceUrl || 'http://127.0.0.1/', parentHwnd)
 
   try {
     mpvProc = spawn(mpvPath, args, {
       cwd: path.dirname(mpvPath),
       windowsHide: true,
-      stdio: 'ignore',
+      // stderr do mpv no log. Antes era 'ignore' e o app ficava cego: quando o
+      // `--wid` parou de dar janela, o unico sintoma era `adopted: false`, que
+      // nao diz se o mpv recusou a flag, se o HWND do pai estava errado, ou se
+      // a janela so nao apareceu no prazo. O mpv escreve o motivo no stderr.
+      stdio: ['ignore', 'ignore', 'pipe'],
     })
   } catch (error) {
     return failSpawn(`spawn threw: ${error instanceof Error ? error.message : String(error)}`)
   }
+  if (mpvProc.stderr) {
+    mpvProc.stderr.setEncoding('utf8')
+    mpvProc.stderr.on('data', (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/)) {
+        const text = line.trim()
+        if (text) log.info('mpv', text)
+      }
+    })
+  }
+  log.info('stur', 'mpv argv', {
+    pid: mpvProc.pid || 0,
+    parentHwnd,
+    wid: args.find((a) => a.startsWith('--wid=')) || null,
+    forceWindow: args.find((a) => a.startsWith('--force-window=')) || null,
+  })
 
   const pid = mpvProc.pid || 0
   const thisProc = mpvProc
@@ -1744,30 +2392,122 @@ function setMainWindow(win) {
 
 function startRaiseTimer() {
   if (raiseTimer) return
+  // HEARTBEAT DE DIAGNOSTICO, so com `STPLAY_STATS` setada.
+  //
+  // Sem isto, "o video travou" e "o video parou" sao indistinguiveis pelo log: o
+  // app so escreve quando algo dá errado, e um congelamento silencioso nao
+  // escreve nada. Medido: 4 minutos de log mudo com o mpv em 1,4% de CPU, e sem
+  // saber se o `time-pos` andava ou nao.
+  //
+  // A cada 15s sai uma linha com o par que decide a questao: `time-pos` andando
+  // = a imagem que nao mexeu e problema de apresentacao; parado = o demuxer parou
+  // e e problema de dados.
+  const statsOn = Boolean(process.env.STPLAY_STATS)
+  let ticks = 0
   raiseTimer = setInterval(() => {
+    // `hide()` não derruba mais o timer (era o que deixava a superfície morta
+    // sem volta). Então ele precisa se aposentar sozinho quando não há mais nada
+    // tocando, senão vira um interval de 1500ms vivo até o fim do processo.
+    if (!surfaceActive && !running) {
+      clearInterval(raiseTimer)
+      raiseTimer = null
+      return
+    }
     if (!running || !surfaceActive || !mpvHwnd) return
     if ((waitingFirstFrame && !liveMode) || !lastBounds) {
       if (!liveMode) hideVideo()
       return
     }
-    if (isMpvDetached()) {
-      log.warn('stur', 'mpv detached — re-embedding')
+    if (isSurfaceLost()) {
+      log.warn('stur', 'superficie de video perdida — reancorando', {
+        detached: isMpvDetached(),
+        videoHidden,
+        placedKey: lastPlacedKey,
+      })
       lastPlacedKey = ''
       showVideo(lastBounds)
       return
     }
     if (videoHidden) showVideo(lastBounds)
     if (liveMode && livePlaybackReady && lastBounds) elevateOverlay()
-    // Recuperação de live travado. `recoverLiveStall` estava escrito e correto,
-    // mas a única chamada possível foi comentada — e `lastLiveTimePosAt` ficou
-    // com 6 escritas e zero leituras. Resultado: se o live congelasse (CDN
-    // parou de mandar segmento, encoder travou), o mpv não emite `end-file`
-    // numa conexão aberta e parada, o UI continuava mostrando "tocando", e o
-    // usuário só se recoverse re-zapeando na mão.
+
+    if (statsOn && ++ticks % 10 === 0) {
+      log.info('stats', 'heartbeat', {
+        timePos: lastLiveTimePos,
+        cacheTime: lastCacheTime,
+        timePosParadoMs: lastLiveTimePosAt > 0 ? Date.now() - lastLiveTimePosAt : -1,
+        cacheParadoMs: lastCacheTimeAt > 0 ? Date.now() - lastCacheTimeAt : -1,
+        modo: currentLoadMode,
+        janelaVisivel: mpvHwnd ? Boolean(winApi && winApi.IsWindowVisible(mpvHwnd)) : null,
+        parked: lastPlacedKey.startsWith('-32000,'),
+        surfaceLost: isSurfaceLost(),
+      })
+    }
+    // Recuperação de live travado. Duas portas independentes, porque são
+    // falhas diferentes e a remediation é a mesma (processo novo, socket novo):
+    //
+    //   'demuxer silencioso' -> demuxer-cache-time parou de crescer. O socket
+    //     está em Established sem entregar byte. É o congelamento medido.
+    //   'sem time-pos'       -> time-pos parou. Demuxer vivo, mas nada saindo
+    //     para o decoder.
+    //
+    // A ordem importa: silêncio primeiro, porque é o que o log provou.
     if (liveMode && livePlaybackReady && !userPausedLive && !pausedForCache && !liveStallRecoverBusy) {
-      if (lastLiveTimePosAt > 0 && Date.now() - lastLiveTimePosAt > LIVE_STALL_MS) {
-        log.warn('stur', 'live sem avanco de time-pos', { ms: Date.now() - lastLiveTimePosAt })
-        void recoverLiveStall()
+      // O canal esta comprovadamente vivo: tem buffer e nao esta travado.
+      // Zera o historico de frustracao, para que um encaixe ruim antigo nao
+      // possa, sozinho, declarar "canal indisponivel" num canal que hoje
+      // esta tocando.
+      if (liveUnhealthyLoads > 0 && lastCacheTime >= LIVE_HEALTHY_CACHE_SECS) {
+        liveUnhealthyLoads = 0
+      }
+
+      if (isLiveUpstreamDead()) {
+        // Socket morto: nem a superficie nem o pause resolvem. A unica coisa que
+        // resolve e uma conexao nova, e `softReloadLive` mata o processo para
+        // garantir isso (o socket keep-alive preso e o que nao quebra sozinho).
+        //
+        // Este e o ramo que antes NAO EXISTIA: os dois guards antigos
+        // devolviam aqui sempre que `lastCacheTime >= 10`, o que neste painel
+        // era sempre.
+        log.warn('stur', 'socket do demuxer morto: pedindo conexao nova', {
+          cacheTime: lastCacheTime,
+          cacheParadoMs: Date.now() - lastCacheTimeAt,
+          timePos: lastLiveTimePos,
+          timePosParadoMs: lastLiveTimePosAt > 0 ? Date.now() - lastLiveTimePosAt : -1,
+        })
+        liveStallRecoverCount = 0
+        // `void`, e nao `await`: o callback do setInterval nao e async, e
+        // `softReloadLive` ja se protege sozinho com `softReloadBusy`, entao os
+        // tiques seguintes de 1500ms nao empilham recargas.
+        void softReloadLive()
+        return
+      }
+
+      if (isLiveDemuxerSilent()) {        // Buffer cheio e parado = borda viva, NAO e falha. O log original
+        // mostrou `timePos: 58.82` contra `cacheTime: 58.81`: o playhead no fim
+        // do buffer, esperando o proximo segmento. Reiniciar o processo ai
+        // matava um canal saudavel e produzia o ciclo que o usuario viu:
+        // trava -> carrega -> volta -> trava.
+        //
+        // So entra em recuperacao com o buffer VAZIO: ai o demuxer consumiu
+        // tudo e esta esperando uma rede que nao entrega.
+        if (lastCacheTime >= LIVE_SILENCE_FULL_CACHE_SECS) return
+        log.warn('stur', 'live sem dados com o buffer vazio', {
+          cacheTime: lastCacheTime,
+          ms: Date.now() - lastCacheTimeAt,
+          timePos: lastLiveTimePos,
+          timePosMs: lastLiveTimePosAt > 0 ? Date.now() - lastLiveTimePosAt : -1,
+        })
+        void recoverLiveStall('buffer vazio e sem dados')
+      } else if (lastLiveTimePosAt > 0 && Date.now() - lastLiveTimePosAt > LIVE_STALL_MS) {
+        // Mesmo cuidado: `time-pos` parado COM buffer cheio é a borda viva.
+        // Só interessa quando o buffer acabou, que é rede.
+        if (lastCacheTime >= LIVE_SILENCE_FULL_CACHE_SECS) return
+        log.warn('stur', 'live sem avanco de time-pos', {
+          ms: Date.now() - lastLiveTimePosAt,
+          cacheTime: lastCacheTime,
+        })
+        void recoverLiveStall('sem time-pos')
       }
     }
   }, 1500)
@@ -1780,27 +2520,31 @@ async function openUrl(win, url, startTime = 0, bounds = null, opts = {}) {
   currentLoadMode = 'direct'
   const gen = bumpLoadGeneration()
 
-  let playUrl = await loadStream(url, startSec, 'direct')
-  if (gen !== loadGeneration) {
-    nextLoadSoft = false
-    return null
-  }
-  if (!playUrl && shouldTryHttpFallback(liveMode)) {
-    playUrl = await loadStream(url, startSec, 'http')
+  // Ordem vinda de `loadModeOrder(live)`. No live o PRIMEIRO é `http` — o proxy
+  // local, o mesmo caminho que o player interno usa e que não trava. Ver a
+  // justificativa longa em live-load-policy.cjs: o proxy joga fora o
+  // content-length do painel, responde chunked e segue o 302 na stack do
+  // Chromium, e o mpv indo direto não tem nenhum dos três.
+  //
+  // Antes o live tentava SÓ `direct`: `shouldTryHttpFallback(true)` era false, e
+  // o proxy ficava fora da jogada por completo, não como fallback.
+  let playUrl = null
+  let usedMode = null
+  for (const mode of loadModeOrder(liveMode)) {
+    const url2 = await loadStream(url, startSec, mode)
     if (gen !== loadGeneration) {
       nextLoadSoft = false
       return null
     }
-    if (playUrl) currentLoadMode = 'http'
-  }
-  // Ao vivo: One só faz loadfile direto — http/ffmpeg atrasam e falham neste painel
-  if (!playUrl && shouldTryHttpFallback(liveMode)) {
-    playUrl = await loadStream(url, startSec, 'ffmpeg')
-    if (gen !== loadGeneration) {
-      nextLoadSoft = false
-      return null
+    if (url2) {
+      playUrl = url2
+      usedMode = mode
+      break
     }
-    if (playUrl) currentLoadMode = 'ffmpeg'
+  }
+  if (playUrl) {
+    currentLoadMode = usedMode
+    log.info('stur', 'load mode', { mode: usedMode, live: liveMode })
   }
   if (!playUrl || gen !== loadGeneration) {
     nextLoadSoft = false
@@ -1837,8 +2581,14 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
   userPausedLive = false
   userPausedVod = false
   lastLiveTimePos = -1
+  lastLiveTimePosAtPos = -1
   lastLiveTimePosAt = 0
+  lastCacheTime = -1
+  lastCacheTimeAt = Date.now()
   liveStallRecoverCount = 0
+  // Zera o contador de canal morto: `start` é o início de uma tentativa nova,
+  // e o histórico de frustração do canal anterior não vale contra este.
+  liveUnhealthyLoads = 0
 
   if (isRunning()) {
     const fast = await reload(win, url, startTime, bounds, opts)
@@ -2011,13 +2761,19 @@ function hide() {
   abortActiveLoad()
   surfaceActive = false
   hideVideo()
-  lastBounds = null
-  lastPlacedKey = ''
+  // `lastBounds` e `lastPlacedKey` NÃO são limpos aqui, e o `raiseTimer` NÃO é
+  // derrubado. Isso era o que deixava a superfície morta sem volta:
+  //
+  // Snapshot real do app travado: a janela do mpv parentada no overlay, o
+  // overlay `iconic` em (-32000,-32000), e as duas janelas do app em
+  // (-31403,-31992). A `hideVideo()` tinha jogado o HWND pra -32000 e, com
+  // `lastBounds = null` + `raiseTimer = null`, nada mais tinha o duty de
+  // trazer de volta. O video ficava fora da tela e o `isMpvDetached()` (que só
+  // pergunta `GetParent()`) dizia que estava tudo bem.
+  //
+  // Agora quem esconde guarda o último rect, e o raise timer continua rodando
+  // para poder reancorar. Ele só age quando `surfaceActive` for true de novo.
   overlayPresented = false
-  if (raiseTimer) {
-    clearInterval(raiseTimer)
-    raiseTimer = null
-  }
   try {
     overlay.hide()
   } catch {

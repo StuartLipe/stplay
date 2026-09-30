@@ -46,8 +46,34 @@ export interface PlayerBackend {
   onEvent(cb: (event: PlayerEvent) => void): () => void
 }
 
-/** Auto: interno primeiro; STUR se falhar (app desktop). */
-export const AUTO_CHAIN_LIVE: PlayerEngine[] = ['stur', 'internal']
+/**
+ * Qual motor primeiro, por conteudo.
+ *
+ * Este arquivo dizia /** Auto: interno primeiro * e fazia o contrario:
+ * as duas cadeas comecavam em stur. O comentario estava certo e o codigo
+ * errado, e o efeito era que o modo uto nunca chegava no motor que funciona.
+ *
+ * LIVE: interno (hls.js) primeiro.
+ *
+ * O sintoma e a diferenca entre os dois motores, medida no mesmo canal:
+ *
+ *   player interno (hls.js/MSE) : toca, sem travar
+ *   STUR (mpv embutido)         : congela
+ *
+ * A diferenca nao e o stream, e o caminho de apresentacao. O interno decodifica
+ * no mesmo processo do Chromium e pinta no DOM — sem janela nativa filha, sem
+ * HWND reparentado, sem swapchain D3D11 do vo=gpu. O STUR faz exatamente o
+ * contrario, e o proprio tracker do mpv registra Failed holding swapchain
+ * image for presentation / mpv will freeze no caminho de redimensionar.
+ *
+ * E e a politica do player popular de Windows (IPTVnator, Electron): tres
+ * motores web (hls.js, Video.js, ArtPlayer) por padrao, e o mpv so quando o
+ * navegador nao decodifica. O mpv EMBUTIDO la e experimental e opt-in.
+ *
+ * VOD: STUR primeiro. Progressivo em mp4, e decodificacao nativa com hwdec e
+ * seek robusto valem mais que MSE, e nao ha relato de problema em VOD.
+ */
+export const AUTO_CHAIN_LIVE: PlayerEngine[] = ['internal', 'stur']
 export const AUTO_CHAIN_VOD: PlayerEngine[] = ['stur', 'internal']
 export const AUTO_CHAIN: PlayerEngine[] = AUTO_CHAIN_LIVE
 

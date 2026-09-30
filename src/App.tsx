@@ -1,5 +1,6 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { flushSync } from 'react-dom'
+import { playerLog } from './lib/players/playerLogger'
 import type { AppProfile, AppSettings, Channel, ContentDetails, ContentKind, ContinueWatching, DownloadedItem, PlaybackEngine, Playlist, ShortEpg, SortMode, View } from './types'
 import type { UpdaterStatus } from './global'
 import { cachedCount, clearCatalog, hydrateCatalogFromDisk, loadCatalog, loadCategories, loadCategoryContent, persistCatalogToDisk, seedMemoryCatalog, type XtreamCategory } from './lib/catalog'
@@ -22,7 +23,7 @@ import { capDownloads, downloadIdFor, reconcileDownloads, withoutDownloadTarget 
 import { clearAllHiddenItems, loadActiveId, loadActiveProfileId, loadAllHiddenItems, loadContinueWatching, loadFavorites, loadHiddenItems, loadPlaylists, loadProfiles, loadRecentLiveChannels, loadSettings, loadSortModes, saveActiveId, saveActiveProfileId, saveContinueWatching, saveFavorites, saveHiddenItems, savePlaylists, saveProfiles, saveRecentLiveChannels, saveSettings, saveSortModes , type HiddenItems } from './lib/storage'
 import { resolveLastPlaylistId, shouldRestoreLastSession } from './lib/last-playlist'
 import { canPersistCatalog } from './lib/catalog-owner'
-import { clearXtreamM3uCache, formatAddedDate, loadEpgDataTable, loadM3uAccountProfile, loadSeriesInfo, loadShortEpg, loadShortEpgList, loadVodInfo, peekLoadedSeriesInfo, prefetchSeriesInfo, testXtream } from './lib/xtream'
+import { clearXtreamM3uCache, formatAddedDate, loadEpgDataTable, loadM3uAccountProfile, loadSeriesInfo, loadShortEpg, loadShortEpgList, loadVodInfo, peekLoadedSeriesInfo, prefetchSeriesInfo, testXtream, resolveFreshLiveChannel } from './lib/xtream'
 import {
   ACCENT_PRESETS,
   accentInkFor,
@@ -9403,6 +9404,18 @@ function Player({
   }, [])
   const channelRef = useRef(channel)
   channelRef.current = channel
+  /**
+   * Re-resolução de stream_id de live, uma vez por tentativa.
+   *
+   * usy evita ailed repetido (o motor pode emitir mais de um) virando
+   * N requisições de catálogo. lastAttempt impede o caso patologico em que o
+   * painel devolve sempre um id novo que também está morrendo: depois de duas
+   * trocas o app para de insistir e mostra o erro.
+   */
+  const liveReresolveRef = useRef({ busy: false, lastAttempt: '' })
+  useEffect(() => {
+    liveReresolveRef.current = { busy: false, lastAttempt: '' }
+  }, [channel.id])
   const progressRef = useRef(progress)
   progressRef.current = progress
   const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([])
@@ -9593,27 +9606,51 @@ function Player({
 
   const toggleFullscreen = () => {
     const root = playerWrapRef.current
-    if (!root) return
 
-    if (isFs) {
-      if (domFs) {
-        void document.exitFullscreen().catch(() => {})
-        return
-      }
-      void window.sturplay?.window?.setFullscreen?.(false)
+    // NADA aqui pode depender de `isFs`/`domFs` capturados no render.
+    //
+    // `toggleFullscreen` e chamado de um `keydown` registrado num efeito cujo
+    // array de deps NAO inclui `isFs`, `domFs` nem a propria `toggleFullscreen`.
+    // O closure portanto fica congelado no valor do render em que o efeito rodou
+    // por ultimo, e `isFs` muda sem re-rodar o efeito.
+    //
+    // A ordem das fontes tambem importa, e foi medida no log:
+    //
+    //   overlay action { type: 'select', overlayAchaFullscreen: true,
+    //                    janelaRealFullscreen: false }
+    //
+    // O overlay SABIA que estava em tela cheia, e `win.isFullScreen()` disse
+    // `false`. NESTE APP o fullscreen de elemento DOM nao aparece em
+    // `BrowserWindow.isFullScreen()`. Então consultar o processo principal para
+    // decidir se estamos em tela cheia da errado justamente no caminho de SAIR:
+    // ele responde `false`, o codigo acha que nao esta em tela cheia, e chama
+    // `setFullscreen(true)` — que e no-op. O sintoma era o log mostrar 14 pedidos
+    // de saida seguidos com a janela presa.
+    //
+    // Por isso a fonte de verdade e `document.fullscreenElement`, que e leitura
+    // ao vivo do DOM e nao envelhece. E a verificacao e "TEM elemento em
+    // tela cheia", e nao "o elemento e o wrapper do player": quando o playback
+    // para, o wrapper desmonta, o elemento some da comparacao, e a saida ficava
+    // sem caminho — que era o segundo furo do mesmo bug.
+    const emFullscreen = Boolean(document.fullscreenElement)
+    if (emFullscreen) {
+      void document.exitFullscreen().catch(() => {})
       return
     }
 
-    if (typeof root.requestFullscreen === 'function') {
-      void root
-        .requestFullscreen()
-        .catch((error: unknown) => {
+    void (async () => {
+      if (root && typeof root.requestFullscreen === 'function') {
+        try {
+          await root.requestFullscreen()
+          return
+        } catch (error: unknown) {
           noteFullscreenFailure(error instanceof Error ? error.message : String(error))
           void enterWindowFullscreen()
-        })
-      return
-    }
-    void enterWindowFullscreen()
+          return
+        }
+      }
+      await enterWindowFullscreen()
+    })()
   }
 
   const exitPlayerFullscreen = () => {
@@ -9704,7 +9741,15 @@ function Player({
       const root = playerWrapRef.current
       const fs = Boolean(root && document.fullscreenElement === root)
       document.body.classList.toggle('electron-fullscreen', fs)
-      void window.sturplay?.player?.setOverlayMeta?.({ fullscreen: fs })
+      // `fullscreen` NAO e empurrado aqui de proposito. Quem manda esse campo e o
+      // efeito da uniao mais abaixo (`domFs || winFs`).
+      //
+      // Empurrar o valor so do DOM fazia o overlay receber `false` no instante em
+      // que a tela cheia de JANELA continuava de pe — o `fullscreenchange` do
+      // documento so enxerga o caminho DOM. O overlay entao achava que nao
+      // estava em tela cheia, e o ESC caia no ramo `back`, que DERRUBA O VIDEO
+      // em vez de sair da tela cheia. Foi o que o usuario reportou: ESC parou o
+      // video e a janela continuou em F11, sem F11 para tirar.
       const el = playerWrapRef.current
       if (!el) return
       const r = el.getBoundingClientRect()
@@ -9724,6 +9769,28 @@ function Player({
   // fallback do botao deixava o overlay/mpv com os bounds antigos: a janela
   // ocupava a tela toda e o video continuava do tamanho do card. Reposicionar
   // no proximo frame, depois que o layout da janela ja assentou.
+  // DONO UNICO do campo `fullscreen` do overlay.
+  //
+  // Sao dois mecanismos de tela cheia independentes no app: o DOM
+  // (`requestFullscreen` no wrapper do player, que dispara `fullscreenchange`)
+  // e o da JANELA (`win.setFullScreen`, que nao dispara `fullscreenchange` no
+  // documento). O overlay decide o que o ESC faz lendo esse campo:
+  //
+  //   fullscreen -> ESC sai da tela cheia
+  //   !fullscreen -> ESC mostra os controles, e depois para o video (`back`)
+  //
+  // Se o campo discordar do que esta na tela, o ESC faz a coisa errada. Era
+  // exatamente o relatado: ESC DERROBOU O VIDEO e a janela continuou em F11.
+  // Motivo: so o caminho DOM empurrava o valor, e empurrava `false` no momento
+  // em que a tela cheia de janela continuava ativa. O caminho nativo empurrava
+  // `true` na entrada e NUNCA na saida.
+  //
+  // Aqui vai a uniao dos dois, empurrada em qualquer mudanca — inclusive a
+  // volta, que antes nao chegava ao overlay.
+  useEffect(() => {
+    void window.sturplay?.player?.setOverlayMeta?.({ fullscreen: isFs })
+  }, [isFs])
+
   useEffect(() => {
     if (!useNativePlayer || !winFs) return
     let raf = 0
@@ -9733,7 +9800,10 @@ function Player({
       if (el) {
         const r = el.getBoundingClientRect()
         if (r.width > 0 && r.height > 0) {
-          void window.sturplay?.player?.setOverlayMeta?.({ fullscreen: true })
+          // `fullscreen` tambem nao e empurrado aqui: este efeito cuida so de
+          // POSICAO. O campo `fullscreen` tem um dono so, o efeito da uniao
+          // abaixo — e ele cobre os dois caminhos, inclusive a saida, que este
+          // efeito nunca fazia (so empurrava `true`).
           void window.sturplay?.player?.setBounds?.({
             x: Math.round(r.left),
             y: Math.round(r.top),
@@ -9902,6 +9972,33 @@ function Player({
           }
         }
         if (event.type === 'failed') {
+          // Live morreu e o motor ja esgotou as tentativas: antes de mostrar
+          // o erro, pergunta ao painel se aquele canal ainda existe em outro
+          // stream_id.
+          //
+          // O painel rotaciona o id com frequencia — medido nesta conta,
+          // 709056 virou 404 e o mesmo canal respondeu em 709057. O
+          // catalogo guarda a URL do load, entao sem isto o app tratava como
+          // morto um canal que estava no ar. matchLiveStream nunca devolve
+          // o proprio id, entao isto nao vira laco: se nao mudou, o erro aparece.
+          if (channel.kind === 'live' && playlist && !liveReresolveRef.current.busy) {
+            const fresh = liveReresolveRef.current
+            fresh.busy = true
+            void resolveFreshLiveChannel(playlist, channelRef.current)
+              .then((next) => {
+                if (!next) return
+                playerLog('info', 'live', 'stream_id rotacionado, reabrindo', {
+                  de: channelRef.current.streamId,
+                  para: next.streamId,
+                })
+                fresh.lastAttempt = next.streamId ?? ''
+                onChange(next)
+              })
+              .finally(() => {
+                fresh.busy = false
+              })
+            return
+          }
           const ui = playbackUiAfterFailed(event.reason)
           forceShellVisible()
           if (ui.killNativeProcess) void window.sturplay?.player?.stop?.()

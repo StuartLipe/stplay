@@ -18,9 +18,40 @@ function overlayBarRect(videoRect) {
   }
 }
 
-/** IPTV Player One: overlay cobre o retângulo inteiro do vídeo (controles no rodapé via CSS). */
+/**
+ * Retângulo da janela overlay.
+ *
+ * Durante a REPRODUÇÃO: só a barra de controle. No resto do tempo: o retângulo
+ * inteiro, porque o indicador de carregamento é centralizado no vídeo e o drawer
+ * de canais precisa da área toda.
+ *
+ * A medição que motivou isto, com o app rodando e o vídeo congelado na tela:
+ *
+ *   hwnd=0xC0494  Chrome_WidgetWin_1  (797,109)-(1736,946)   939x837   <- ACIMA
+ *   hwnd=0x1D0B02 Chrome_WidgetWin_1  (160,70)-(1760,970)  1600x900   <- principal
+ *   HWND do mpv:                   (797,109)-(1736,946)   939x837
+ *
+ * A janela do mpv é uma janela NATIVA reparentada dentro da janela do Electron,
+ * e o overlay é uma SEGUNDA janela do Chromium, transparente, exatamente no mesmo
+ * retângulo e ACIMA na z-order. DWM passa a compor duas superfícies uma sobre a
+ * outra, e o elo que quebra é o swapchain D3D11 do vo=gpu — filho reparentado de
+ * uma janela do Chromium.
+ *
+ * E o sintoma é justamente o que a medição de velocidade desmentiu. Com o mpv
+ * em 1.000x, speed=1, avsync ~0, buffer de 160s e ZERO paradas de buffer em 2
+ * minutos, o usuário via o quadro congelado. O vídeo continuava tocando embaixo
+ * da camada: o que parou foi a apresentação.
+ *
+ * O retângulo inteiro continua disponível e continua sendo o certo enquanto o
+ * overlay PRECISA dele — spinner centralizado, drawer aberto. O que não pode é
+ * ele ficar cobrindo o vídeo durante a reprodução.
+ *
+ * @param {{ x: number, y: number, width: number, height: number }} videoRect
+ * @param {{ full?: boolean }} [opts] `full` força o retângulo inteiro
+ */
 function overlayShellRect(videoRect, opts = {}) {
   if (!videoRect || videoRect.width < 32 || videoRect.height < 32) return videoRect
+  if (opts.full !== true) return overlayBarRect(videoRect)
   return {
     x: Math.round(videoRect.x),
     y: Math.round(videoRect.y),
@@ -48,4 +79,10 @@ function videoContentRect(videoRect, opts = {}) {
   }
 }
 
-module.exports = { OVERLAY_BAR_HEIGHT, CONTROL_INSET_PX, overlayBarRect, overlayShellRect, videoContentRect }
+module.exports = {
+  OVERLAY_BAR_HEIGHT,
+  CONTROL_INSET_PX,
+  overlayBarRect,
+  overlayShellRect,
+  videoContentRect,
+}

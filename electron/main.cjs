@@ -438,7 +438,64 @@ function createWindow() {
     plog.info('app', 'loading dist index.html')
     void win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
   }
-  win.webContents.on('did-finish-load', () => plog.info('app', 'renderer did-finish-load'))
+  // GANCHO DE TESTE, so de dev e so com variavel de ambiente.
+  //
+  // Existe porque verificar o motor exige ALGUEM abrir um canal, e um clique
+  // humano nao e reprodutivel de madrugada. Ele dispara o preload de dentro do
+  // renderer — `window.sturplay.player.start(...)` — que e exatamente o que um
+  // clique dispara: mesmo preload, mesmo IPC, mesmo handler, mesmo motor. Sem a
+  // variavel, nada acontece e o app se comporta igual.
+  const autotestUrl = !app.isPackaged ? process.env.STPLAY_AUTOTEST_URL : null
+  win.webContents.on('did-finish-load', () => {
+    plog.info('app', 'renderer did-finish-load')
+    if (!autotestUrl) return
+    setTimeout(() => {
+      const b = win.getContentBounds()
+      const payload = {
+        engine: 'stur',
+        url: autotestUrl,
+        startTime: 0,
+        bounds: { x: 0, y: 0, width: b.width, height: b.height },
+        live: true,
+      }
+      plog.info('app', 'autotest disparando player:start', { url: autotestUrl.slice(0, 120) })
+      const script = `window.sturplay
+        && window.sturplay.player
+        && window.sturplay.player.start(${JSON.stringify(payload)})
+        .then(function (r) {
+          return window.sturplay.dev.internalDebug({ autotest: 'start', result: r })
+        })
+        .catch(function (e) {
+          return window.sturplay.dev.internalDebug({ autotest: 'erro', error: String(e) })
+        })`
+      void win.webContents.executeJavaScript(script).then(
+        (r) => plog.info('app', 'autotest player:start', r),
+        (e) => plog.warn('app', 'autotest executeJavaScript falhou', { error: String(e) }),
+      )
+
+      // Teste de F11, sem humano. `sendInputEvent` entra pelo mesmo pipeline de
+      // teclado que uma tecla de verdade, entao exercita o handler de verdade —
+      // inclusive o closure velho que era o bug.
+      setTimeout(() => {
+        const apertar = (acao) => {
+          for (const tipo of ['keyDown', 'keyUp']) {
+            win.webContents.sendInputEvent({ type: tipo, keyCode: 'F11', code: 'F11', windowsVirtualKeyCode: 122 })
+          }
+          void acao
+        }
+        const estado = (rotulo) => {
+          plog.info('app', 'autotest F11', { momento: rotulo, janelaFullscreen: win.isFullScreen() })
+        }
+        estado('antes do 1o F11')
+        apertar()
+        setTimeout(() => {
+          estado('depois do 1o F11 (esperando entrar)')
+          apertar()
+          setTimeout(() => estado('depois do 2o F11 (esperando sair)'), 2500)
+        }, 2500)
+      }, 20000)
+    }, 8000)
+  })
   win.webContents.on('did-fail-load', (_e, code, desc, url) =>
     plog.warn('app', 'renderer did-fail-load', { code, desc, url: String(url).slice(0, 120) }),
   )

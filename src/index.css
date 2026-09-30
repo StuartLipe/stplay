@@ -11653,6 +11653,37 @@ button.hidden-item-chip:focus-visible {
  * O corte e por atributo: `animation` e `transition` vao para perto de zero,
  * em vez de ficarem mais lentos. Reduzir movimento nao e animar mais devagar,
  * e nao animar.
+ *
+ * A EXCECAO NO FIM DO BLOCO (indicadores de status) e o que faltava.
+ *
+ * O blanket usa o seletor *, e por isso pegava tambem os cinco
+ * spin ... infinite da folha. O comentario original dizia "a unica animacao
+ * infinita do app", o que ja era falso: .po-loading-spinner, .player-spinner,
+ * .settings-epg-btn svg.spin, .settings-update-btn svg.spin e
+ * .epg-guide-refresh svg.spin sao todas infinitas.
+ *
+ * Medido no Chromium deste ambiente antes da excecao:
+ *
+ *   matchMedia('(prefers-reduced-motion: reduce)').matches  ->  true
+ *   animationName           -> "spin"
+ *   animationDuration       -> "1e-06s"   (o 0.001ms do blanket)
+ *   animationIterationCount -> "1"
+ *   document.getAnimations() -> []           (nenhuma animacao viva)
+ *
+ * O efeito: a bolinha de "carregando" dava UM giro de 0.001ms e ficava
+ * parada para sempre. Nao e defeito de estilo, e perda de informacao: o giro
+ * e a unica prova de que o app esta trabalhando, e sem ele "carregando"
+ * fica visualmente identico a "travou".
+ *
+ * Por que a excecao e o comportamento certo:
+ *
+ *   - Movimento reduzido existe para risco vestibular: deslocamento de area
+ *     grande, parallax, zoom, rotacao de tela inteira. Um circulo de 40px
+ *     girando nao entra em nenhuma dessas categorias.
+ *   - Indicador de progresso e conteudo de status, nao decoracao. Suprimir
+ *     informacao de estado e o oposto do que a preferencia pede.
+ *   - A regra continua valendo para o que e decorativo: o varredor do
+ *     placeholder e as transicoes.
  */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -11662,5 +11693,16 @@ button.hidden-item-chip:focus-visible {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* Indicadores de status nao sao movimento, sao informacao. */
+  .po-loading-spinner,
+  .player-spinner,
+  .settings-epg-btn svg.spin,
+  .settings-update-btn svg.spin,
+  .epg-guide-refresh svg.spin {
+    animation-duration: 0.75s !important;
+    animation-iteration-count: infinite !important;
+    animation-timing-function: linear !important;
   }
 }
