@@ -49,9 +49,9 @@ export interface PlayerBackend {
 /**
  * Qual motor primeiro, por conteudo.
  *
- * Este arquivo dizia /** Auto: interno primeiro * e fazia o contrario:
- * as duas cadeas comecavam em stur. O comentario estava certo e o codigo
- * errado, e o efeito era que o modo uto nunca chegava no motor que funciona.
+ * Este arquivo dizia "Auto: interno primeiro" e fazia o contrario: as duas
+ * cadeias comecavam em stur. O comentario estava certo e o codigo errado, e o
+ * efeito era que o modo auto nunca chegava no motor que funciona.
  *
  * LIVE: interno (hls.js) primeiro.
  *
@@ -60,18 +60,38 @@ export interface PlayerBackend {
  *   player interno (hls.js/MSE) : toca, sem travar
  *   STUR (mpv embutido)         : congela
  *
- * A diferenca nao e o stream, e o caminho de apresentacao. O interno decodifica
- * no mesmo processo do Chromium e pinta no DOM — sem janela nativa filha, sem
- * HWND reparentado, sem swapchain D3D11 do vo=gpu. O STUR faz exatamente o
- * contrario, e o proprio tracker do mpv registra Failed holding swapchain
- * image for presentation / mpv will freeze no caminho de redimensionar.
+ * A CAUSA, e ela e do lado da fonte: o painel nao publica HLS canonico. Medido
+ * em 24 pedidos do mesmo canal a cada 1,5s — 24 conjuntos de URL distintos, e
+ * 0 de 23 respostas consecutivas compartilhando um unico segmento. A sequencia
+ * avanca (~1 a cada 10s, batendo com TARGETDURATION=11) mas nao identifica
+ * nada.
+ *
+ * O hls.js identifica segmento por URL: so pergunta "qual URL eu ainda nao
+ * tenho", entao uma janela recem-mintada a cada pedido e inofensiva. O demuxer
+ * HLS do ffmpeg identifica pelo NUMERO DE SEQUENCIA, mantem contabilidade de
+ * janela deslizante, e acredita que ja baixou os numeros que ja viu — entao
+ * para de buscar. Medido no mpv, sem o app:
+ *
+ *   t=0    time-pos 48.07   demuxer-cache-time 56.30
+ *   t=14   time-pos 60.05   demuxer-cache-time 59.97
+ *   t=16   time-pos 60.05   demuxer-cache-time 59.97   <- PARA
+ *   CONGELOU em 25s, buffer 100%
+ *
+ * Nao e apresentacao nem VO nem janela: o playhead para exatamente no fim de
+ * um cache que deixou de crescer. A bisseccao congelou tambem na variante mais
+ * crua, sem nenhum comportamento do app.
+ *
+ * O STUR sobe pelo normalizador de playlist (ver `hls-window.cjs` e
+ * `hls-normalizer.cjs`), que entrega manifesto canonico ao mpv. Medido com ele:
+ * 361s continuos, congelou: NAO.
  *
  * E e a politica do player popular de Windows (IPTVnator, Electron): tres
  * motores web (hls.js, Video.js, ArtPlayer) por padrao, e o mpv so quando o
  * navegador nao decodifica. O mpv EMBUTIDO la e experimental e opt-in.
  *
  * VOD: STUR primeiro. Progressivo em mp4, e decodificacao nativa com hwdec e
- * seek robusto valem mais que MSE, e nao ha relato de problema em VOD.
+ * seek robusto valem mais que MSE, e nao ha relato de problema em VOD — a
+ * playlist de VOD e um arquivo, nao a janela nao-canonica que quebrava o live.
  */
 export const AUTO_CHAIN_LIVE: PlayerEngine[] = ['internal', 'stur']
 export const AUTO_CHAIN_VOD: PlayerEngine[] = ['stur', 'internal']
