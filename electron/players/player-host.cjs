@@ -590,18 +590,25 @@ function registerPlayerIpc() {
     // `type: 'volume'` e enterrava o resto. So interessa `back` (o ramo que
     // derruba o video) e qualquer caso em que os dois lados discordam — que e
     // exatamente o bug.
-    try {
-      const dica = overlay.getFullscreenHint?.() ?? null
-      const real = win.isFullScreen()
-      if (action?.type === 'back' || dica !== real) {
-        log.info('fs', 'overlay action', {
-          type: action?.type,
-          overlayAchaFullscreen: dica,
-          janelaRealFullscreen: real,
-        })
+    //
+    // Atras de `STPLAY_FS_DEBUG` porque isto e ruido para quem so quer usar o
+    // app: sao tres chamadas de log por acao de overlay, e o filtro acima so
+    // deixa passar `back` e divergencia — ou seja, num uso normal quase nada
+    // passa, mas o `try` ainda roda e o custo fica.
+    if (process.env.STPLAY_FS_DEBUG) {
+      try {
+        const dica = overlay.getFullscreenHint?.() ?? null
+        const real = win.isFullScreen()
+        if (action?.type === 'back' || dica !== real) {
+          log.info('fs', 'overlay action', {
+            type: action?.type,
+            overlayAchaFullscreen: dica,
+            janelaRealFullscreen: real,
+          })
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
     try {
       win.webContents.send('player:overlay-action', action)
@@ -634,12 +641,16 @@ function registerPlayerIpc() {
     // DIAGNOSTICO: o botao de sair da tela cheia do overlay cai aqui. Log do
     // estado real no instante do clique, porque o caminho passa pelo renderer
     // (`toggleFullscreen`) e um erro la dentro nao aparece em lugar nenhum.
-    try {
-      log.info('fs', 'ui-fullscreen pedido', {
-        janelaRealFullscreen: win && !win.isDestroyed() ? win.isFullScreen() : null,
-      })
-    } catch {
-      // ignore
+    //
+    // Atras de `STPLAY_FS_DEBUG` pelo mesmo motivo do bloco acima.
+    if (process.env.STPLAY_FS_DEBUG) {
+      try {
+        log.info('fs', 'ui-fullscreen pedido', {
+          janelaRealFullscreen: win && !win.isDestroyed() ? win.isFullScreen() : null,
+        })
+      } catch {
+        // ignore
+      }
     }
     if (win && !win.isDestroyed()) {
       win.webContents.send('player:ui-fullscreen')
@@ -763,10 +774,15 @@ function bindFullscreenHooks(win) {
     const fs = win.isFullScreen()
     // DIAGNOSTICO: toda mudanca de tela cheia da JANELA, com o valor real. Sem
     // isto nao da para dizer se o overlay foi avisado ou se so a janela mudou.
-    try {
-      log.info('fs', 'janela fullscreen', { fullscreen: fs })
-    } catch {
-      // ignore
+    //
+    // Este e o mais ruidoso dos tres: `refresh` tambem roda no `resize`, entao
+    // em tela cheia ele dispara a cada pixel de arrasto da janela.
+    if (process.env.STPLAY_FS_DEBUG) {
+      try {
+        log.info('fs', 'janela fullscreen', { fullscreen: fs })
+      } catch {
+        // ignore
+      }
     }
     try {
       win.webContents.send('window:fullscreen-changed', { fullscreen: fs })

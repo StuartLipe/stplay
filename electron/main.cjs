@@ -472,28 +472,6 @@ function createWindow() {
         (r) => plog.info('app', 'autotest player:start', r),
         (e) => plog.warn('app', 'autotest executeJavaScript falhou', { error: String(e) }),
       )
-
-      // Teste de F11, sem humano. `sendInputEvent` entra pelo mesmo pipeline de
-      // teclado que uma tecla de verdade, entao exercita o handler de verdade —
-      // inclusive o closure velho que era o bug.
-      setTimeout(() => {
-        const apertar = (acao) => {
-          for (const tipo of ['keyDown', 'keyUp']) {
-            win.webContents.sendInputEvent({ type: tipo, keyCode: 'F11', code: 'F11', windowsVirtualKeyCode: 122 })
-          }
-          void acao
-        }
-        const estado = (rotulo) => {
-          plog.info('app', 'autotest F11', { momento: rotulo, janelaFullscreen: win.isFullScreen() })
-        }
-        estado('antes do 1o F11')
-        apertar()
-        setTimeout(() => {
-          estado('depois do 1o F11 (esperando entrar)')
-          apertar()
-          setTimeout(() => estado('depois do 2o F11 (esperando sair)'), 2500)
-        }, 2500)
-      }, 20000)
     }, 8000)
   })
   win.webContents.on('did-fail-load', (_e, code, desc, url) =>
