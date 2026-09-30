@@ -1,7 +1,7 @@
 {
   "name": "stplay",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Player IPTV desktop",
   "author": "Felipe",
   "repository": {
@@ -122,8 +122,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ST PLAY 1.0.0",
-      "uninstallDisplayName": "ST PLAY 1.0.0",
+      "shortcutName": "ST PLAY 1.0.1",
+      "uninstallDisplayName": "ST PLAY 1.0.1",
       "artifactName": "ST-PLAY-Setup-${version}.exe"
     },
     "portable": {
