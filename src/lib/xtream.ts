@@ -1,6 +1,7 @@
 import type { Channel, ContentDetails, Playlist, SeriesInfo, ShortEpg, XtreamProfile } from '../types'
 import { parseM3u } from './m3u'
 import { matchLiveStream } from './live-stream-match'
+import { dedupeEpisodesByNumber } from './dedupe-episodes'
 import { fetchJson, fetchText, PANEL_LARGE_TIMEOUT_MS } from './proxy'
 import {
   coalesceSeriesInfoLoad,
@@ -566,7 +567,13 @@ export type XtreamCategory = { id: string; name: string }
 
 const xtreamM3uCache = new Map<string, Channel[]>()
 
-/** Carrega o M3U completo do painel (método do IPTV Expert). */
+/**
+ * Carrega o M3U completo do painel (método do IPTV Expert).
+ *
+ * O timeout precisa ser explícito: painéis grandes devolvem 100MB+ / 300k
+ * canais e levam ~100s só no download. Sem isto o fetch aborta no meio e a
+ * falha aparece como "playlist vazia" — que é sintoma, não causa.
+ */
 export async function loadXtreamFullM3u(playlist: Playlist, force = false): Promise<Channel[]> {
   const cacheKey = playlist.id
   if (!force) {
@@ -576,9 +583,9 @@ export async function loadXtreamFullM3u(playlist: Playlist, force = false): Prom
 
   let text = ''
   try {
-    text = await fetchText(xtreamM3uUrl(playlist, 'ts'))
+    text = await fetchText(xtreamM3uUrl(playlist, 'ts'), { timeoutMs: PANEL_LARGE_TIMEOUT_MS })
   } catch {
-    text = await fetchText(xtreamM3uUrl(playlist, 'm3u8'))
+    text = await fetchText(xtreamM3uUrl(playlist, 'm3u8'), { timeoutMs: PANEL_LARGE_TIMEOUT_MS })
   }
 
   if (!text.includes('#EXTINF')) {
@@ -1160,7 +1167,9 @@ export async function loadSeriesInfo(playlist: Playlist, seriesId: string): Prom
 
     const seasons = Object.entries(data.episodes ?? {}).map(([season, episodes]) => ({
       season: Number(season),
-      episodes: (Array.isArray(episodes) ? episodes : []).map((ep) => {
+      episodes: dedupeEpisodesByNumber(
+        Array.isArray(episodes) ? episodes : [],
+      ).map((ep) => {
         const epInfo = ep.info || {}
         const epId = String(ep.id)
         const plot = pickPlot(ep, epInfo) || ''

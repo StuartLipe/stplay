@@ -30,6 +30,8 @@ export type PlayerEventPayload = {
   value?: number | boolean
   percent?: number
   reason?: string
+  retry?: number
+  of?: number
 }
 
 /**
@@ -49,7 +51,13 @@ export type UpdaterStatus = {
   current: string
   lastCheck: number | null
   shownVersion: string | null
-  available: boolean
+  /**
+   * Ha instalador baixado esperando? Vem do estado em disco, nao do objeto do
+   * `electron-updater`: esse objeto e recriado a cada boot e perderia a info.
+   */
+  disponivelParaInstalar: boolean
+  /** Versao do instalador pronto, para o texto da caixa de reiniciar. */
+  versaoPronta: string | null
   installing: boolean
 }
 

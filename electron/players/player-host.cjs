@@ -4,6 +4,7 @@ const libmpv = require('./libmpv-player.cjs')
 const mpvExe = require('./mpv-exe-player.cjs')
 const mpvOne = require('./mpv-one-player.cjs')
 const stur = require('./stur-player.cjs')
+const mpeg = require('./mpeg-player.cjs')
 const sturProxy = require('../stur-ffmpeg-proxy.cjs')
 const external = require('./external-player.cjs')
 const overlay = require('./overlay-window.cjs')
@@ -19,18 +20,24 @@ let playbackActive = false
 let playbackShortcutsOn = false
 
 const PLAYBACK_SHORTCUT_KEYS = ['Escape', 'Up', 'Down', 'Left', 'Right']
-/** Só com a janela em foco — evita roubar F11 de outros apps. */
-const FOCUS_ONLY_SHORTCUT_KEYS = ['F11']
+/*
+  F11 NAO esta mais em atalho global.
+
+  Medido com video tocando: o F11 nao entrava nem saia de tela cheia. A causa
+  era duplo-toggle no mesmo toque — `globalShortcut` invertia a tela cheia e o
+  `before-input-event` de `bindFullscreenHooks` invertia de volta, no mesmo
+  evento. Saldo zero, janela parada.
+
+  O unico dono do F11 agora e o `before-input-event`, que roda uma vez so e
+  cobre home e player. O `globalShortcut` continua so com Escape e setas.
+*/
+const FOCUS_ONLY_SHORTCUT_KEYS = []
 
 function sendPlaybackKey(key) {
-  if (!playbackActive) return
   const win = getMainWindow()
   if (!win || win.isDestroyed()) return
   try {
-    if (key === 'F11') {
-      win.webContents.send('player:ui-fullscreen')
-      return
-    }
+    if (!playbackActive) return
     win.webContents.send('player:ui-key', { key })
   } catch {
     // ignore
@@ -86,13 +93,20 @@ function bindWindowFocusShortcuts(win) {
   if (!win || win.isDestroyed() || win.__sturPlaybackFocusBound) return
   win.__sturPlaybackFocusBound = true
   win.on('focus', () => {
+    // F11 entra com a janela em foco, com ou sem player. O resto dos atalhos
+    // (Escape, setas) so faz sentido durante a reproducao.
+    registerFocusOnlyShortcuts()
     if (!playbackActive) return
     registerPlaybackShortcuts()
-    registerFocusOnlyShortcuts()
   })
   win.on('blur', () => {
     unregisterAllPlaybackShortcuts()
   })
+  /*
+    F11 e resolvido no `before-input-event` do `bindNativeFullscreenHooks`, que
+    roda uma vez so e cobre home e player. Nao ha F11 aqui para nao inverter a
+    tela cheia duas vezes no mesmo toque (aqui e no globalShortcut).
+  */
 }
 
 function markPlaybackActive(active) {
@@ -143,6 +157,7 @@ function detect() {
     mpv: Boolean(findMpv()),
     mpvOne: mpvOne.isAvailable(),
     stur: stur.isAvailable(),
+    mpeg: mpeg.isAvailable(),
     vlc: external.hasVlc(),
     mpc: external.hasMpc(),
   }
@@ -170,12 +185,22 @@ function hideSurfacesFast() {
     // ignore
   }
   try {
+    mpeg.abortActiveLoad()
+  } catch {
+    // ignore
+  }
+  try {
     overlay.hide()
   } catch {
     // ignore
   }
   try {
     stur.hide()
+  } catch {
+    // ignore
+  }
+  try {
+    mpeg.hide()
   } catch {
     // ignore
   }
@@ -197,6 +222,11 @@ function hideSurfaces() {
       // false (HWND ainda não adotado) e o stop era pulado, deixando mpv.exe
       // órfão ainda baixando o live depois do usuário ter saído.
       if (stur.isRunning() || stur.isBusy()) stur.stop()
+    } catch {
+      // ignore
+    }
+    try {
+      if (mpeg.isRunning()) mpeg.stop()
     } catch {
       // ignore
     }
@@ -229,6 +259,11 @@ async function stopAll() {
     // ignore
   }
   try {
+    mpeg.hide()
+  } catch {
+    // ignore
+  }
+  try {
     libmpv.stop({ immediate: true })
   } catch {
     // ignore
@@ -250,6 +285,11 @@ async function stopAll() {
     // `killMpv` ja dispara o taskkill em background; aqui o `await` so espera
     // ele terminar, sem travar o main.
     await stur.stop()
+  } catch {
+    // ignore
+  }
+  try {
+    await mpeg.stop()
   } catch {
     // ignore
   }
@@ -377,6 +417,20 @@ async function startEngine(engine, url, startTime, bounds, win, opts = {}) {
     setNativeVideoCompositor(win, false)
     return result
   }
+  if (engine === 'mpeg') {
+    prepareCompositor(win)
+    mpeg.setMainWindow(win)
+    const result = await mpeg.start(win, url, startTime, bounds, { live: opts.live === true, title: opts.title })
+    if (result?.ok) {
+      activeEngine = 'mpeg'
+      markPlaybackActive(true)
+      log.info('host', 'engine started', { engine: 'mpeg', live: opts.live === true })
+      return result
+    }
+    log.warn('host', 'mpeg start failed', { live: opts.live === true, reason: result?.reason })
+    setNativeVideoCompositor(win, false)
+    return result
+  }
   if (engine === 'vlc' || engine === 'mpc') {
     const result = await external.start(engine, url, startTime, win, { minimize: true })
     if (result?.ok) {
@@ -402,6 +456,7 @@ async function command(op, value) {
   if (activeEngine === 'mpv') return mpvExe.command(op, value)
   if (activeEngine === 'mpv-one') return mpvOne.command(op, value)
   if (activeEngine === 'stur') return stur.command(op, value)
+  if (activeEngine === 'mpeg') return mpeg.command(op, value)
   return { ok: false }
 }
 
@@ -424,6 +479,7 @@ async function setBounds(rect) {
   else if (activeEngine === 'mpv') mpvExe.setBounds(rect)
   else if (activeEngine === 'mpv-one') mpvOne.setBounds(rect)
   else if (activeEngine === 'stur') stur.setBounds(rect)
+  else if (activeEngine === 'mpeg') mpeg.setBounds(rect)
   if (win && activeEngine) {
     overlay.syncBounds(rect)
   }
@@ -450,6 +506,7 @@ function setMainWindow(win) {
   mpvExe.setMainWindow(win)
   mpvOne.setMainWindow(win)
   stur.setMainWindow(win)
+  mpeg.setMainWindow(win)
   overlay.bindParent(win)
   bindFullscreenHooks(win)
   bindFocusHooks(win)
@@ -513,6 +570,11 @@ function registerPlayerIpc() {
       bumpHostEpoch()
       stur.abortActiveLoad()
     }
+    // MPEG igual Smarters no zap: mesmo processo, loadfile novo (sem matar mpv).
+    if (engine === 'mpeg' && mpeg.isRunning()) {
+      bumpHostEpoch()
+      mpeg.abortActiveLoad()
+    }
     return runHostOp(async () => {
       const playUrl = normalizePlayUrl(url)
       if (!playUrl || !isPlayableUrl(playUrl)) {
@@ -530,6 +592,18 @@ function registerPlayerIpc() {
           markPlaybackActive(true)
           if (bounds) overlay.syncBounds(bounds)
           log.info('host', 'stur reloaded', { url: playUrl.slice(0, 120), live: opts.live })
+          return fast
+        }
+      }
+
+      if (engine === 'mpeg' && mpeg.isRunning()) {
+        const fast = await mpeg.reload(win, playUrl, startTime, bounds, opts)
+        if (fast?.ok) {
+          prepareCompositor(win)
+          activeEngine = 'mpeg'
+          markPlaybackActive(true)
+          if (bounds) overlay.syncBounds(bounds)
+          log.info('host', 'mpeg reloaded', { url: playUrl.slice(0, 120), live: opts.live })
           return fast
         }
       }
@@ -575,6 +649,8 @@ function registerPlayerIpc() {
     overlay.setIgnoreMouse(ignore === true)
     return { ok: true }
   })
+
+
 
   ipcMain.handle('overlay:action', async (event, action) => {
     const senderWin = BrowserWindow.fromWebContents(event.sender)
@@ -689,20 +765,60 @@ function registerPlayerIpc() {
 
   ipcMain.handle('window:is-fullscreen', () => {
     const win = getMainWindow()
-    if (!win || win.isDestroyed()) return { ok: false, fullscreen: false }
-    return { ok: true, fullscreen: win.isFullScreen() }
+    if (!win || win.isDestroyed()) return { ok: false, fullscreen: false, origin: null }
+    return { ok: true, fullscreen: win.isFullScreen(), origin: fullscreenOrigin }
   })
 }
 
+/**
+ * Quem mandou a janela entrar em tela cheia.
+ *
+ * `null`  = ninguem, e o padrao
+ * `'app'` = o app estava em tela cheia antes do video (F11 do dono, ou ele mesmo
+ *           ja em tela cheia e abriu um canal)
+ * `'player'` = o botao de tela cheia da barra, ou seja, o VIDEO trouxe a janela
+ *
+ * O `back` usa isso: se a tela cheia era do dono, o `back` so para o video e
+ * mantem a janela em tela cheia. Se foi o video, o `back` devolve a janela ao
+ * modo em que ela estava.
+ *
+ * Medido: com a checagem no renderer, o video subindo em um app que JA estava em
+ * tela cheia nao gerava evento nenhum — o espelho do renderer continuava `false`
+ * e o `back` tirava a janela de tela cheia de um video que o usuario nao pediu
+ * para sair. Quem tem de saber nao e o renderer: e o main, que ve a ordem real.
+ */
+let fullscreenOrigin = null
+
 function applyWindowFullscreen(win, enabled) {
   const next = enabled === true
+  /*
+    Guarda a origem ANTES de aplicar.
+
+    `playbackActive` e o sinal certo: ele e explicitamente ligado no `start` do
+    motor e desligado no `stop`. `activeEngine` nao serve — continua preenchido
+    entre um video e outro, e um F11 com o catalogo aberto era lido como video.
+  */
+  fullscreenOrigin = next ? (playbackActive ? 'player' : 'app') : null
   try {
-    win.setFullScreen(next)
     if (next) {
-      // Cobre a taskbar do Windows (sem isso o F11 deixa a barra visível)
-      win.setAlwaysOnTop(true, 'screen-saver')
+      win.setFullScreen(true)
+      /*
+        Nivel normal, nao 'screen-saver': o 'screen-saver' minimizava a janela na
+        entrada (medido: -32000,-32000 mesmo com `setFullScreen` puro antes, o
+        problema era o nivel aplicado em seguida). O nivel normal cobre a taskbar
+        durante o fullscreen sem sequestrar a janela.
+      */
+      win.setAlwaysOnTop(true)
     } else {
       win.setAlwaysOnTop(false)
+      win.setFullScreen(false)
+      /*
+        Sair de tela cheia minimizava a janela (medido: 160x28 em -32000,-32000).
+        A janela nasce com `show: false` e so aparece no `ready-to-show`; ao sair
+        do fullscreen o Electron a devolve ao estado "nao mostrada". O `show()`
+        apos a saida a mantem visivel em modo janela.
+      */
+      if (!win.isVisible()) win.show()
     }
   } catch {
     // ignore
@@ -721,7 +837,7 @@ function applyWindowFullscreen(win, enabled) {
 function refreshNativeFullscreenLayout(win) {
   if (!win || win.isDestroyed() || !activeEngine) return
   if (!win.isFullScreen()) return
-  if (activeEngine !== 'stur' && activeEngine !== 'mpv-one' && activeEngine !== 'mpv' && activeEngine !== 'libmpv') {
+  if (activeEngine !== 'stur' && activeEngine !== 'mpeg' && activeEngine !== 'mpv-one' && activeEngine !== 'mpv' && activeEngine !== 'libmpv') {
     return
   }
   try {
@@ -754,6 +870,7 @@ function bindFocusHooks(win) {
       }
       try {
         if (activeEngine === 'stur') stur.refreshLayout()
+        else if (activeEngine === 'mpeg') mpeg.refreshLayout()
         else if (activeEngine === 'mpv-one') mpvOne.refreshLayout()
       } catch {
         // ignore
@@ -805,10 +922,29 @@ function bindFullscreenHooks(win) {
   })
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return
-    // F11: só via globalShortcut com janela em foco (evita duplo-toggle com keydown do renderer)
     if (input.key === 'Escape') {
       event.preventDefault()
       win.webContents.send('player:ui-key', { key: 'Escape' })
+      return
+    }
+    /*
+      F11 durante o playback.
+
+      O renderer tratava F11 so quando `!useBufferedNative` — ou seja, o caminho
+      NATIVO. No motor buffered (o padrao deste app), o `keydown` do PlayerView
+      ignorava o F11 e ele nao tinha para onde ir. Medido: com video tocando, o
+      F11 nao entrava nem saia de tela cheia.
+
+      Aqui o main resolve, com ou sem player. E o main porque e o unico lugar que
+      sabe se o F11 ja foi tratado: o `globalShortcut` tambem dispara F11, e dois
+      caminhos invertendo a tela cheia no mesmo toque cancelariam.
+
+      `applyWindowFullscreen` guarda a origem a partir de `playbackActive`, entao
+      o `origin` continua correto para o `back` decidir se devolve a janela.
+    */
+    if (input.key === 'F11') {
+      event.preventDefault()
+      applyWindowFullscreen(win, !win.isFullScreen())
     }
   })
 }
@@ -842,6 +978,11 @@ function shutdownSync() {
   }
   try {
     stur.stop({ sync: true })
+  } catch {
+    // ignore
+  }
+  try {
+    mpeg.stop()
   } catch {
     // ignore
   }

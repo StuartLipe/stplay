@@ -174,6 +174,15 @@ const LIVE_SILENCE_MS = 20000
  */
 const LIVE_PRESENTABLE_CACHE_SECS = 3
 /**
+ * Quantas vezes reancorar a superficie antes de abrir o processo de novo.
+ *
+ * 1: a primeira constatacao ja reabre. O reancorar e barato e costuma
+ * resolver, porque o problema e apresentacao e nao dados. Se nao resolveu, a
+ * segunda vez ja eopatia — e continuar tentando e o que produzia o laco de ~20s
+ * sem fim.
+ */
+const LIVE_PRESENTABLE_MAX_RETRY = 1
+/**
  * Avanco MINIMO do playhead para contar como tempo andando.
  *
  * O 	ime-pos do mpv tem ruido de float: oscila nos ultimos digitos mesmo
@@ -185,6 +194,21 @@ const LIVE_PRESENTABLE_CACHE_SECS = 3
  * e bem acima do ruido.
  */
 const LIVE_TIME_POS_MIN_STEP = 0.15
+/**
+ * Avanco MINIMO para zerar o contador de tentativas, bem abaixo do piso de
+ * deteccao acima.
+ *
+ * Serve so para `liveStallRecoverCount = 0`, nao para decidir se o canal esta
+ * travado. O `time-pos` do HLS ao vivo avanca por segmento e fica parado
+ * entre eles; se o zerador usasse o mesmo piso de 0,15s, o contador nunca
+ * zeraria entre dois segmentos num canal saudavel, o watchdog armaria, e o
+ * `softReloadLive` reiniciaria a reproducao — o "repete a mesma frase" que a
+ * pessoa viu.
+ *
+ * 0,01s = menos de um frame a 30fps, e muito acima do jitter de float do mpv
+ * (ordem de 1e-6), entao nao reintroduz o bug que o piso maior corrigiu.
+ */
+const LIVE_TIME_POS_EPS = 0.01
 
 /**
  * Buffer cheio + playback parado NÃO é congelamento — é a borda viva.
@@ -240,6 +264,33 @@ function emit(payload) {
     overlay.sendEvent(payload)
   } catch {
     // ignore
+  }
+}
+
+/** Tenta a cadeia VOD inteira de novo com 5s (painel oscilando).
+ * Devolve true se agendou (chamador não deve falhar ainda). */
+function scheduleVodTimeRetry() {
+  if (liveMode || !sourceUrl || vodTimeRetries >= STUR_VOD_MAX_TIME_RETRIES) return false
+  vodTimeRetries += 1
+  const gen = loadGeneration
+  emit({ type: 'buffering', value: true, percent: 0, retry: vodTimeRetries, of: STUR_VOD_MAX_TIME_RETRIES })
+  log.warn('stur', 'vod time retry', { try: `${vodTimeRetries}/${STUR_VOD_MAX_TIME_RETRIES}` })
+  clearVodRetry()
+  vodRetryTimer = setTimeout(() => {
+    vodRetryTimer = null
+    if (gen !== loadGeneration || !running) return
+    vodTriedUrls = new Set()
+    void openUrl(mainWindow, sourceUrl, lastStartSec, lastBounds, { live: false })
+  }, STUR_VOD_RETRY_MS)
+  return true
+}
+/** @type {ReturnType<typeof setTimeout> | null} */
+let vodRetryTimer = null
+
+function clearVodRetry() {
+  if (vodRetryTimer) {
+    clearTimeout(vodRetryTimer)
+    vodRetryTimer = null
   }
 }
 
@@ -346,6 +397,35 @@ let nextLoadSoft = false
 /** Zap 1 tela: ignora end-file error do canal antigo (não dispara fallback/failed). */
 let releasingLiveSlot = false
 
+/**
+ * Quantas URLs ja foram tentadas para ESTE VOD, sem sucesso.
+ *
+ * Medido antes deste teto, no filme e na serie que o usuario reportou:
+ *
+ *   [10:58:23.295] loadfile ok    1607372.mp4
+ *   [10:58:23.769] end-file error 1607372.mp4
+ *   [10:58:23.770] vod fallback -> ext
+ *   [10:58:24.232] loadfile ok    1607372.mkv
+ *   [10:58:24.688] end-file error 1607372.mkv
+ *   [10:58:24.688] vod fallback -> ext
+ *   ... a cada ~460 ms, indefinidamente
+ *
+ * A causa NAO e o guard de generation (esse esta correto). E que `loadStream`
+ * devolve `true` assim que o comando `loadfile` e aceito pelo IPC — o erro de
+ * verdade so chega 400-500 ms depois, como `end-file error`. Entao o
+ * `tryFallbackLoad` achava que tinha funcionado, voltava, e a proxima tentativa
+ * usava `sourceUrl`, que ja tinha virado `.mkv`. O `.filter(item => item !== url)`
+ * so filtrava a extensao corrente do inicio; depois disso as duas extensoes
+ * continuavam no ciclo, uma contra a outra.
+ *
+ * Sem este contador o fallback e um `while (true)`: a tela fica em "carregando"
+ * para sempre e nunca mostra erro.
+ */
+let vodTriedUrls = new Set()
+
+/** Teto de URLs distintas por VOD. Acima disso o titulo esta indisponivel. */
+const VOD_MAX_URL_TRIES = 5
+
 /** stop() do mpv responde antes de fechar o TCP — waiters esperam o end-file. */
 let endFileWaiters = []
 
@@ -443,6 +523,81 @@ const PREFLIGHT_MEMO_MAX = 400
  * carimbado para sempre, senao o canal lento fica condensado no `.ts` pelo
  * resto da sessao.
  */
+/**
+ * A URL de VOD responde, mas o arquivo NAO existe?
+ *
+ * Este painel tem o mesmo episodio cadastrado duas vezes, com IDs diferentes, e
+ * so um dos dois tem arquivo de verdade. Medido em `Brave 10 [L]` (series_id
+ * 44008), episodio 1:
+ *
+ *   /series/.../1607372.mp4  -> 200 text/html, corpo comeca com `<html>`
+ *   /series/.../2187891.mp4  -> 200 video/mp4, bytes `00 00 00 20 66 74 79 70`
+ *
+ * O `1607372` responde 200 e `Content-Type: text/html`: e a pagina 404 do XUI.one
+ * ("Debug Mode / notfound") vestida de sucesso. O mpv abre, pede o arquivo, leva
+ * `<html>` para o demuxer, e morre com `end-file error` — sem nunca dizer que o
+ * arquivo nao esta la.
+ *
+ * Sem esta sondagem, o `tryFallbackLoad` so descobria isso tentando `.mp4`, `.mkv`,
+ * `.avi`, `.ts`, http e ffmpeg do MESMO ID morto: seis URLs, ~4,5 s, e o titulo
+ * nunca abre. Com a sondagem, a recusa e imediata e o erro diz a verdade.
+ *
+ * Mesmo contrato de tres estados do preflight de live: `false` so quando o painel
+ * respondeu e o corpo NAO e midia. Timeout/erro de rede devolvem `null` ("nao
+ * sei") e nao condenam a URL — um servidor lento nao e um arquivo ausente.
+ */
+const VOD_HTML_PREFIX = /^\s*(<!doctype html|<html)/i
+
+async function vodUrlHasMedia(url) {
+  if (!/\.(mp4|mkv|avi|ts|mov|flv|webm|m4v)(\?|#|$)/i.test(url)) return true
+  const memo = preflightVerdict.get(url)
+  if (memo !== undefined) return memo
+
+  let healthy = true
+  try {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), PREFLIGHT_TIMEOUT_MS)
+    try {
+      const res = await withTimeout(
+        electronNet.fetch(url, {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Lavf/60.16.100',
+            Referer: `${new URL(url).origin}/`,
+            Range: 'bytes=0-255',
+          },
+          signal: ctrl.signal,
+        }),
+        PREFLIGHT_TIMEOUT_MS,
+      )
+      const type = String(res.headers.get('content-type') || '')
+      if (/text\/html/i.test(type)) {
+        healthy = false
+      } else {
+        // Alguns servidores ignoram o Range e devolvem 200 com o corpo inteiro.
+        // Ler 256 bytes e barato e é o que separa midia de pagina de erro.
+        const peek = await res.text()
+        if (VOD_HTML_PREFIX.test(peek)) healthy = false
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch (error) {
+    log.info('stur', 'preflight de VOD indefinido (nao e veredito negativo)', {
+      error: error instanceof Error ? error.message : String(error),
+      url: url.slice(-60),
+    })
+    return null
+  }
+
+  if (preflightVerdict.size >= PREFLIGHT_MEMO_MAX) {
+    const oldest = preflightVerdict.keys().next()
+    if (!oldest.done) preflightVerdict.delete(oldest.value)
+  }
+  preflightVerdict.set(url, healthy)
+  return healthy
+}
+
 async function liveManifestHealthy(url) {
   if (!liveMode || !/\.m3u8(\?|#|$)/i.test(url)) return true
   const memo = preflightVerdict.get(url)
@@ -972,8 +1127,30 @@ function getProperty(name) {
 }
 
 function startBufferPoll() {
-  // Player One: % só via observe cache-buffering-state — sem progresso falso.
+  // Percentual 0→100 igual Smarters: mede demuxer-cache-time a cada 400ms
+  // enquanto o 1º frame não chega. O observe de cache-buffering-state sozinho
+  // quase nunca dispara (só quando o mpv pausa por cache) — o número ficava
+  // parado e o véu mostrava spinner seco. Vale pra live, filme e série.
   stopBufferPoll()
+  const gen = loadGeneration
+  bufferPollTimer = setInterval(async () => {
+    if (gen !== loadGeneration || !running || !waitingFirstFrame) {
+      stopBufferPoll()
+      return
+    }
+    try {
+      const secs = await getProperty('demuxer-cache-time')
+      if (gen !== loadGeneration || !running || !waitingFirstFrame) return
+      if (typeof secs === 'number' && secs > 0) {
+        reportBufferPercent(percentFromCacheTime(secs), { forceActive: true })
+      } else {
+        // Sem dado ainda: garante o véu com 1% em vez de tela preta seca.
+        reportBufferPercent(1, { forceActive: true })
+      }
+    } catch {
+      // próxima volta tenta de novo
+    }
+  }, 400)
 }
 
 function windowHwnd(win) {
@@ -1185,6 +1362,20 @@ function showVideo(bounds) {
     winApi.SetWindowPos(mpvHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
     winApi.ShowWindow(mpvHwnd, SW_SHOWNA)
     videoHidden = false
+  } else if (videoHidden) {
+    /*
+      `wasHidden` vem de uma copia lida ANTES do `ensureEmbedded`. Se o
+      `ensureEmbedded` reancorar o pai, `isMpvDetached()` passa a falso e os
+      dois flags caem juntos, mas a janela segue escondida: o `else if` pegava
+      esse caso e mantinha `videoHidden` verdadeiro para sempre.
+
+      E o estado inconsistente faz o `isSurfaceLost()` do `raiseTimer` continuar
+      verdadeiro a cada tique, o que produzia o log repetido de "superficie de
+      video perdida — reancorando" (136 vezes no log) sem nada mudar.
+    */
+    winApi.SetWindowPos(mpvHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+    winApi.ShowWindow(mpvHwnd, SW_SHOWNA)
+    videoHidden = false
   }
   // Overlay sempre por cima do HWND — senão mouse/touch caem no mpv
   elevateOverlay()
@@ -1255,6 +1446,8 @@ function killMpv(opts = {}) {
   liveStallRecoverBusy = false
   liveStallRecoverCount = 0
   liveUnhealthyLoads = 0
+  vodTimeRetries = 0
+  clearVodRetry()
   for (const [, cb] of pendingRequests) {
     try {
       cb({ error: 'killed' })
@@ -1295,6 +1488,40 @@ function killMpv(opts = {}) {
   return forceKillProc(proc, { sync: opts.sync === true })
 }
 
+/**
+ * Qual PROCESSO este socket atende.
+ *
+ * Cada `mpv` novo abre o seu proprio named pipe, entao o socket e a fronteira
+ * natural entre "evento do processo velho" e "evento do processo atual". O
+ * `killMpv` fecha o socket do velho ANTES do novo subir, mas o `end-file` do
+ * velho ja foi enfileirado no `ipcBuf` e sai no proximo `data` — que pode
+ * acontecer depois que o novo processo ja conectou.
+ *
+ * POR QUE ISTO E O PID, E NAO A `loadGeneration`:
+ *
+ * A primeira versao do guard comparava com `loadGeneration`, e isso QUEBROU o
+ * VOD inteiro. Medido:
+ *
+ *   [10:38:57.953] end-file de carga antiga, ignorado  reason=error gen=56 atual=57
+ *   [10:39:25.406] no file-loaded before timeout, trying fallback
+ *   [10:39:25.407] vod fallback -> ext   (.mp4 -> .mkv)
+ *   [10:39:43.9..] repete, 28 s por ciclo, para sempre
+ *
+ * `loadGeneration` conta CARGAS, nao processos. O fallback de VOD recarrega no
+ * MESMO processo vivo: `loadStream` chama `bumpLoadGeneration()` e manda
+ * `loadfile` pelo socket que ja estava conectado. Entao a generation do socket
+ * ficava uma atras, e o `end-file error` do processo VIVO — que e exatamente o
+ * sinal que dispara o proximo fallback — era descartado como "carga antiga".
+ *
+ * Sem o sinal, o fallback so avancava pelo timeout de 28 s, um ext por vez,
+ * para sempre: filme e serie nunca carregavam. Era o "carregando dos filmes ta
+ * demorando muito".
+ *
+ * O PID nao tem esse problema: muda quando o processo muda, e nao muda quando so
+ * a carga muda.
+ */
+let ipcGeneration = -1
+
 function connectIpcOnce() {
   return new Promise((resolve) => {
     if (!pipePath) {
@@ -1313,6 +1540,9 @@ function connectIpcOnce() {
     socket.once('connect', () => {
       clearTimeout(timer)
       ipcSocket = socket
+      // Carimba o socket com o PID que ele atende. Mudar de carga no mesmo
+      // processo NAO muda este numero — so `spawn` novo muda.
+      ipcGeneration = mpvProc && !mpvProc.killed ? mpvProc.pid : -1
       ipcBuf = ''
       socket.on('data', (chunk) => {
         ipcBuf += chunk.toString('utf8')
@@ -1322,7 +1552,13 @@ function connectIpcOnce() {
           const trimmed = line.trim()
           if (!trimmed) continue
           try {
-            handleIpcMessage(JSON.parse(trimmed))
+            const parsed = JSON.parse(trimmed)
+            // Carimba a generation de quem enviou. O `handleIpcMessage`
+            // descarta o que nao for da carga viva.
+            if (parsed && typeof parsed === 'object') {
+              parsed._stplayGeneration = ipcGeneration
+            }
+            handleIpcMessage(parsed)
           } catch {
             // ignore
           }
@@ -1389,6 +1625,13 @@ function presentLoadingShell() {
       if (overlay.reshow) overlay.reshow()
     }
     overlay.sendUi({ action: 'boot' })
+    /*
+     * O `show-controls` aqui e so para o renderer ter os controles acesos. Ele
+     * NAO pode derrubar a janela para a barra enquanto o canal carrega: e o que
+     * fazia a roda de `carregando...` aparecer colada no rodape em vez de no meio
+     * do video. Quem fecha a tela cheia do loading e `playback-ready` /
+     * `hide-loading`, em `presentPlayback`.
+     */
     overlay.sendUi({ action: 'show-controls' })
   } catch {
     // ignore
@@ -1581,6 +1824,32 @@ function noteLiveTimePos(pos) {
     lastLiveTimePosAtPos = pos
     lastLiveTimePosAt = Date.now()
     liveStallRecoverCount = 0
+    return
+  }
+
+  /*
+    AVANCO PEQUENO AINDA E AVANCO.
+
+    O `time-pos` do HLS ao vivo NAO corre continuamente: ele avanca por
+    segmento. Entre dois segmentos ele fica no mesmo valor por 8 a 12s, e o
+    piso de `LIVE_TIME_POS_MIN_STEP` (0,15s) rejeita esse avanco intermediario
+    como jitter.
+
+    E o `liveStallRecoverCount = 0` vivia SO dentro do if. Num canal em que o
+    playhead so se move de um salto a cada segmento, o contador nao era
+    zerado NUNCA entre dois segmentos: acumulava, o watchdog armava em canal
+    saudavel, e o `softReloadLive` reiniciava a reproducao do zero. O sintoma
+    e exatamente o relatado: "roda liso e de repente repete a mesma frase",
+    porque recarregar um live volta para o comeco do que ja tinha tocad.
+
+    O piso aqui e menor de proposito: 1 frame a 30fps e 0,033s, entao qualquer
+    avanco real passa, e o jitter de float do mpv (ordem de 1e-6) continua
+    fora.
+  */
+  if (Math.abs(pos - lastLiveTimePosAtPos) >= LIVE_TIME_POS_EPS) {
+    lastLiveTimePosAtPos = pos
+    lastLiveTimePosAt = Date.now()
+    liveStallRecoverCount = 0
   }
 }
 
@@ -1691,8 +1960,34 @@ async function recoverLiveStall(reason) {
     // Quem consome(video bufferizado) e o VO. A resposta certa e reancorar a
     // superficie e cutucar o presentation, que e barato e reversivel.
     if (lastCacheTime >= LIVE_PRESENTABLE_CACHE_SECS) {
+      /*
+        REAPRESENTAR E SO UMA TENTATIVA, NAO UM CAMINHO SEM FIM.
+
+        O log mediu o ciclo: `reapresentando` com cacheTime 5.96 seguido de
+        `live stall recover count=2` 21 s depois, com o MESMO cacheTime. O
+        reancorar a superficie nao puxa quadro nenhum, entao o `raiseTimer`
+        reavisa, o VO continua sem apresentar, e o ciclo se repete para sempre
+        — que e o "fica em loop" que a pessoa viu no ao vivo.
+
+        A correcao e contar esta tentativa como qualquer outra: ela ja
+        incrementa `liveStallRecoverCount` no topo da funcao, e o teto logo
+        abaixo (`>= LIVE_STALL_MAX_RECOVER`) manda para `softReloadLive`. Com o
+        buffer cheio e o video ainda parado apos uma reapresentacao, abrir o
+        processo de novo e o que traz os quadros de volta.
+      */
+      if (liveStallRecoverCount > LIVE_PRESENTABLE_MAX_RETRY) {
+        log.warn('stur', 'reapresentar nao resolveu, reabrindo', {
+          tentativas: liveStallRecoverCount,
+          cacheTime: lastCacheTime,
+          url: (livePlayUrl || sourceUrl || '').slice(0, 100),
+        })
+        liveStallRecoverCount = 0
+        await softReloadLive()
+        return
+      }
       log.info('stur', 'reapresentando: ha video bufferizado, nao e rede', {
         cacheTime: lastCacheTime,
+        tentativa: liveStallRecoverCount,
       })
       if (lastBounds) {
         lastPlacedKey = ''
@@ -1763,6 +2058,37 @@ function handleIpcMessage(msg) {
   if (msg.event === 'property-change') {
     if (msg.name === 'time-pos' && typeof msg.data === 'number') {
       emit({ type: 'timeupdate', current: msg.data })
+      /*
+        TRACE TEMPORARIO de rewind no ao vivo (STPLAY_TP_TRACE=1).
+
+        O dono relata que o ao vivo "volta uns segundos de vez em quando". Nem
+        reload (raro no log) nem o normalizador (sequencia propria monotonica)
+        explicam. Este trace registra toda vez que o `time-pos` ANDA PARA TRAS
+        mais de 1s, com o antes/depois — e sai sozinho sem a variavel.
+      */
+      if (
+        process.env.STPLAY_TP_TRACE === '1' &&
+        liveMode &&
+        typeof lastLiveTimePos === 'number' &&
+        lastLiveTimePos >= 0 &&
+        msg.data < lastLiveTimePos - 1
+      ) {
+        log.warn('stur', 'time-pos VOLTOU', {
+          de: Number(lastLiveTimePos.toFixed(2)),
+          para: Number(msg.data.toFixed(2)),
+          voltaSeg: Number((lastLiveTimePos - msg.data).toFixed(2)),
+          cacheTime: lastCacheTime,
+          cacheParadoMs: lastCacheTimeAt > 0 ? Date.now() - lastCacheTimeAt : -1,
+          modo: currentLoadMode,
+          janelaNormalizada: (() => {
+            try {
+              return normalizer.inspecionar(sourceUrl)
+            } catch {
+              return null
+            }
+          })(),
+        })
+      }
       noteLiveTimePos(msg.data)
       if (fileLoaded && waitingFirstFrame && (liveMode || !pausedForCache)) {
         if (firstFrameBase === null) firstFrameBase = msg.data
@@ -1836,6 +2162,20 @@ function handleIpcMessage(msg) {
       if (!playbackStable) armLoadWatchdog(loadGeneration)
     }
   }
+  if (process.env.STPLAY_TP_TRACE === '1' && msg.event === 'seek') {
+    log.warn('stur', 'mpv SEEK (demuxer reposicionou sozinho)', {
+      live: liveMode,
+      timePos: typeof lastLiveTimePos === 'number' ? Number(lastLiveTimePos.toFixed(2)) : null,
+    })
+  }
+  if (msg.event === 'playback-restart') {
+    if (process.env.STPLAY_TP_TRACE === '1') {
+      log.warn('stur', 'mpv playback-restart', {
+        live: liveMode,
+        timePos: typeof lastLiveTimePos === 'number' ? Number(lastLiveTimePos.toFixed(2)) : null,
+      })
+    }
+  }
   if (msg.event === 'file-loaded') {
     fileLoaded = true
     if (liveMode && livePlaybackReady) {
@@ -1905,6 +2245,43 @@ function handleIpcMessage(msg) {
     log.info('stur', 'file-loaded', { live: liveMode })
   }
   if (msg.event === 'end-file') {
+    /*
+      END-FILE DO PROCESSO ANTIGO, CHEGANDO DEPOIS DO ZAP.
+
+      Medido nesta sessao:
+
+        04:56:17.228  end-file stop       2396229.m3u8   (canal A)
+        04:56:22.431  start               2396229.m3u8   (mesmo canal, zap)
+        04:56:22.780  end-file stop       2396226.m3u8   (canal B, ANTIGO)
+        04:56:22.786  reloaded            2396226.m3u8   reinicia o canal ERRADO
+
+      O `stop`/`error` do processo que MORREU chega some frames DEPOIS do
+      `start` do novo. Este handler nao checa de qual processo o evento veio, entao
+      tratava o evento velho como se fosse do canal atual: disparava
+      `tryFallbackLoad` / `softReloadLive` e reiniciava a reproducao do canal que
+      acabara de subir.
+
+      O sintoma era o "repete 3 a 4 segundos e segue normal": o canal tocava,
+      o end-file velho chegava, e o `reloaded` voltava o mesmo canal no inicio.
+      A cada ~5 s. E o video pareceia congelado sem nunca dar erro.
+
+      A guarda e o PID: o evento so age se veio do processo VIVO. Ver o
+      comentario de `ipcGeneration` para por que `loadGeneration` nao serve aqui
+      — usar ela descartava o `end-file error` do processo vivo e travava o
+      fallback de VOD em ciclo de 28 s.
+    */
+    const evPid = msg._stplayGeneration
+    const atualPid = mpvProc && !mpvProc.killed ? mpvProc.pid : -1
+    const stale = typeof evPid === 'number' && evPid !== atualPid
+    if (stale) {
+      log.info('stur', 'end-file de processo morto, ignorado', {
+        reason: msg.reason,
+        pidDoEvento: evPid,
+        pidVivo: atualPid,
+        sourceUrl: (sourceUrl || '').slice(0, 90),
+      })
+      return
+    }
     fileLoaded = false
     resolveEndFileWaiters()
     if (msg.reason === 'eof') {
@@ -1933,9 +2310,32 @@ function handleIpcMessage(msg) {
         currentLoadMode !== 'ffmpeg' &&
         currentLoadMode !== 'http-ts'
       if (canFallback) {
+        // Igual MPEG/Smarters ("reconnects in 5s (x/5)"): o overlay mostra
+        // o contador. Vale pra live, filme e série — mesmo evento, mesmo texto.
+        const retryOf = liveMode ? LIVE_MAX_UNHEALTHY_LOADS : VOD_MAX_URL_TRIES
+        const retryN = liveMode ? liveUnhealthyLoads + 1 : vodTriedUrls.size + 1
+        emit({ type: 'buffering', value: true, percent: 0, retry: retryN, of: retryOf })
         void (async () => {
           const ok = await tryFallbackLoad(sourceUrl, lastStartSec)
           if (!ok) {
+            // Cadeia esgotada mas painel pode estar oscilando (404 agora, play
+            // depois — medido no 2357481 que o MPEG abriu minutos depois). Em
+            // VOD tenta a cadeia inteira de novo, 5x com 5s. Live não: live
+            // tem o próprio ciclo de unhealthy/reload.
+            if (!liveMode && sourceUrl && vodTimeRetries < STUR_VOD_MAX_TIME_RETRIES) {
+              vodTimeRetries += 1
+              const gen = loadGeneration
+              emit({ type: 'buffering', value: true, percent: 0, retry: vodTimeRetries, of: STUR_VOD_MAX_TIME_RETRIES })
+              log.warn('stur', 'vod time retry', { try: `${vodTimeRetries}/${STUR_VOD_MAX_TIME_RETRIES}` })
+              clearVodRetry()
+              vodRetryTimer = setTimeout(() => {
+                vodRetryTimer = null
+                if (gen !== loadGeneration || !running) return
+                vodTriedUrls = new Set()
+                void openUrl(mainWindow, sourceUrl, lastStartSec, lastBounds, { live: false })
+              }, STUR_VOD_RETRY_MS)
+              return
+            }
             emitFailed(
               liveMode
                 ? 'Canal indisponível no momento (offline ou ainda não começou)'
@@ -2074,6 +2474,9 @@ function observeProperties() {
 async function tryFallbackLoad(url, startSec) {
   if (fallbackBusy || !running || !url) return false
   fallbackBusy = true
+  // Modo cru falhou: vira 'direct' pra cadeia de fallback existente
+  // (variantes de extensão no VOD, .ts/http no live) valer igual pros dois.
+  if (currentLoadMode === 'raw') currentLoadMode = 'direct'
   try {
     const asTs = (u) => (/\.m3u8(\?|$)/i.test(u) ? u.replace(/\.m3u8(\?|$)/i, '.ts$1') : null)
 
@@ -2133,9 +2536,39 @@ async function tryFallbackLoad(url, startSec) {
           }
         }
       } else {
-        const variants = vodUrlVariants(url).filter((item) => item !== url)
+        /*
+         * So Variantes que ainda NAO foram tentadas, e com teto.
+         *
+         * O `vodTriedUrls` e o que fecha o ciclo: cada URL so entra no conjunto
+         * uma vez, entao `.mp4` e `.mkv` nao ficam alternando para sempre. E o
+         * teto garante que, mesmo com URLs novas aparecendo, o VOD desiste e
+         * mostra erro em vez de girar em "carregando" ate o fim dos tempos.
+         */
+        if (vodTriedUrls.size >= VOD_MAX_URL_TRIES) {
+          log.warn('stur', 'vod sem plano B — todas as URLs falharam', {
+            tentadas: vodTriedUrls.size,
+            ultima: url,
+          })
+          return false
+        }
+        const variants = vodUrlVariants(url).filter(
+          (item) => item !== url && !vodTriedUrls.has(item),
+        )
         for (const variant of variants) {
-          log.info('stur', 'vod fallback → ext')
+          if (vodTriedUrls.size >= VOD_MAX_URL_TRIES) break
+          /*
+           * Sonda ANTES de gastar uma carga. Sem isso, trocar `.mp4` por `.mkv`
+           * nao adianta nada quando o ID esta morto no painel: todas as extensoes
+           * do mesmo ID devolvem a mesma pagina 404 em HTML.
+           */
+          const temMidia = await vodUrlHasMedia(variant)
+          if (temMidia === false) {
+            log.info('stur', 'vod: URL sem midia, pulando', { tentativa: vodTriedUrls.size + 1, url: variant })
+            vodTriedUrls.add(variant)
+            continue
+          }
+          vodTriedUrls.add(variant)
+          log.info('stur', 'vod fallback → ext', { tentativa: vodTriedUrls.size, url: variant })
           if (await loadStream(variant, startSec, 'direct')) {
             sourceUrl = variant
             armLoadWatchdog(loadGeneration)
@@ -2255,14 +2688,26 @@ function buildMpvArgs(url, wid = 0) {
     '--osd-on-seek=no',
     '--no-input-default-bindings',
     '--input-vo-keyboard=no',
-    '--vo=gpu',
-    '--hwdec=auto-safe',
+    // gpu-next: 4K DV/HDR abre (tonemapping via libplacebo). O vo=gpu antigo
+    // não decodifica Dolby Vision e o filme morria em end-file error.
+    '--vo=gpu-next',
+    '--hwdec=auto',
+    '--hdr-compute-peak=yes',
+    '--tone-mapping=auto',
     '--cache=yes',
     liveMode ? '--demuxer-max-bytes=96MiB' : '--demuxer-max-bytes=512MiB',
     liveMode ? '--demuxer-readahead-secs=8' : '--demuxer-readahead-secs=120',
     liveMode ? '--cache-pause-initial=no' : '--cache-pause-initial=yes',
     liveMode ? '--cache-pause-wait=1' : '--cache-pause-wait=8',
-    liveMode ? '--cache-secs=8' : '--cache-secs=30',
+    /*
+      EXPERIMENTO (volta-segundos no live): cache de 8s para 30s.
+
+      Hipotese: com `cache-secs=8` e segmento de 10s/3.5MB, qualquer
+      oscilacao da rede esvazia o cache, o mpv emite `playback-restart` e
+      zera o `time-pos` — imagem e audio voltando juntos. Se com 30s o VOLTOU
+      sumir ou espacar, a causa e fome de buffer e o numero fica.
+    */
+    liveMode && process.env.STPLAY_DEEP_CACHE === '1' ? '--cache-secs=30' : liveMode ? '--cache-secs=8' : '--cache-secs=30',
     '--volume=100',
     '--user-agent=VLC/3.0.21 LibVLC/3.0.21',
     // 10s no live, 60s no VOD. O valor importava: um socket aberto que não
@@ -2271,8 +2716,14 @@ function buildMpvArgs(url, wid = 0) {
     // ele segurava um minuto de tela parada antes de reagir.
     `--network-timeout=${networkTimeoutSecs(liveMode)}`,
     '--tls-verify=no',
-    '--no-terminal',
+    ...(process.env.STPLAY_MPV_DEBUG === '1' ? [] : ['--no-terminal']),
   ]
+  if (process.env.STPLAY_MPV_DEBUG === '1') {
+    // TRACE TEMPORARIO do demuxer (investigacao do "volta segundos" no live).
+    // Sem `--no-terminal`: ele silencia o stderr, e o pipe do scope `mpv`
+    // fica mudo mesmo com `msg-level` alto.
+    args.push('--msg-level=demux=debug')
+  }
   if (liveMode) {
     args.push(`--demuxer-lavf-o=${liveDemuxerLavfO(true)}`)
   } else if (isHls) {
@@ -2528,18 +2979,31 @@ async function openUrl(win, url, startTime = 0, bounds = null, opts = {}) {
   //
   // Antes o live tentava SÓ `direct`: `shouldTryHttpFallback(true)` era false, e
   // o proxy ficava fora da jogada por completo, não como fallback.
+  // Igual MPEG/Smarters: URL CRUA direta primeiro, sem preflight, sem
+  // normalizer, sem redirect. Se o mpv abrir, acabou — o resto da cadeia
+  // (proxy/normalizer/remux) só entra se o direto falhar.
   let playUrl = null
   let usedMode = null
-  for (const mode of loadModeOrder(liveMode)) {
-    const url2 = await loadStream(url, startSec, mode)
-    if (gen !== loadGeneration) {
-      nextLoadSoft = false
-      return null
-    }
-    if (url2) {
-      playUrl = url2
-      usedMode = mode
-      break
+  const rawFirst = await loadStream(url, startSec, 'raw')
+  if (gen !== loadGeneration) {
+    nextLoadSoft = false
+    return null
+  }
+  if (rawFirst) {
+    playUrl = rawFirst
+    usedMode = 'raw'
+  } else {
+    for (const mode of loadModeOrder(liveMode)) {
+      const url2 = await loadStream(url, startSec, mode)
+      if (gen !== loadGeneration) {
+        nextLoadSoft = false
+        return null
+      }
+      if (url2) {
+        playUrl = url2
+        usedMode = mode
+        break
+      }
     }
   }
   if (playUrl) {
@@ -2553,7 +3017,7 @@ async function openUrl(win, url, startTime = 0, bounds = null, opts = {}) {
 
   nextLoadSoft = false
   armLoadWatchdog(gen)
-  if (!liveMode) startBufferPoll()
+  startBufferPoll()
   startRaiseTimer()
   if (bounds) lastBounds = bounds
   return { playUrl, mode: currentLoadMode, startSec }
@@ -2575,6 +3039,13 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
   log.info('stur', 'start', { live: opts.live === true, startTime, url: String(url).slice(0, 120) })
 
   liveMode = opts.live === true
+  /*
+   * Cada `start` e um titulo novo, entao o historico de URLs que falharam nao
+   * vale contra este. Sem esta limpeza o teto de `VOD_MAX_URL_TRIES` continuaria
+   * valendo de um filme para o outro, e o segundo titulo nem comecaria a tentar.
+   */
+  vodTriedUrls = new Set()
+  if (!liveMode) vodTriedUrls.add(url)
   livePlaybackReady = false
   playbackStable = false
   overlayPresented = false
@@ -2589,6 +3060,8 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
   // Zera o contador de canal morto: `start` é o início de uma tentativa nova,
   // e o histórico de frustração do canal anterior não vale contra este.
   liveUnhealthyLoads = 0
+  vodTimeRetries = 0
+  clearVodRetry()
 
   if (isRunning()) {
     const fast = await reload(win, url, startTime, bounds, opts)
@@ -2705,7 +3178,22 @@ async function reload(win, url, startTime = 0, bounds = null, opts = {}) {
   firstFrameBase = null
   if (!softLiveZap) cachePercent = 0
   clearLiveShowTimer()
+  // Zap limpa o frame velho na hora + véu de boot, sempre (igual Smarters e
+  // igual MPEG). Quadro congelado enquanto o novo não chega era o "trava e
+  // abre só depois". Vale live, filme e série.
+  try {
+    hideVideo()
+  } catch {
+    // ignore
+  }
   if (!softLiveZap) presentLoadingShell()
+  else {
+    try {
+      overlay.sendUi({ action: 'boot' })
+    } catch {
+      // ignore
+    }
+  }
 
   const opened = await openUrl(win, url, startTime, bounds, opts)
   nextLoadSoft = false
@@ -2817,6 +3305,30 @@ async function command(op, value) {
 
 function setBounds(rect) {
   if (!rect) return { ok: false }
+  // REGISTRO DO RECT QUE A JANELA PRINCIPAL MANDA.
+  //
+  // Sem esta linha nao ha como responder por que a superficie do mpv cobre o
+  // catalogo. Medido no sintoma: a HWND 'mpv' estava em (168,101) 1584x861 —
+  // a area do cliente INTEIRA, com o browse embaixo — e `placedKey` chegava
+  // vazio no aviso de superficie perdida. `lastBounds` e o que decide o
+  // tamanho, e ele vinha de algum lugar que o log nao mostrava.
+  //
+  // POR TRAS DO PORTAO: `setBounds` e chamado em toda troca de canal, em todo
+  // resize, em toda entrada e saida de tela cheia — pelo ResizeObserver. Logar
+  // incondicionalmente enche o arquivo de ruido e mascara o que importa. O
+  // mesmo desenho de portao que `STPLAY_STATS` e `STPLAY_FS_DEBUG` ja usam.
+  if (process.env.STPLAY_BOUNDS_DEBUG) {
+    log.info('stur', 'setBounds', {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      w: Math.round(rect.width),
+      h: Math.round(rect.height),
+      cliente: mainWindow ? (() => {
+        const c = mainWindow.getContentBounds()
+        return `${Math.round(c.width)}x${Math.round(c.height)}`
+      })() : null,
+    })
+  }
   placeVideo(rect)
   return { ok: true }
 }

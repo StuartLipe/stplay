@@ -1,4 +1,4 @@
-export type PlayerEngine = 'internal' | 'libmpv' | 'mpv' | 'mpv-one' | 'stur' | 'vlc' | 'mpc'
+export type PlayerEngine = 'internal' | 'libmpv' | 'mpv' | 'mpv-one' | 'stur' | 'mpeg' | 'vlc' | 'mpc'
 
 export type VideoRect = {
   x: number
@@ -31,7 +31,7 @@ export type PlayerEvent =
   | { type: 'timeupdate'; current: number }
   | { type: 'duration'; value: number }
   | { type: 'ended' }
-  | { type: 'buffering'; value: boolean; percent?: number }
+  | { type: 'buffering'; value: boolean; percent?: number; retry?: number; of?: number }
   | { type: 'preview' }
   | { type: 'failed'; reason: string }
   | { type: 'tracks'; audio?: unknown[]; subs?: unknown[] }

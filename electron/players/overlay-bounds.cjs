@@ -1,5 +1,19 @@
-/** Altura da janela overlay (barra inferior — dock completo com seek + toolbar). */
-const OVERLAY_BAR_HEIGHT = 148
+/**
+ * Altura MINIMA da janela overlay durante a reproducao.
+ *
+ * Medido no modo janela (video de 277px de altura), com o dock atual:
+ *
+ *   titulo 20 + busca 22 + toolbar 92 (duas fileiras de 44) + padding 16 = 150px
+ *
+ * O piso era 72px, e a janela ficava em 72 com o dock pedindo 159. O que sobra
+ * de uma janela menor que o conteudo e o FIM da lista: os botoes de baixo saem
+ * pelo `overflow: hidden`, e sobrava so o ultimo — o de tela cheia. Era o
+ * "no modo janela aparece so o icone de tela cheia".
+ *
+ * 168px da folga para duas fileiras de botoes mesmo com o seek, e ainda e
+ * proporcional: a barra e limitada pelos 20% de `overlayBarRect`.
+ */
+const OVERLAY_BAR_MIN_HEIGHT = 168
 
 /** Espaço inferior reservado aos controles React — o HWND do mpv não cobre essa faixa. */
 const CONTROL_INSET_PX = 100
@@ -9,7 +23,18 @@ const CONTROL_INSET_PX = 100
  */
 function overlayBarRect(videoRect) {
   if (!videoRect || videoRect.width < 32 || videoRect.height < 32) return videoRect
-  const h = Math.min(OVERLAY_BAR_HEIGHT, Math.max(112, Math.round(videoRect.height * 0.2)))
+  /*
+   * PISO = ALTURA MINIMA, e nao um teto.
+   *
+   * A janela e limitada pelos 20% da altura do video, mas NUNCA fica abaixo de
+   * `OVERLAY_BAR_MIN_HEIGHT`: o dock tem duas fileiras de botoes mais o seek, e
+   * uma janela menor que o conteudo corta o que esta no fim da lista — que era
+   * exatamente o sintoma de "so aparece o icone de tela cheia".
+   *
+   * Em um video alto o video manda (20%), e a barra continua compacta.
+   */
+  const byVideo = Math.round(videoRect.height * 0.2)
+  const h = Math.max(OVERLAY_BAR_MIN_HEIGHT, Math.min(byVideo, videoRect.height))
   return {
     x: Math.round(videoRect.x),
     y: Math.round(videoRect.y + videoRect.height - h),
@@ -68,9 +93,15 @@ function overlayShellRect(videoRect, opts = {}) {
 function videoContentRect(videoRect, opts = {}) {
   if (!videoRect || videoRect.width < 32 || videoRect.height < 120) return videoRect
   const fullscreen = opts.fullscreen === true
+  /*
+   * O recuo tem que ser >= a barra, nunca menor: e ele que tira o HWND do mpv de
+   * baixo da janela do overlay. Com a barra em 168px e o recuo em 100px, os 68px
+   * de cima da barra ficavam SOBRE o video — que e o que a janela do Chromium
+   * nao pode fazer sem congelar a apresentacao do swapchain D3D11.
+   */
   const inset = fullscreen
-    ? Math.min(88, Math.max(64, Math.round(videoRect.height * 0.1)))
-    : Math.min(CONTROL_INSET_PX, Math.max(72, Math.round(videoRect.height * 0.16)))
+    ? Math.min(168, Math.max(64, Math.round(videoRect.height * 0.1)))
+    : Math.min(videoRect.height - 80, Math.max(72, Math.round(videoRect.height * 0.16)))
   return {
     x: Math.round(videoRect.x),
     y: Math.round(videoRect.y),
@@ -80,7 +111,7 @@ function videoContentRect(videoRect, opts = {}) {
 }
 
 module.exports = {
-  OVERLAY_BAR_HEIGHT,
+  OVERLAY_BAR_MIN_HEIGHT,
   CONTROL_INSET_PX,
   overlayBarRect,
   overlayShellRect,

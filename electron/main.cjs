@@ -215,10 +215,13 @@ ipcMain.handle('internal-debug', async (event, payload) => {
 
 // Remux local pro player interno: TS/HEVC/AC3 que o Chromium não abre sozinho.
 // ffmpeg copia o vídeo e o renderer toca o fmp4 progressivo. Sem mpv no interno.
+// fast=1 => args de remux rápido (player MPEG: 1º frame cedo, estilo Smarters).
 ipcMain.handle('ffmpeg:wrap', async (_event, remoteUrl, startSec, fresh) => {
   try {
     if (typeof remoteUrl !== 'string' || !/^https?:\/\//i.test(remoteUrl)) return { ok: false }
-    const url = await ffmpegProxy.wrapUrl(remoteUrl, Math.max(0, Number(startSec) || 0), fresh === true)
+    const useFresh = fresh === true
+    const useFast = fresh === 'fast' || (fresh !== null && typeof fresh === 'object' && fresh.fast === true)
+    const url = await ffmpegProxy.wrapUrl(remoteUrl, Math.max(0, Number(startSec) || 0), useFresh, { fast: useFast })
     return { ok: true, url }
   } catch {
     return { ok: false }
@@ -304,11 +307,23 @@ async function handleProxy(request) {
     if (safeAccept) headers.Accept = safeAccept
   }
 
+  const t0 = Date.now()
+  const shortUrl = dest.href.slice(0, 160)
   try {
     const upstream = await net.fetch(dest.href, {
       method: 'GET',
       headers,
       bypassCustomProtocolHandlers: true,
+    })
+    const len = upstream.headers.get('content-length')
+    // Painéis grandes (get.php com 300k+ canais) devolvem 100MB+; loga para
+    // separar "servidor recusou" de "resposta chegou mas o cliente não leu".
+    plog.info('net', 'proxy upstream ok', {
+      url: shortUrl,
+      status: upstream.status,
+      contentLength: len ? Number(len) : null,
+      contentType: upstream.headers.get('content-type'),
+      ms: Date.now() - t0,
     })
     // Não repassa Content-Disposition/filenames unicode do painel (ByteString crash).
     return new Response(upstream.body, {
@@ -317,6 +332,11 @@ async function handleProxy(request) {
       headers: safeResponseHeaders(upstream),
     })
   } catch (error) {
+    plog.error('net', 'proxy upstream falhou', {
+      url: shortUrl,
+      error: error instanceof Error ? error.message : String(error),
+      ms: Date.now() - t0,
+    })
     return new Response(error instanceof Error ? error.message : 'proxy failed', {
       status: 502,
     })

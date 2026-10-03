@@ -1,6 +1,26 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { flushSync } from 'react-dom'
 import { playerLog } from './lib/players/playerLogger'
+import { RestaurarOcultosSheet } from './RestaurarOcultosSheet'
+import {
+  categoriasVisiveis,
+  deveMostrarRestaurar,
+  linhasDoBotaoOcultar,
+  podeOcultarCategoria,
+  selecaoDeveVoltarParaTodos,
+} from './lib/ocultos'
+import {
+  instalarDiagnosticoPlayerActive,
+  registrarTrocaDeView,
+} from './lib/players/diagnostico-player-active'
+import {
+  ESPERO_ENTRE_TENTATIVAS_MS,
+  TENTATIVAS_AUTOMATICAS_MAX,
+  type TentativaAutomaticaState,
+  deveRepetirSozinho,
+  estadoTentativaAutomatica,
+  gastarTentativa,
+} from './lib/players/tentativa-automatica'
 import type { AppProfile, AppSettings, Channel, ContentDetails, ContentKind, ContinueWatching, DownloadedItem, PlaybackEngine, Playlist, ShortEpg, SortMode, View } from './types'
 import type { UpdaterStatus } from './global'
 import { cachedCount, clearCatalog, hydrateCatalogFromDisk, loadCatalog, loadCategories, loadCategoryContent, persistCatalogToDisk, seedMemoryCatalog, type XtreamCategory } from './lib/catalog'
@@ -14,6 +34,13 @@ import {
   shouldRestorePlayerChrome,
   shouldShowNativeRetrySpinner,
 } from './lib/players/retryPlayback'
+import {
+  type LiveReresolveState,
+  deveZerarReresolve,
+  estadoInicialReresolve,
+  podeRotacionarLive,
+  registrarRotacao,
+} from './lib/players/live-reresolve'
 import type { AudioTrack, SubtitleTrack, PlayerControls } from './lib/player'
 import { coverSrc, mediaSrc } from './lib/proxy'
 import { isHeavyLiveChannel, isUhd4kChannel } from './lib/video-engine'
@@ -62,6 +89,7 @@ import { withoutContinueItem } from './lib/continue-matching'
 import { UpdateToast } from './lib/updater-ui'
 import { useUpdater } from './lib/use-updater'
 import type { UpdateToastState } from './lib/use-updater'
+import { decideFullscreenAction, escapeShouldExitFullscreen } from './lib/player/fullscreen-decision'
 import {
   ArrowLeft,
   AudioLines,
@@ -111,6 +139,7 @@ import {
   Lock,
   Unlock,
   Copy,
+  Info,
 } from 'lucide-react'
 
 const DEMO: Channel[] = [{ id: 'demo-hls', name: 'Demo HLS (Mux)', group: 'Testes', url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8', kind: 'live' }]
@@ -675,7 +704,7 @@ export default function App() {
   })
   const [sortModes, setSortModes] = useState<Record<ContentKind, SortMode>>(loadSortModes)
   const [returnToId, setReturnToId] = useState<string | null>(null)
-  const [view, setView] = useState<View>(() => {
+  const [view, setViewEstado] = useState<View>(() => {
     const profileId = loadActiveProfileId()
     const saved = loadProfiles()
     if (shouldRestoreLastSession(profileId, saved.map((profile) => profile.id))) {
@@ -683,7 +712,42 @@ export default function App() {
     }
     return { name: 'profiles' }
   })
+  /**
+   * Troca de view COM RASTRO no log.
+   *
+   * Sem isto nao existe como responder "quem colocou o app em tela cheia enquanto
+   * a pessoa assistia no painel dividido": `setView` do React nao deixa rastro, e
+   * o efeito que esconde o browse (L9476) roda depois, sem levar o motivo junto.
+   *
+   * A pilha vai no log porque o sintoma e justamente um `openLive` disparado de
+   * um caminho inesperado — sem o `stack` isso vira adivinhacao.
+   *
+   * A pilha so e capturada no dev server: `new Error().stack` faz o V8 montar a
+   * structured stack, e isso nao tem lugar em troca de view no build empacotado.
+   * Fora do dev o registro vai vazio, e o log continua dizendo de qual view para
+   * qual — que e o que interessa.
+   */
+  const setView = useCallback(
+    (next: View | ((prev: View) => View)) => {
+      const resolvido = typeof next === 'function' ? next(view) : next
+      registrarTrocaDeView(
+        view.name,
+        resolvido.name,
+        import.meta.env.DEV ? (new Error().stack || '').slice(0, 400) : '',
+      )
+      setViewEstado(resolvido)
+    },
+    [view],
+  )
   const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null
+  /**
+   * Liga o rastreio de `player-active` assim que o app monta.
+   *
+   * Precisa ser no primeiro render: `document.body.classList.add('player-active')`
+   * pode rodar em um efeito que dispara antes de qualquer interacao, e um
+   * rastreador instalado depois ja teria perdido o culpado.
+   */
+  useEffect(() => instalarDiagnosticoPlayerActive(), [])
   const profilePlaylists = playlists.filter((playlist) => activeProfile?.playlistIds.includes(playlist.id))
   const active = profilePlaylists.find((p) => p.id === activeId) ?? profilePlaylists[0] ?? null
   const browseKind = view.name === 'browse' ? view.kind : 'all'
@@ -2091,6 +2155,9 @@ export default function App() {
                   onDownloadItem={handleStartDownload}
                   onProgress={(currentTime, duration) => updateProgress(view.movie, currentTime, duration)}
                   onMeta={(patch) => patchCatalogMeta('movie', view.movie.id, patch)}
+                  onPlayFull={(channel, startTime) =>
+                    setView({ name: 'player', channel, list: view.list, startTime })
+                  }
                 />
               </div>
             )}
@@ -2118,6 +2185,9 @@ export default function App() {
                     updateProgress(channel, currentTime, duration)
                   }
                   onMeta={(patch) => patchCatalogMeta('series', view.series.id, patch)}
+                  onPlayFull={(channel, list, startTime) =>
+                    setView({ name: 'player', channel, list, fromSeries: view.series, startTime })
+                  }
                 />
               </div>
             )}
@@ -3180,7 +3250,10 @@ function Setup({
   onUpdate: (playlist: Playlist) => void
   embedded?: boolean
 }) {
-  const [tab, setTab] = useState<'m3u' | 'xtream'>('m3u')
+  // Xtream Codes primeiro: e o formato que o app realmente usa (o catalogo vem
+// por `player_api.php`, nao pela playlist). M3U/URL e a alternativa para quem
+// so tem um link de arquivo. A ordem segue a mesma do segmented control abaixo.
+const [tab, setTab] = useState<'m3u' | 'xtream'>('xtream')
   const [name, setName] = useState('Minha lista')
   const [m3uUrl, setM3uUrl] = useState('')
   const [host, setHost] = useState('')
@@ -3283,22 +3356,22 @@ function Setup({
             <button
               type="button"
               role="tab"
-              aria-selected={tab === 'm3u'}
-              className={tab === 'm3u' ? 'active' : ''}
-              onClick={() => setTab('m3u')}
-            >
-              <Link2 size={15} strokeWidth={2.2} />
-              M3U / URL
-            </button>
-            <button
-              type="button"
-              role="tab"
               aria-selected={tab === 'xtream'}
               className={tab === 'xtream' ? 'active' : ''}
               onClick={() => setTab('xtream')}
             >
               <Server size={15} strokeWidth={2.2} />
               Xtream Codes
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'm3u'}
+              className={tab === 'm3u' ? 'active' : ''}
+              onClick={() => setTab('m3u')}
+            >
+              <Link2 size={15} strokeWidth={2.2} />
+              M3U / URL
             </button>
           </div>
 
@@ -4060,7 +4133,7 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
                 reclamou. O ponto e silencioso: nao repete, nao pulsa, e fica
                 ate a pessoa resolver.
               */}
-              {updaterStatus?.available && updaterStatus.installing === false && (
+              {updaterStatus?.disponivelParaInstalar && updaterStatus.installing === false && (
                 <span className="settings-nav-dot" title="Atualização pronta para instalar" />
               )}
             </button>
@@ -4172,39 +4245,6 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
               <div className="settings-card settings-card-spaced" ref={appearanceCardRef}>
                 <h3>Aparência</h3>
                 <p className="muted">Escolha o clima do app e a cor de destaque.</p>
-
-                <div
-                  className="theme-preview"
-                  data-theme={settings.theme}
-                  data-accent={settings.accent || 'teal'}
-                  data-shell-bg={settings.shellBackground || 'gradient'}
-                  style={
-                    settings.accent === 'custom'
-                      ? ({
-                          '--accent': normalizeHexColor(settings.customAccent?.color ?? ''),
-                        } as CSSProperties)
-                      : undefined
-                  }
-                  aria-hidden
-                >
-                  <div className="theme-preview-rail">
-                    <span className="theme-preview-rail-item active">Início</span>
-                    <span className="theme-preview-rail-item">Séries</span>
-                    <span className="theme-preview-rail-item">Filmes</span>
-                  </div>
-                  <div className="theme-preview-main">
-                    <div className="theme-preview-card">
-                      <div className="theme-preview-poster" />
-                      <div className="theme-preview-copy">
-                        <strong>Destaque</strong>
-                        <span>Card de exemplo</span>
-                      </div>
-                    </div>
-                    <button type="button" className="theme-preview-btn">
-                      Assistir
-                    </button>
-                  </div>
-                </div>
 
                 {(() => {
                   const shellBg = settings.shellBackground || 'gradient'
@@ -4860,28 +4900,6 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
               <div className="settings-card settings-card-spaced" ref={playlistCardRef}>
                 <h3>Playlist / Login do servidor</h3>
                 <p className="muted">Adicione e gerencie suas listas M3U ou Xtream (host, usuário e senha)</p>
-                <div className="settings-epg-box" style={{ marginBottom: 16 }}>
-                  <div className="settings-epg-icon" aria-hidden>
-                    <Server size={22} strokeWidth={1.8} />
-                  </div>
-                  <div className="settings-epg-copy">
-                    <strong>Atualizar servidor</strong>
-                    <span>
-                      {catalogRefreshing
-                        ? 'Baixando canais, filmes e séries desta lista…'
-                        : 'Recarrega o catálogo da playlist ativa a partir do servidor'}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    className={`primary settings-epg-btn${catalogRefreshing ? ' is-busy' : ''}`}
-                    onClick={onRefreshCatalog}
-                    disabled={catalogRefreshing || !hasActivePlaylist}
-                  >
-                    <RotateCcw size={15} className={catalogRefreshing ? 'spin' : undefined} />
-                    {catalogRefreshing ? 'Atualizando…' : 'Atualizar servidor'}
-                  </button>
-                </div>
                 <Setup
                   embedded
                   playlists={playlists}
@@ -4899,7 +4917,8 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
               <h3>Reprodutor de Vídeo</h3>
               <p className="muted">
                 <strong>Automático</strong> tenta o player interno e, se falhar, usa o <strong>STUR</strong> (mpv nativo) no app.
-                Use <strong>STUR</strong> direto para filmes e séries pesados.
+                Use <strong>STUR</strong> direto para filmes e séries pesados. <strong>MPEG</strong> é o novo estilo
+                Smarters — remux primeiro para .ts/mpeg, liso em modo janela e tela cheia.
               </p>
 
               <div className="settings-block">
@@ -4917,6 +4936,12 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
                         id: 'internal' as const,
                         label: 'Player interno',
                         hint: 'HTML5 + HLS.js — leve, ao vivo e navegador',
+                        status: 'ok' as const,
+                      },
+                      {
+                        id: 'mpeg' as const,
+                        label: 'MPEG',
+                        hint: 'Estilo Smarters — remux .ts/mpeg, janela + tela cheia',
                         status: 'ok' as const,
                       },
                       {
@@ -5015,6 +5040,35 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
                 O app verifica sozinho uma vez por dia e baixa em segundo plano. Ele só pede para
                 reiniciar quando a instalação está pronta.
               </p>
+              {/*
+                "Atualizar servidor" (catalogo do painel) fica aqui, e nao em
+                Playlist/Login: e manutencao de dados, nao configuracao de
+                conta. Em Playlist so ficam os campos e a lista.
+              */}
+              <div className="settings-epg-box" style={{ marginBottom: 16 }}>
+                <div className="settings-epg-icon" aria-hidden>
+                  <Server size={22} strokeWidth={1.8} />
+                </div>
+                <div className="settings-epg-copy">
+                  <strong>Atualizar servidor</strong>
+                  <span>
+                    {catalogRefreshing
+                      ? 'Baixando canais, filmes e séries desta lista…'
+                      : hasActivePlaylist
+                        ? 'Recarrega o catálogo da playlist ativa a partir do servidor'
+                        : 'Nenhuma playlist ativa para atualizar'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className={`primary settings-epg-btn${catalogRefreshing ? ' is-busy' : ''}`}
+                  onClick={onRefreshCatalog}
+                  disabled={catalogRefreshing || !hasActivePlaylist}
+                >
+                  <RotateCcw size={15} className={catalogRefreshing ? ' spin' : undefined} />
+                  {catalogRefreshing ? 'Atualizando…' : 'Atualizar servidor'}
+                </button>
+              </div>
               <div className="settings-epg-box">
                 <div className="settings-epg-icon" aria-hidden>
                   <Download size={22} strokeWidth={1.8} />
@@ -5058,14 +5112,16 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
                 )}
               </div>
               {/*
-                A caixa de "reiniciar" segue o `status.available`, e nao a fase
+                A caixa de "reiniciar" segue `disponivelParaInstalar`, e nao a fase
                 do cartaz. Sao coisas diferentes de proposito: o cartaz se fecha
-                em 10 s, mas o instalador continua em `pending` ate a pessoa
-                decidir. Se esta caixa dependesse do cartaz, sumiria junto com
-                ele, e a unica forma de reinstalar seria clicar em "Verificar
-                agora" para o cartaz voltar.
+                em 10 s, mas o instalador continua esperando ate a pessoa decidir.
+                Se esta caixa dependesse do cartaz, sumiria junto com ele.
+
+                O campo vem do estado em disco do main, entao a caixa acende
+                assim que o download termina e NAO depende de ninguem clicar em
+                "Verificar agora" para reaparecer.
               */}
-              {updaterStatus?.available && updaterStatus.installing === false && !updaterStatus.portable && (
+              {updaterStatus?.disponivelParaInstalar && updaterStatus.installing === false && !updaterStatus.portable && (
                 <div className="settings-epg-box" style={{ marginTop: 12 }}>
                   <div className="settings-epg-copy">
                     <strong>
@@ -5745,7 +5801,15 @@ function channelInGroup(channel: Channel, groupName: string, serverCategories: X
 
 function isAdultGroup(group?: string): boolean {
   if (!group) return false
-  return /ADULTO|ADULTA|\+18|18\+|XXX|ONLYFANS|ONLY\s*FANS|PRIVACY|PORNO|PORNÔ|PORN|HENTAI|SEXTREME|EROTIC|PRIVE|PRIVÊ|CINE\s*PRIV|BRAZZER|BANG\s*BROS|BANGBROS|VIXEN|BLACKED|TUSHY|SWEET\s*SINNER|EVIL\s*ANGEL|PLAYBOY|VENUS|FETISH|FETICHE|REDLIGHT|SEXXX|HARDCORE|SOFTCORE/i.test(
+  // `ADULT` sem o `O` final e o que faltava. O painel deste provedor nomeia as
+  // categorias em ingles: "ADULT SWIN", "ADULT SWIN 4K", "ADULT SWIN UHD". Com
+  // so `ADULTO|ADULTA` no padrao, essas tres passavam como categoria comum: a
+  // categoria trancada nao aparecia na coluna e os canais apareciam dentro de
+  // "CANAIS 4K" — que e a falha observada.
+  //
+  // O limite de palavra e obrigatorio: `ADULT` cru pega "ADULTADO", e o resto
+  // do padrao ja usa `\b` justamente para isso.
+  return /\bADULT\b|\bADULTO\b|\bADULTA\b|\+18|18\+|XXX|ONLYFANS|ONLY\s*FANS|PRIVACY|PORNO|PORNÔ|PORN|HENTAI|SEXTREME|EROTIC|PRIVE|PRIVÊ|CINE\s*PRIV|BRAZZER|BANG\s*BROS|BANGBROS|VIXEN|BLACKED|TUSHY|SWEET\s*SINNER|EVIL\s*ANGEL|PLAYBOY|VENUS|FETISH|FETICHE|REDLIGHT|SEXXX|HARDCORE|SOFTCORE/i.test(
     group,
   )
 }
@@ -6258,6 +6322,59 @@ function Browse({
     () => loadHiddenItems(playlist?.id, kind).names ?? {},
   )
   const [hiddenGroups, setHiddenGroups] = useState<string[]>(() => loadHiddenItems(playlist?.id, kind).groups)
+  /** Folha de restaurar aberta? So o contexto atual — playlist + tipo. */
+  const [folhaRestaurar, setFolhaRestaurar] = useState(false)
+
+  /** Os ocultados deste contexto, no formato que a folha e o storage usam. */
+  const ocultosDoContexto = useMemo<HiddenItems>(
+    () => ({ channels: hiddenChannels, groups: hiddenGroups, names: hiddenNames }),
+    [hiddenChannels, hiddenGroups, hiddenNames],
+  )
+
+  /**
+   * Oculta a categoria selecionada e devolve a selecao para "Todos".
+   *
+   * As quatro do app nunca chegam aqui: `podeOcultarCategoria` barra, e o botao
+   * nem aparece para elas. Sem o volta para "Todos" a selecao ficaria apontando
+   * para uma categoria que acabou de sair da coluna.
+   */
+  const ocultarCategoriaAtual = () => {
+    if (!podeOcultarCategoria(group)) return
+    setHiddenGroups((atual) => (atual.includes(group) ? atual : [...atual, group]))
+    startTransition(() => onSelectGroup('Todos'))
+  }
+
+  /**
+   * Restaura o que foi marcado na folha.
+   *
+   * Quando a categoria selecionada era uma das restauradas, a selecao volta para
+   * "Todos": senao o conteudo volta para o armazenamento mas nao aparece na
+   * lista, e a pessoa conclui que o botao nao funcionou.
+   */
+  const restaurarSelecionados = (grupos: string[], ids: string[]) => {
+    if (grupos.length) setHiddenGroups((atual) => atual.filter((g) => !grupos.includes(g)))
+    if (ids.length) {
+      setHiddenChannels((atual) => atual.filter((id) => !ids.includes(id)))
+      setHiddenNames((atual) => {
+        const copia = { ...atual }
+        for (const id of ids) delete copia[id]
+        return copia
+      })
+    }
+    if (selecaoDeveVoltarParaTodos(selectedGroup, grupos)) {
+      startTransition(() => onSelectGroup('Todos'))
+    }
+    setFolhaRestaurar(false)
+  }
+
+  /*
+   * Conjuntos de busca para os ocultados. Ficam AQUI, logo acima de quem os
+   * usa: a coluna filtrada (`visibleGroups`) e a selecao que volta para
+   * "Todos" sao os primeiros consumidores, e um `useMemo` declarado depois
+   * do uso nao compila.
+   */
+  const hiddenChannelSet = useMemo(() => new Set(hiddenChannels), [hiddenChannels])
+  const hiddenGroupSet = useMemo(() => new Set(hiddenGroups), [hiddenGroups])
 
   // Trocar de playlist ou de tipo tem que recarregar o escopo certo.
   useEffect(() => {
@@ -6335,13 +6452,43 @@ function Browse({
   }, [channels, kind, serverCategories])
 
   const visibleGroups = useMemo(() => {
-    if (!parentalLocked) return groups
-    return groups.filter((g) => !isAdultGroup(g))
-  }, [groups, parentalLocked])
+    let lista = groups
+    /*
+      SO ESCONDE ADULTO QUANDO A PROTECAO ESTA TRANCADA.
+
+      Era `if (!parentalLocked) filtrar adulto` — o oposto. Com a protecao
+      DESLIGADA (sem PIN) isso apagava as 6 categorias "ADULTOS XXX" da coluna,
+      enquanto `browseList` nao filtrava nada: os canais apareciam dentro de
+      "CANAIS 4K". Categoria sumindo e conteudo adulto visivel ao mesmo tempo,
+      que e a falha que a pessoa reportou.
+
+      Trancado -> esconde coluna e canais, e a categoria entra como item de cadeiro.
+      Desligado -> mostra tudo, que e o que nao configurar protecao significa.
+    */
+    if (parentalLocked) lista = lista.filter((g) => !isAdultGroup(g))
+    // A COLUNA TAMBEM E FILTRADA, e nao so a grade.
+    //
+    // Sem isto a categoria oculta continuava listada com contagem zero, e
+    // contagem zero e pior do que nao ter clicado: parece que a acao nao
+    // funcionou. E como `group` abaixo resolve pela lista, a selecao volta
+    // sozinha para "Todos" quando a selecionada e a categoria que sumiu.
+    return categoriasVisiveis(lista, hiddenGroupSet)
+  }, [groups, parentalLocked, hiddenGroupSet])
 
   const group = visibleGroups.includes(selectedGroup)
     ? selectedGroup
-    : groups.includes(selectedGroup) && !parentalLocked
+    : // Este segundo caminho existe para o cadeado de adulto: uma categoria
+      // adulta some da lista enquanto trancada, mas a selecao nao pode pular
+      // para "Todos" so por causa disso.
+      //
+      // A categoria OCULTA pela pessoa tambem nao esta em `visibleGroups` e
+      // continua em `groups` — entao sem o `!hiddenGroupSet.has(...)` ela
+      // entraria por aqui, e a selecao ficaria presa num alvo invisivel sem
+      // nenhum sinal na tela. E o que a especificacao pede: ocultar devolve
+      // para "Todos".
+      groups.includes(selectedGroup) &&
+      !parentalLocked &&
+      !hiddenGroupSet.has(selectedGroup)
       ? selectedGroup
       : 'Todos'
 
@@ -6394,8 +6541,6 @@ function Browse({
   const deferredChannels = useDeferredValue(channels)
   const deferredQuery = useDeferredValue(query)
   const search = normalizeForSearch(deferredQuery)
-  const hiddenChannelSet = useMemo(() => new Set(hiddenChannels), [hiddenChannels])
-  const hiddenGroupSet = useMemo(() => new Set(hiddenGroups), [hiddenGroups])
 
   useEffect(() => {
     if (selectedGroup === 'Favoritos') onSelectGroup('Todos')
@@ -6901,6 +7046,14 @@ function Browse({
     <div
       className={`browse ${kind === 'live' ? 'browse-live' : ''}${detailPane ? ' browse-with-details browse-detail-focus' : ''}`}
     >
+      {folhaRestaurar && (
+        <RestaurarOcultosSheet
+          ocultos={ocultosDoContexto}
+          catalogo={channels}
+          onClose={() => setFolhaRestaurar(false)}
+          onRestaurar={restaurarSelecionados}
+        />
+      )}
       <aside
         ref={groupsRef}
         className="groups"
@@ -6978,9 +7131,68 @@ function Browse({
               >
                 ★ Nota
               </button>
+              {/*
+                Restaurar fica NA MESMA barra das pilhas, e nao no bloco
+                `browse-hide-actions` de baixo.
+
+                FIXO, sem condicao: antes ele so aparecia com item oculto, e o
+                botao saltava dentro e fora da barra conforme a pessoa ocultava.
+                A posicao de um controle nao pode depender do estado dos dados —
+                quando ha nada, a folha abre vazia e diz isso.
+
+                Nota: `deveMostrarRestaurar` continua em uso no bloco do ao vivo,
+                que nao tem pílhas e portanto nao tem barra para receber este.
+              */}
+              <button
+                type="button"
+                className="sort-pill sort-pill-restore"
+                onClick={() => setFolhaRestaurar(true)}
+                title={
+                  deveMostrarRestaurar(ocultosDoContexto)
+                    ? 'Abrir a lista do que foi ocultado'
+                    : 'Nada oculto neste tipo de conteúdo'
+                }
+              >
+                <RotateCcw size={14} strokeWidth={2.2} />
+                Restaurar
+              </button>
             </div>
           )}
+          {/*
+              Acoes de ocultar. O MESMO bloco em paginas diferentes:
+              
+              em filme/serie, logo depois das pilhas de ordenacao — "imediatamente ao
+              lado do star Nota";
+              
+              no ao vivo, que nao tem pilhas, logo depois do campo de busca.
 
+              As duas condicoes sao EXCLUSIVAS: sem elas a pagina de filme, que tem
+              pilhas, mostrava os dois botoes ao mesmo tempo, a 538px de distancia
+              um do outro (medido em left 810 e left 1348).
+
+              O botao de ocultar so existe com categoria REAL selecionada: as quatro do
+              app nunca podem ser ocultadas, e sem categoria nao ha o que ocultar.
+
+              O de restaurar so existe com algo oculto NESTE contexto, e abre a lista em
+              vez de restaurar tudo direto.
+              */}
+          {kind !== 'live' && (
+            <div className="browse-hide-actions">
+              {/* Chamada direta em vez de IIFE: o rotulo e o nome sao duas leituras de funcoes puras e o JSX fica legivel. */}
+              {podeOcultarCategoria(group) && (
+                <button
+                  type="button"
+                  className="browse-hide-btn"
+                  onClick={ocultarCategoriaAtual}
+                  title={linhasDoBotaoOcultar(group).completo}
+                  aria-label={linhasDoBotaoOcultar(group).completo}
+                >
+                  <span className="browse-hide-btn-rotulo">{linhasDoBotaoOcultar(group).rotulo}</span>
+                  <span className="browse-hide-btn-nome">{linhasDoBotaoOcultar(group).nome}</span>
+                </button>
+              )}
+            </div>
+          )}
           <div className="browse-search-wrapper">
             <Search className="browse-search-icon" size={16} />
             <input
@@ -7003,6 +7215,52 @@ function Browse({
               </button>
             )}
           </div>
+          {/*
+              Acoes de ocultar. O MESMO bloco em paginas diferentes:
+              
+              em filme/serie, logo depois das pilhas de ordenacao — "imediatamente ao
+              lado do star Nota";
+              
+              no ao vivo, que nao tem pilhas, logo depois do campo de busca.
+
+              As duas condicoes sao EXCLUSIVAS: sem elas a pagina de filme, que tem
+              pilhas, mostrava os dois botoes ao mesmo tempo, a 538px de distancia
+              um do outro (medido em left 810 e left 1348).
+
+              O botao de ocultar so existe com categoria REAL selecionada: as quatro do
+              app nunca podem ser ocultadas, e sem categoria nao ha o que ocultar.
+
+              O de restaurar so existe com algo oculto NESTE contexto, e abre a lista em
+              vez de restaurar tudo direto.
+              */}
+          {kind === 'live' && (
+            <div className="browse-hide-actions">
+              {/* Chamada direta em vez de IIFE: o rotulo e o nome sao duas leituras de funcoes puras e o JSX fica legivel. */}
+              {podeOcultarCategoria(group) && (
+                <button
+                  type="button"
+                  className="browse-hide-btn"
+                  onClick={ocultarCategoriaAtual}
+                  title={linhasDoBotaoOcultar(group).completo}
+                  aria-label={linhasDoBotaoOcultar(group).completo}
+                >
+                  <span className="browse-hide-btn-rotulo">{linhasDoBotaoOcultar(group).rotulo}</span>
+                  <span className="browse-hide-btn-nome">{linhasDoBotaoOcultar(group).nome}</span>
+                </button>
+              )}
+              {deveMostrarRestaurar(ocultosDoContexto) && (
+                <button
+                  type="button"
+                  className="browse-restore-btn"
+                  onClick={() => setFolhaRestaurar(true)}
+                  title="Abrir a lista do que foi ocultado"
+                >
+                  <RotateCcw size={16} />
+                  Restaurar
+                </button>
+              )}
+            </div>
+          )}
         </div>
         <div
           ref={attachScroll}
@@ -7296,12 +7554,31 @@ function Browse({
                 })
               }}
               onHideChannel={() => {
-                setHiddenChannels((current) => [...current, menuChannel.id])
+                // Deduplica: o mesmo cartao pode ser ocultado pelo menu duas
+                // vezes, e a lista de restauracao mostraria o titulo duplicado
+                // — com "Restaurar 2" para uma coisa so.
+                setHiddenChannels((current) =>
+                  current.includes(menuChannel.id) ? current : [...current, menuChannel.id],
+                )
                 setHiddenNames((current) => ({ ...current, [menuChannel.id]: menuChannel.name }))
                 setMenuChannel(null)
               }}
               onHideGroup={() => {
-                setHiddenGroups((current) => [...current, menuChannel.group])
+                // `podeOcultarCategoria` e o portao das quatro do app: ocultar
+                // "Todos" deixaria a tela sem lista e sem volta. A regra mora
+                // AQUI, no handler, e nao no JSX — os dois lugares que ocultam
+                // categoria passam por aqui, e um guarda em cada um diverge.
+                if (podeOcultarCategoria(menuChannel.group)) {
+                  setHiddenGroups((current) =>
+                    current.includes(menuChannel.group) ? current : [...current, menuChannel.group],
+                  )
+                  // A selecao volta para "Todos": a categoria acaba de sair da
+                  // coluna, e deixar a selecao apontando para ela e um estado
+                  // sem sinal na tela.
+                  if (selecaoDeveVoltarParaTodos(selectedGroup, [menuChannel.group])) {
+                    startTransition(() => onSelectGroup('Todos'))
+                  }
+                }
                 setMenuChannel(null)
               }}
               onClose={() => setMenuChannel(null)}
@@ -7495,6 +7772,7 @@ function MovieView({
   onDownloadItem,
   onProgress,
   onMeta,
+  onPlayFull,
 }: {
   playlist: Playlist
   movie: Channel
@@ -7509,6 +7787,8 @@ function MovieView({
   onDownloadItem?: (item: DownloadedItem) => void | Promise<void>
   onProgress: (currentTime: number, duration: number) => void
   onMeta?: (patch: Partial<Channel>) => void
+  /** Assistir vai direto pro player cheio (sem mini). */
+  onPlayFull?: (channel: Channel, startTime: number) => void
 }) {
   const [details, setDetails] = useState<ContentDetails | null>(null)
   const [loading, setLoading] = useState(true)
@@ -7516,6 +7796,10 @@ function MovieView({
   const [playSession, setPlaySession] = useState<{ startTime: number } | null>(null)
   const autoStartRef = useRef<number | undefined>(undefined)
   const isFav = favorites.includes(movie.id)
+  const onPlayFullRef = useRef(onPlayFull)
+  onPlayFullRef.current = onPlayFull
+  const movieRef = useRef(movie)
+  movieRef.current = movie
 
   const progress = useMemo(() => {
     return continueWatching.find(
@@ -7524,6 +7808,10 @@ function MovieView({
   }, [continueWatching, movie])
 
   const startPlayback = (startTime = 0) => {
+    if (onPlayFullRef.current) {
+      onPlayFullRef.current(movieRef.current, startTime)
+      return
+    }
     setPlaySession({ startTime })
   }
 
@@ -7544,7 +7832,8 @@ function MovieView({
     if (autoStartRef.current === autoStartTime) return
     if (autoStartTime !== undefined && autoStartTime >= 0) {
       autoStartRef.current = autoStartTime
-      setPlaySession({ startTime: autoStartTime })
+      if (onPlayFullRef.current) onPlayFullRef.current(movieRef.current, autoStartTime)
+      else setPlaySession({ startTime: autoStartTime })
     }
   }, [movie.id, autoStartTime, autoPlay])
 
@@ -7645,7 +7934,16 @@ function MovieView({
               {rating && (
                 <div className="movie-meta-item">
                   <span className="movie-meta-label">Nota:</span>
-                  <span className="movie-meta-val">⭐ {rating}</span>
+                  {/*
+                    `Star` do lucide em vez do emoji ⭐. O emoji renderiza
+                    colorido e com proportions diferentes em cada plataforma — na
+                    imagem ele aparecia laranja e grande, brigando com o resto da
+                    linha. O icone herda `currentColor` e o tamanho da fonte.
+                  */}
+                  <span className="movie-meta-val">
+                    <Star size={13} strokeWidth={2.4} fill="#fbbf24" color="#fbbf24" />
+                    {rating}
+                  </span>
                 </div>
               )}
               {releaseDate && (
@@ -7683,30 +7981,32 @@ function MovieView({
             <CastRow cast={details?.cast} />
 
             <div className="movie-actions-row">
-              <button
-                className={`series-fav-btn ${isFav ? 'active' : ''}`}
-                onClick={() => onToggleFavorite(movie.id)}
-              >
-                {isFav ? '★ Nos favoritos' : '☆ Adicionar aos favoritos'}
-              </button>
+              {/* Primario em linha propria, fundo claro — como no app movel.
+                  O secundario fica num par abaixo. Nenhum dos dois e esticado:
+                  a pultura no celular e larga porque a tela e estreita, e
+                  esticar em desktop so deixa o botao enorme. */}
               {progress && progress.currentTime > 5 ? (
-                <button
-                  className="movie-play-btn"
-                  style={{ background: '#e0115f', color: '#fff', display: 'flex', alignItems: 'center', gap: 6 }}
-                  onClick={() => startPlayback(progress.currentTime)}
-                >
+                <button className="movie-play-btn movie-play-btn-strong" onClick={() => startPlayback(progress.currentTime)}>
                   <Play size={18} />
-                  Continuar ({formatPlayerTime(progress.currentTime)})
+                  Continuar {formatPlayerTime(progress.currentTime)}
                 </button>
               ) : (
-                <button className="movie-play-btn" onClick={() => startPlayback(0)}>
+                <button className="movie-play-btn movie-play-btn-strong" onClick={() => startPlayback(0)}>
                   <Play size={18} />
                   Assistir
                 </button>
               )}
-              <button className="movie-action-pill" onClick={() => void handleDownload()} disabled={downloading}>
-                {downloading ? 'Iniciando...' : '⬇ Baixar'}
-              </button>
+              <div className="movie-actions-pair">
+                <button
+                  className={`series-fav-btn ${isFav ? 'active' : ''}`}
+                  onClick={() => onToggleFavorite(movie.id)}
+                >
+                  {isFav ? '★ Nos favoritos' : '☆ Adicionar aos favoritos'}
+                </button>
+                <button className="movie-action-pill" onClick={() => void handleDownload()} disabled={downloading}>
+                  {downloading ? 'Iniciando...' : '⬇ Baixar'}
+                </button>
+              </div>
             </div>
 
           </div>
@@ -7821,20 +8121,55 @@ function ContentOptionsMenu({
           </button>
         )}
 
-        {onShowDetails && (
-          <button className="content-option-pill" onClick={onShowDetails}>
-            Mostrar detalhes
-          </button>
-        )}
-        {!isSeries && !isLive && (
-          <button className="content-option-pill" onClick={onDownload}>
-            Baixar
-          </button>
-        )}
+        {/*
+          Par de secundarios, no mesmo desenho do par de perigo abaixo.
+
+          Sem este wrapper cada `.content-option-pill` ocupava `width: 100%` e
+          empilhava uma por linha. No app movel elas ficam lado a lado, e a
+          pessoa pediu o mesmo desenho aqui — porem SEM esticar: na captura do
+          celular o botao ocupa meia linha porque a tela e estreita; em desktop
+          a mesma regra espremeria o texto numa caixa enorme. Por isso o CSS deste
+          par tira o `width: 100%`.
+        */}
+        <div className="content-options-pair">
+          {onShowDetails && (
+            <button className="content-option-pill" onClick={onShowDetails}>
+              <Info size={16} />
+              Detalhes
+            </button>
+          )}
+          {!isSeries && !isLive && (
+            <button className="content-option-pill" onClick={onDownload}>
+              <Download size={16} />
+              Baixar
+            </button>
+          )}
+        </div>
 
         <div className="live-options-split">
-          <button onClick={onHideChannel}>Ocultar {kindLabel}</button>
-          <button onClick={onHideGroup}>Ocultar categoria {channel.group}</button>
+          {/*
+            Os dois sao `danger` e nao so por cor: "Ocultar filme" e "Ocultar
+            categoria" tiram o item da tela, que e a mesma acao destrutiva de
+            "Remover de Continuar Assistindo". Sem esta classe eles caiam na
+            regra neutra do `.live-options-split button` e saiam sem vermelho
+            nenhum, enquanto o terceiro saia vermelho — tres botoes com a mesma
+            acao, cores diferentes.
+          */}
+          <button className="danger" onClick={onHideChannel}>
+            Ocultar {kindLabel}
+          </button>
+          {/*
+            O botao some quando a categoria e uma das quatro do app. O handler
+            JA recusa (esta e a razao de a regra morar la), mas um botao que
+            aparece e nao faz nada e pior do que um botao ausente: a pessoa
+            clica e conclui que o app travou.
+          */}
+          {podeOcultarCategoria(channel.group) && (
+            <button className="danger" onClick={onHideGroup}>
+              Ocultar categoria
+              <small>{channel.group}</small>
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -8372,6 +8707,7 @@ function SeriesView({
   onDownloadItem,
   onProgress,
   onMeta,
+  onPlayFull,
 }: {
   playlist: Playlist
   series: Channel
@@ -8387,6 +8723,8 @@ function SeriesView({
   onDownloadItem?: (item: DownloadedItem) => void | Promise<void>
   onProgress: (channel: Channel, currentTime: number, duration: number) => void
   onMeta?: (patch: Partial<Channel>) => void
+  /** Assistir vai direto pro player cheio (sem mini). */
+  onPlayFull?: (channel: Channel, list: Channel[], startTime: number) => void
 }) {
   const [error, setError] = useState<string | null>(null)
   const [selectedEp, setSelectedEp] = useState<Channel | null>(null)
@@ -8492,6 +8830,10 @@ function SeriesView({
   })
 
   const startPlayback = (ep: Channel, list: Channel[], startTime = 0) => {
+    if (onPlayFull) {
+      onPlayFull(enrichEpisode(ep), list, startTime)
+      return
+    }
     setPlaySession({ channel: enrichEpisode(ep), list, startTime })
   }
 
@@ -8560,7 +8902,10 @@ function SeriesView({
             {(info?.info?.rating || series.rating) && (
               <div className="movie-meta-item">
                 <span className="movie-meta-label">Nota:</span>
-                <span className="movie-meta-val">⭐ {info?.info?.rating || series.rating}</span>
+                <span className="movie-meta-val">
+                  <Star size={13} strokeWidth={2.4} fill="#fbbf24" color="#fbbf24" />
+                  {info?.info?.rating || series.rating}
+                </span>
               </div>
             )}
             {(info?.info?.releaseDate || series.releasedate) && (
@@ -8592,9 +8937,13 @@ function SeriesView({
           <CastRow cast={info?.info?.cast || (series as any).cast} />
 
           <div className="movie-actions-row">
+            {/* Mesmo desenho do filme: primario claro em linha propria e o par
+                abaixo. O `style` inline de fundo rosa saiu — o PRIMARY_ faz o
+                papel, e um botao com dois lugares para dizer a cor e um lugar
+                que sempre diverge. */}
             {savedEp && seriesProgress && seriesProgress.currentTime > 5 ? (
               <button
-                style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 15, padding: '10px 22px', borderRadius: 8, fontWeight: 700, background: '#e0115f', color: '#fff', border: 'none', cursor: 'pointer' }}
+                className="movie-play-btn movie-play-btn-strong"
                 onClick={() => {
                   startPlayback(
                     savedEp,
@@ -8604,11 +8953,11 @@ function SeriesView({
                 }}
               >
                 <Play size={17} />
-                Continuar ({formatPlayerTime(seriesProgress.currentTime)})
+                Continuar {formatPlayerTime(seriesProgress.currentTime)}
               </button>
             ) : info?.seasons?.[0]?.episodes?.[0] ? (
               <button
-                style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 15, padding: '10px 22px', borderRadius: 8, fontWeight: 700, background: '#e0115f', color: '#fff', border: 'none', cursor: 'pointer' }}
+                className="movie-play-btn movie-play-btn-strong"
                 onClick={() => {
                   const firstEp = info.seasons[0].episodes[0]
                   startPlayback(
@@ -8622,12 +8971,14 @@ function SeriesView({
                 Assistir
               </button>
             ) : null}
-            <button
-              className={`series-fav-btn ${isFav ? 'active' : ''}`}
-              onClick={() => onToggleFavorite(series.id)}
-            >
-              {isFav ? '★ Nos favoritos' : '☆ Adicionar aos favoritos'}
-            </button>
+            <div className="movie-actions-pair">
+              <button
+                className={`series-fav-btn ${isFav ? 'active' : ''}`}
+                onClick={() => onToggleFavorite(series.id)}
+              >
+                {isFav ? '★ Nos favoritos' : '☆ Adicionar aos favoritos'}
+              </button>
+            </div>
           </div>
         </div>
         <div className="movie-header-poster">
@@ -9291,8 +9642,23 @@ function resetPlayerChrome() {
 }
 
 /** Restaura janela React após mpv (Esc / voltar) — evita tela preta. */
-function exitNativePlayback() {
-  resetPlayerChrome()
+function exitNativePlayback(opts = { exitFullscreen: true }) {
+  forceShellVisible()
+  /*
+    Sair da tela cheia aqui e OPCIONAL.
+
+    O `back` do overlay passa `exitFullscreen: false` quando a tela cheia era do
+    dono (`origin: 'app'`): o video para e o catalogo volta, mas a janela continua
+    em tela cheia, porque foi o usuario quem colocou.
+
+    Sem essa opcao, os dois caminhos brigavam: o `back` decidia corretamente nao
+    sair, e logo em seguida `resetPlayerChrome` tirava a janela de tela cheia
+    assim mesmo — que e exatamente o "sai da tela cheia sozinho" que o dono
+    mandou nao acontecer.
+  */
+  if (opts.exitFullscreen !== false) {
+    void window.sturplay?.window?.setFullscreen?.(false)
+  }
   void window.sturplay?.player?.hide?.()
   void window.sturplay?.player?.stop?.()
   void window.sturplay?.nativePlayer?.stopExternal?.()
@@ -9408,13 +9774,61 @@ function Player({
    * Re-resolução de stream_id de live, uma vez por tentativa.
    *
    * usy evita ailed repetido (o motor pode emitir mais de um) virando
-   * N requisições de catálogo. lastAttempt impede o caso patologico em que o
-   * painel devolve sempre um id novo que também está morrendo: depois de duas
-   * trocas o app para de insistir e mostra o erro.
+   * N requisições de catálogo. `trocas` impede o caso patológico em que o painel
+   * devolve sempre um id novo que também está morrendo: depois de duas trocas o
+   * app para de insistir e mostra o erro.
+   *
+   * O `esperado` e o que impede o laço MEDIDO, que antes vivia aqui:
+   *
+   *   22:31:01  de 709067 para 709686
+   *   22:31:05  de 709686 para 709067
+   *   22:31:08  de 709067 para 709686
+   *   22:31:12  de 709686 para 709067   <- e continuava
+   *
+   * A chave do reset NAO pode ser `channel.id`: a própria rotação monta
+   * `id: 'live-' + stream_id` (xtream.ts:558), então voltar e meia disparava o
+   * reset, zerava `trocas`, e o contador nunca chegava a 1. O laço não era de
+   * rotação demais, era de contador sem memória.
+   *
+   * E como o ramo de rotação termina em `return` ANTES do `setPlaybackError`, um
+   * laço aqui é o que produzia a tela preta sem mensagem nenhuma.
    */
-  const liveReresolveRef = useRef({ busy: false, lastAttempt: '' })
+  const liveReresolveRef = useRef<LiveReresolveState>(estadoInicialReresolve(channel.id))
+  /**
+   * Tentativas automaticas de live antes de mostrar a caixa de erro.
+   *
+   * Zera a cada troca de canal — e uma escolha nova da pessoa, nao a mesma
+   * tentativa. Sem o zero, um canal que falhou duas vezes nunca mais abriria
+   * sem clique, nem depois de o painel voltar.
+   */
+  const tentativaAutomaticaRef = useRef<TentativaAutomaticaState>(estadoTentativaAutomatica())
+  const tentativaAutomaticaTimerRef = useRef(0)
   useEffect(() => {
-    liveReresolveRef.current = { busy: false, lastAttempt: '' }
+    tentativaAutomaticaRef.current = estadoTentativaAutomatica()
+    window.clearTimeout(tentativaAutomaticaTimerRef.current)
+    tentativaAutomaticaTimerRef.current = 0
+  }, [channel.id])
+  /**
+   * Limpeza no unmount.
+   *
+   * Sem isto o timer de 2,5s sobrevive ao componente: quem navega para outra
+   * tela dentro desses 2,5s receives `iniciarRetry`rodando em um componente que
+   * ja nao esta na ar — `setMediaRetry` reacende o motor para um canal que a
+   * pessoa ja deixou, e o React avisa de setState em componente desmontado.
+   *
+   * O efeito de `[channel.id]` acima nao cobre isto: trocar de canal mantem o
+   * componente montado, desmontar e que nao passa por ele.
+   */
+  useEffect(
+    () => () => {
+      window.clearTimeout(tentativaAutomaticaTimerRef.current)
+      tentativaAutomaticaTimerRef.current = 0
+    },
+    [],
+  )
+  useEffect(() => {
+    const novo = deveZerarReresolve(liveReresolveRef.current, channel.id)
+    if (novo) liveReresolveRef.current = novo
   }, [channel.id])
   const progressRef = useRef(progress)
   progressRef.current = progress
@@ -9429,15 +9843,25 @@ function Player({
   const managerRef = useRef<PlayerManager | null>(null)
   const [nativeEmbedded, setNativeEmbedded] = useState(false)
   const [nativeBooting, setNativeBooting] = useState(false)
+  // Espelho de `nativeBooting` em ref, pelo mesmo motivo do `winFsRef`.
+  //
+  // `handlePlayerEscape` le `nativeBooting`, e ela e chamada de um `keydown`
+  // cujo array de deps NAO a inclui. `nativeBooting` e o estado mais volatil do
+  // player: muda em oito lugares, e um retry do MESMO canal nao muda `channel` —
+  // entao o efeito do teclado nao re-rodava e o closure ficava com o valor velho.
+  const nativeBootingRef = useRef(false)
+  nativeBootingRef.current = nativeBooting
   const [retryingNative, setRetryingNative] = useState(false)
-  const [managedEngine, setManagedEngine] = useState<'internal' | 'stur' | null>(null)
+  const [managedEngine, setManagedEngine] = useState<'internal' | 'stur' | 'mpeg' | null>(null)
   const managedEngineRef = useRef(managedEngine)
   managedEngineRef.current = managedEngine
   const nativePlayedRef = useRef(false)
   const lastPlayUrlRef = useRef(channel.url)
-  const usePlayerManager = playbackEngine === 'auto' || playbackEngine === 'stur'
+  const usePlayerManager = playbackEngine === 'auto' || playbackEngine === 'stur' || playbackEngine === 'mpeg'
   const useNativePlayer =
-    playbackEngine === 'stur' || (playbackEngine === 'auto' && managedEngine === 'stur')
+    playbackEngine === 'stur' ||
+    playbackEngine === 'mpeg' ||
+    (playbackEngine === 'auto' && managedEngine === 'stur')
   const useBufferedNative = useNativePlayer
 
   useEffect(() => {
@@ -9578,11 +10002,16 @@ function Player({
   const [domFs, setDomFs] = useState(false)
   const [winFs, setWinFs] = useState(false)
 
+  // Espelho de `winFs` em ref. Ver o comentario do uso, em `exitPlayerFullscreen`.
+  const winFsRef = useRef(false)
+
   useEffect(() => {
     const onFs = () => setDomFs(document.fullscreenElement === playerWrapRef.current)
     document.addEventListener('fullscreenchange', onFs)
     const off = window.sturplay?.window?.onFullscreenChanged?.((payload) => {
-      setWinFs(Boolean((payload as { fullscreen?: boolean } | undefined)?.fullscreen))
+      const v = Boolean((payload as { fullscreen?: boolean } | undefined)?.fullscreen)
+      winFsRef.current = v
+      setWinFs(v)
     })
     return () => {
       document.removeEventListener('fullscreenchange', onFs)
@@ -9591,6 +10020,18 @@ function Player({
   }, [])
 
   const isFs = domFs || winFs
+
+  // Fullscreen com preview embutido: o catálogo continua montado atrás do
+  // vídeo e o HWND do mpv tem input desligado — o clique atravessa o vídeo e
+  // cai no catálogo/pesquisa. Igual Smarters (só vídeo + controles no
+  // fullscreen): esconde o shell enquanto durar o fullscreen com playback.
+  useEffect(() => {
+    if (!embedded || !isFs || !playing) return
+    document.body.classList.add('player-active')
+    return () => {
+      document.body.classList.remove('player-active')
+    }
+  }, [embedded, isFs, playing])
 
   const enterWindowFullscreen = async () => {
     try {
@@ -9632,37 +10073,63 @@ function Player({
     // tela cheia", e nao "o elemento e o wrapper do player": quando o playback
     // para, o wrapper desmonta, o elemento some da comparacao, e a saida ficava
     // sem caminho — que era o segundo furo do mesmo bug.
-    const emFullscreen = Boolean(document.fullscreenElement)
-    if (emFullscreen) {
+    //
+    // A DECISAO virou funcao pura em `lib/player/fullscreen-decision.ts`, com
+    // teste. O que faltava aqui e a camada da JANELA: `requestFullscreen` e
+    // recusado neste app (o log registra "fullscreen recusado pelo container"), a
+    // entrada cai na tela cheia da JANELA, e `document.fullscreenElement`
+    // CONTINUA vazio — tela cheia de janela nao passa pelo DOM. O proximo clique
+    // nao achava nada para sair e entrava de novo. Era o bug que o usuario
+    // reportou: o botao entra e nao sai.
+    const acao = decideFullscreenAction({
+      documentFullscreenElement: document.fullscreenElement,
+      // A camada da JANELA, e nao `isFs`: `isFs` e o rotulo do botao e vem do
+      // render. Aqui o comando decide, o rotulo so informa.
+      windowFullscreen: winFsRef.current,
+      playerMounted: Boolean(root),
+      canRequestElementFullscreen: typeof root?.requestFullscreen === 'function',
+    })
+
+    if (acao.kind === 'exit-dom') {
       void document.exitFullscreen().catch(() => {})
+      return
+    }
+    if (acao.kind === 'exit-window') {
+      void window.sturplay?.window?.setFullscreen?.(false)
       return
     }
 
     void (async () => {
-      if (root && typeof root.requestFullscreen === 'function') {
-        try {
-          await root.requestFullscreen()
-          return
-        } catch (error: unknown) {
-          noteFullscreenFailure(error instanceof Error ? error.message : String(error))
-          void enterWindowFullscreen()
-          return
-        }
-      }
+      /*
+        Direto para a JANELA, sem tentar o DOM.
+
+        `root.requestFullscreen()` TRAVA neste app: a promise nem resolve nem
+        rejeita (medido — o renderer congelou 150 s num `requestFullscreen`
+        pendurado, e o botao de tela cheia da barra parou de responder). O DOM
+        nunca foi o caminho aqui: a entrada sempre caia na tela cheia da janela
+        depois da recusa, e agora nem a recusa chega.
+
+        `root` continua lido para `decideFullscreenAction` acima (saber se o
+        player esta montado). So a ENTRADA pula o DOM.
+      */
       await enterWindowFullscreen()
     })()
   }
 
   const exitPlayerFullscreen = () => {
-    const root = playerWrapRef.current
-    if (root && document.fullscreenElement === root) {
-      void document.exitFullscreen().catch(() => {})
-      return true
-    }
-    // A tela cheia pode ter entrado pela JANELA (fallback do botao). Sem isto o
-    // Esc nao saia dela e o usuario ficava preso em tela cheia sem como sair.
-    if (winFs) {
-      void window.sturplay?.window?.setFullscreen?.(false)
+    // Mesmo criterio do F11: "TEM elemento em tela cheia", e nao "o elemento e o
+    // wrapper". Se o playback parou e o wrapper desmontou, comparar identidade
+    // deixava o ESC sem caminho.
+    //
+    // `winFsRef.current` e nao `winFs`: `exitPlayerFullscreen` e chamada de um
+    // `keydown` cujo array de deps NAO inclui `winFs`, entao o closure leria o
+    // valor congelado. Ver o comentario do ref.
+    if (escapeShouldExitFullscreen(document.fullscreenElement, winFsRef.current)) {
+      if (document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => {})
+      } else {
+        void window.sturplay?.window?.setFullscreen?.(false)
+      }
       return true
     }
     return false
@@ -9690,7 +10157,7 @@ function Player({
       onBack()
       return
     }
-    if (useBufferedNative && !nativeBooting && !overlayOn.current) {
+    if (useBufferedNative && !nativeBootingRef.current && !overlayOn.current) {
       bumpOverlay()
       return
     }
@@ -9822,6 +10289,39 @@ function Player({
     return () => cancelAnimationFrame(raf)
   }, [useNativePlayer, winFs])
 
+  // Volta do F11: a janela anima de volta ao modo janela e o HWND ficava com
+  // os bounds do fullscreen (vídeo deslocado, faixa preta, catálogo cortado).
+  // Espelha o efeito de entrada: empurra o rect do playerWrap por frames até
+  // o mpv/overlay assentarem no preview de novo.
+  const wasWinFsRef = useRef(false)
+  useEffect(() => {
+    const was = wasWinFsRef.current
+    wasWinFsRef.current = winFs
+    if (!useNativePlayer || winFs || !was) return
+    let raf = 0
+    let tries = 0
+    const reposition = () => {
+      const el = playerWrapRef.current
+      if (el) {
+        const r = el.getBoundingClientRect()
+        if (r.width > 0 && r.height > 0) {
+          void window.sturplay?.player?.setBounds?.({
+            x: Math.round(r.left),
+            y: Math.round(r.top),
+            width: Math.round(r.width),
+            height: Math.round(r.height),
+          })
+        }
+      }
+      if (tries < 10) {
+        tries += 1
+        raf = requestAnimationFrame(reposition)
+      }
+    }
+    raf = requestAnimationFrame(reposition)
+    return () => cancelAnimationFrame(raf)
+  }, [useNativePlayer, winFs])
+
   useEffect(() => {
     if (!useNativePlayer) return
     return () => {
@@ -9913,7 +10413,31 @@ function Player({
     }
   }, [channel.url, channel.kind, mediaRetry, usePlayerManager])
 
-  useEffect(() => {
+  /**
+ * Liga a proxima tentativa. E o mesmo caminho do botao "Tentar novamente",
+ * extraido para que a repeticao automatica e o clique usem EXATAMENTE o mesmo
+ * codigo - dois lugares que divergem sao a origem de "o botao funciona mas o
+ * automatico nao".
+ */
+const iniciarRetry = useCallback(() => {
+  const ui = playbackUiAfterRetry()
+  // Sem isto, no painel dividido o retry escondia o app inteiro:
+  // `player-active` zera a visibilidade do shell e, como a superficie
+  // do mpv esta preta durante a tentativa, sobrava uma tela mutilada
+  // com so os botoes de acao.
+  if (ui.restorePlayerChrome && shouldRestorePlayerChrome({ embedded })) {
+    document.body.classList.add('player-active')
+  }
+  setBuffering(ui.buffering)
+  setPlaybackError(ui.playbackError)
+  setNativeBooting(ui.nativeBooting)
+  setNativeEmbedded(ui.nativeEmbedded)
+  setPlaying(ui.playing)
+  setRetryingNative(ui.retrying)
+  setMediaRetry((n) => n + 1)
+}, [embedded])
+
+useEffect(() => {
     if (!usePlayerManager) {
       void managerRef.current?.stop()
       managerRef.current = null
@@ -9923,15 +10447,26 @@ function Player({
       return
     }
 
-    const manager = new PlayerManager({
+const manager = new PlayerManager({
       getVideo: () => videoRef.current,
       getBoundsElement: () => playerWrapRef.current,
       onEngineChange: (engine) => {
-        setManagedEngine(engine === 'stur' ? 'stur' : engine === 'internal' ? 'internal' : null)
+        setManagedEngine(engine === 'stur' ? 'stur' : engine === 'mpeg' ? 'mpeg' : engine === 'internal' ? 'internal' : null)
       },
       onEvent: (event) => {
+        if (event.type === 'ready' || event.type === 'playing' || event.type === 'buffering') {
+          // Guarda no ref: evento de buffering repete e setState repetido
+          // realimentava o render (Maximum update depth). Só seta uma vez.
+          if (!nativeSeenRef.current) {
+            nativeSeenRef.current = true
+            setNativeSeen(true)
+          }
+        }
         const bufferedNative =
-          playbackEngine === 'stur' || managedEngineRef.current === 'stur'
+          playbackEngine === 'stur' ||
+          playbackEngine === 'mpeg' ||
+          managedEngineRef.current === 'stur' ||
+          managedEngineRef.current === 'mpeg'
         if (event.type === 'ready') {
           setNativeEmbedded(true)
           // VOD STUR: mantém booting até playing (mostra % de buffer)
@@ -9981,38 +10516,138 @@ function Player({
           // catalogo guarda a URL do load, entao sem isto o app tratava como
           // morto um canal que estava no ar. matchLiveStream nunca devolve
           // o proprio id, entao isto nao vira laco: se nao mudou, o erro aparece.
-          if (channel.kind === 'live' && playlist && !liveReresolveRef.current.busy) {
-            const fresh = liveReresolveRef.current
-            fresh.busy = true
-            void resolveFreshLiveChannel(playlist, channelRef.current)
+          /**
+           * Aplica a falha na UI: caixa de erro, spinner desligado, chrome de
+           * volta.
+           *
+           * Fica numa funcao porque o `failed` tem DOIS caminhos legitimos que
+           * precisam dela — e antes o segundo chamava `return` e MORRIA antes de
+           * chegar aqui:
+           *
+           *   1. `podeRotacionarLive` devolveu false (as trocas acabaram), ou nao
+           *      e live, ou nao ha playlist: segue direto para a falha.
+           *   2. `podeRotacionarLive` devolveu true, o app foi procurar um
+           *      `stream_id` alternativo e `resolveFreshLiveChannel` devolveu
+           *      `null` — o painel NAO tem outro id para este canal. MEDIDO no log
+           *      do renderer: `failed` sem nenhuma linha `stream_id rotacionado`
+           *      depois, e a tela preta sem mensagem nenhuma, para sempre, porque
+           *      todo `failed` caia no mesmo beco sem saida.
+           *
+           * Com os dois chamando aqui, o canal sem alternativa mostra o erro
+           * como qualquer outro.
+           */
+          const aplicarFalha = () => {
+            /**
+           * Repetir sozinho ANTES de mostrar a caixa de erro.
+           *
+           * MEDIDO, e e o que a pessoa reportou ("o canal nao caiu, e muito
+           * dificil os canais abertos cair"):
+           *
+           *   01:26:35.389  start
+           *   01:26:44.754  loadfile ok        <- 9,37s: o aquecimento bateu no teto
+           *   01:26:44.766  end-file error     <- 12ms
+           *                 publicados:0 janela:0 motivo:null tentativas:0
+           *   01:26:48.295  start              <- retry
+           *   01:26:53.948  file-loaded
+           *   01:26:53.958  first frame        <- FUNCIONOU
+           *
+           * `motivo:null` e `tentativas:0`: o normalizador nao respondeu e nao
+           * falhou — a requisicao ficou pendurada. A origem, no mesmo instante,
+           * mede peak de -17,3 dBFS. A unica coisa que falhou foi a primeira
+           * tentativa.
+           *
+           * Entao uma falha de live vira uma nova tentativa, nao um veredito.
+           * A caixa so aparece se as tentativas automaticas tambem falharem.
+           */
+          if (
+            deveRepetirSozinho(tentativaAutomaticaRef.current, { kind: channel.kind })
+          ) {
+            tentativaAutomaticaRef.current = gastarTentativa(
+              tentativaAutomaticaRef.current,
+            )
+            playerLog('info', 'live', 'falhou; tentando de novo sozinho antes de mostrar erro', {
+              tentativa: tentativaAutomaticaRef.current.gastas,
+              de: TENTATIVAS_AUTOMATICAS_MAX,
+              reason: event.reason,
+            })
+            clearTimeout(tentativaAutomaticaTimerRef.current)
+            tentativaAutomaticaTimerRef.current = window.setTimeout(() => {
+              iniciarRetry()
+            }, ESPERO_ENTRE_TENTATIVAS_MS)
+            return
+          }
+
+          const ui = playbackUiAfterFailed(event.reason)
+            forceShellVisible()
+            // `forceShellVisible()` remove `player-active`, e no player cheio a
+            // classe e o que esconde o browse. Sem esta volta, o browse inteiro
+            // reaparece por baixo do video e sobra uma faixa de canais e categorias
+            // na lateral — o sintoma de "parece tela cheia, mas so pegou o lado dos
+            // canais, sendo que esta em modo janela".
+            //
+            // O botao "Tentar novamente" ja faz isto, com o mesmo helper; o caminho
+            // de falha simplesmente nunca recolocou a classe.
+            if (ui.restorePlayerChrome && shouldRestorePlayerChrome({ embedded })) {
+              document.body.classList.add('player-active')
+            }
+            if (ui.killNativeProcess) void window.sturplay?.player?.stop?.()
+            // O zape falhou: cancela o indicador de espera, senao o spinner
+            // ficaria preso por cima da caixa de erro.
+            clearLiveZapWait()
+            nativePlayedRef.current = false
+            setPlaybackError(ui.playbackError)
+            setBuffering(ui.buffering)
+            setPlaying(ui.playing)
+            setNativeEmbedded(ui.nativeEmbedded)
+            setNativeBooting(ui.nativeBooting)
+            setRetryingNative(ui.retrying)
+            setCurrentTime(0)
+          }
+
+          if (
+            podeRotacionarLive(liveReresolveRef.current, {
+              kind: channel.kind,
+              temPlaylist: Boolean(playlist),
+            })
+          ) {
+            liveReresolveRef.current = { ...liveReresolveRef.current, busy: true }
+            void resolveFreshLiveChannel(playlist!, channelRef.current)
               .then((next) => {
-                if (!next) return
+                if (!next) {
+                  // Sem id alternativo no painel. Este ramo e o que produzia o
+                  // preto sem mensagem: o `return` de fora engolia a falha.
+                  playerLog('warn', 'live', 'painel nao devolveu outro stream_id', {
+                    de: channelRef.current.streamId,
+                  })
+                  liveReresolveRef.current = { ...liveReresolveRef.current, busy: false }
+                  aplicarFalha()
+                  return
+                }
                 playerLog('info', 'live', 'stream_id rotacionado, reabrindo', {
                   de: channelRef.current.streamId,
                   para: next.streamId,
                 })
-                fresh.lastAttempt = next.streamId ?? ''
+                liveReresolveRef.current = registrarRotacao(
+                  { ...liveReresolveRef.current, busy: false },
+                  next.id,
+                )
                 onChange(next)
               })
-              .finally(() => {
-                fresh.busy = false
+              .catch((error) => {
+                // O proprio `get_live_streams` pode cair. Antes isto virava uma
+                // promessa rejeitada sem ninguem ouvindo, e a tela ficava preta do
+                // mesmo jeito — so que agora sem nem o log.
+                liveReresolveRef.current = { ...liveReresolveRef.current, busy: false }
+                playerLog('warn', 'live', 'falha ao procurar stream_id alternativo', {
+                  erro: error instanceof Error ? error.message : String(error),
+                })
+                aplicarFalha()
               })
+            // So volta por aqui quando a rotacao realmente vai acontecer. O `null`
+            // e a rejeicao voltam por `aplicarFalha`, dentro do `.then`/`.catch`.
             return
           }
-          const ui = playbackUiAfterFailed(event.reason)
-          forceShellVisible()
-          if (ui.killNativeProcess) void window.sturplay?.player?.stop?.()
-          // O zape falhou: cancela o indicador de espera, senao o spinner
-          // ficaria preso por cima da caixa de erro.
-          clearLiveZapWait()
-          nativePlayedRef.current = false
-          setPlaybackError(ui.playbackError)
-          setBuffering(ui.buffering)
-          setPlaying(ui.playing)
-          setNativeEmbedded(ui.nativeEmbedded)
-          setNativeBooting(ui.nativeBooting)
-          setRetryingNative(ui.retrying)
-          setCurrentTime(0)
+          aplicarFalha()
         }
         if (event.type === 'buffering') {
           if (typeof event.percent === 'number') {
@@ -10071,7 +10706,10 @@ function Player({
     const liveSturZap =
       embedded &&
       channel.kind === 'live' &&
-      (playbackEngine === 'stur' || managedEngineRef.current === 'stur') &&
+      (playbackEngine === 'stur' ||
+        playbackEngine === 'mpeg' ||
+        managedEngineRef.current === 'stur' ||
+        managedEngineRef.current === 'mpeg') &&
       nativePlayedRef.current
     const urlChanged = lastPlayUrlRef.current !== channel.url
     const isRetry = !urlChanged && mediaRetry > 0
@@ -10413,7 +11051,7 @@ function Player({
 
   useEffect(() => {
     if (!useBufferedNative) return
-    const engineLabel = playbackEngine === 'stur' || managedEngine === 'stur' ? 'STUR' : 'Interno'
+    const engineLabel = playbackEngine === 'mpeg' || managedEngine === 'mpeg' ? 'MPEG' : playbackEngine === 'stur' || managedEngine === 'stur' ? 'STUR' : 'Interno'
     const items = list.slice(0, 400).map((item) => ({
       id: item.id,
       name: item.name,
@@ -10445,8 +11083,72 @@ function Player({
     const off = window.sturplay?.player?.onOverlayAction?.((action) => {
       const type = String(action?.type || '')
       if (type === 'back') {
-        if (!embedded) onBack()
-        else void window.sturplay?.player?.stop?.()
+        /*
+          Voltar = o que o botao da barra faz.
+
+          Antes: so `stop()`. O video parava, mas a JANELA continuava em tela
+          cheia — o app inteiro virava so o video, sem catalogo, sem barra de
+          canal, sem como sair sem o mouse. Era o "aperta para voltar, o video
+          para e o app fica em tela cheia".
+
+          Agora sai da tela cheia ANTES de parar, e so sai se ela realmente
+          estiver ativa (`winFsRef.current`, e nao `domFs`: tela cheia de janela
+          nao passa pelo DOM, entao `document.fullscreenElement` fica vazio e
+          medir por ele nunca disparava).
+        */
+        /*
+          Quem mandou a janela entrar em tela cheia? Pergunta ao main.
+
+          `origin: 'app'` = o dono ja estava em tela cheia antes do video. O
+          `back` so para o video e mantem a janela.
+
+          `origin: 'player'` = o video trouxe a janela (botao de tela cheia da
+          barra). O `back` devolve a janela ao modo em que ela estava.
+
+          A pergunta e feita aqui, no clique, e nao no mount: no mount ainda nao
+          se sabe, e qualquer valor capturado antes do video subir corre na
+          ordem dos eventos — foi o que fez o caso "app ja em tela cheia" sair
+          da tela cheia mesmo assim.
+        */
+        void (async () => {
+          const res = await window.sturplay?.window?.isFullscreen?.()
+          const info = res as { fullscreen?: boolean; origin?: string | null } | undefined
+          const emTelaCheia = info?.fullscreen === true
+          const eraDoDono = info?.origin === 'app'
+
+          /*
+            `exitNativePlayback` e nao so `stop()`.
+
+            `player-active` / `native-vod-active` sao as classes que escondem o
+            catalogo, a barra de canais e a topbar para o video ocupar o app
+            inteiro. `stop()` derruba o video mas NAO remove essas classes, entao
+            o app ficava com o layout de tela cheia e sem catalogo nenhum — o
+            "as vezes o catalogo some e o video pega o app inteiro".
+          */
+          if (!embedded) {
+            onBack()
+          } else if (eraDoDono) {
+            /*
+              A tela cheia era do dono antes do video subir: o `back` para o video
+              e devolve o catalogo, mas a JANELA continua em tela cheia.
+
+              E aqui que os dois caminhos brigavam. A decisao "nao sair" era
+              correta, mas o `exitNativePlayback` chamava `setFullscreen(false)`
+              logo depois e tirava a janela assim mesmo — por isso o "sai da tela
+              cheia sozinho" acontecia mesmo com o `origin` certo.
+            */
+            exitNativePlayback({ exitFullscreen: false })
+          } else if (emTelaCheia) {
+            if (document.fullscreenElement) {
+              await document.exitFullscreen().catch(() => {})
+            } else {
+              await window.sturplay?.window?.setFullscreen?.(false)
+            }
+            exitNativePlayback()
+          } else {
+            exitNativePlayback()
+          }
+        })()
         return
       }
       if (type === 'select' && typeof action.id === 'string') {
@@ -10531,10 +11233,18 @@ function Player({
   const isVod = channel.kind !== 'live'
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0
 
-  // Overlay (STUR) mostra o loading no play normal. No retry o overlay
-  // ainda está escondido — sem spinner do App a tela fica preta.
+  // Overlay (STUR/MPEG) é o dono do loading — igual Smarters, UMA tela de
+  // loading só. O spinner do App aparecia junto com o véu do overlay
+  // (texto duplo empilhado). A partir do 1º evento nativo o overlay assume.
+  const [nativeSeen, setNativeSeen] = useState(false)
+  const nativeSeenRef = useRef(false)
+  useEffect(() => {
+    setNativeSeen(false)
+    nativeSeenRef.current = false
+  }, [channel.url])
   const showNativeBoot =
     useBufferedNative &&
+    !nativeSeen &&
     shouldShowNativeRetrySpinner({
       retrying: retryingNative,
       buffering,
@@ -10547,7 +11257,7 @@ function Player({
   return (
     <div
       ref={playerWrapRef}
-      className={`player-wrap aspect-${aspect}${embedded ? ' player-embedded' : ''}${showNativeBoot ? ' is-mpv-one-booting' : ''}${showNativeEmbed ? ' is-native-embedded is-embed is-embed-chrome' : ''}${useBufferedNative ? ' is-native-buffered' : ''}`}
+      className={`player-wrap has-topbar aspect-${aspect}${embedded ? ' player-embedded' : ''}${showNativeBoot ? ' is-mpv-one-booting' : ''}${showNativeEmbed ? ' is-native-embedded is-embed is-embed-chrome' : ''}${useBufferedNative ? ' is-native-buffered' : ''}`}
       onMouseMove={bumpOverlay}
       onDoubleClick={toggleFullscreen}
     >
@@ -10585,21 +11295,7 @@ function Player({
               <button
                 className="primary"
                 onClick={() => {
-                  const ui = playbackUiAfterRetry()
-                  // Sem isto, no painel dividido o retry escondia o app inteiro:
-                  // `player-active` zera a visibilidade do shell e, como a superficie
-                  // do mpv esta preta durante a tentativa, sobrava uma tela mutilada
-                  // com so os botoes de acao.
-                  if (ui.restorePlayerChrome && shouldRestorePlayerChrome({ embedded })) {
-                    document.body.classList.add('player-active')
-                  }
-                  setBuffering(ui.buffering)
-                  setPlaybackError(ui.playbackError)
-                  setNativeBooting(ui.nativeBooting)
-                  setNativeEmbedded(ui.nativeEmbedded)
-                  setPlaying(ui.playing)
-                  setRetryingNative(ui.retrying)
-                  setMediaRetry((n) => n + 1)
+                  iniciarRetry()
                 }}
                 style={{ background: '#2dd4bf', color: '#07090f', border: 'none', padding: '8px 16px', borderRadius: 8, fontWeight: 700, cursor: 'pointer' }}
               >
@@ -10624,16 +11320,29 @@ function Player({
 
         {/* Top bar */}
         <div className="player-topbar">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            {!embedded && (
-              <button
-                className="player-btn-clean"
-                onClick={onBack}
-                title={channel.kind === 'series' ? 'Voltar para os detalhes da série' : 'Voltar'}
-              >
-                <ArrowLeft size={19} />
-              </button>
-            )}
+          <div className="player-top-left" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            {/*
+              Voltar fica na barra de CIMA, dentro de `player-controls`, na MESMA
+              familia do pause, do som e do resto — todos `player-btn-clean`.
+
+              Foi por estar aqui que ele herdou o hover, o `onMouseMove` do
+              `player-wrap` e o `z-index` certo. Uma tentativa anterior de
+              extrai-lo para fora do bloco o deixou sem animacao e sem clique,
+              porque `player-controls` e `inset: 0` com `z-index: 20` e cobre a
+              tela toda: um dock externo fica ATRAS dele.
+
+              A unica diferenca em relacao aos outros e que este fica sempre
+              visivel mesmo com `player-controls` em `hidden`, porque e a saida
+              que nao depende de teclado.
+            */}
+            <button
+              className="player-btn-clean player-back-always"
+              onClick={onBack}
+              title="Voltar"
+              aria-label="Voltar"
+            >
+              <ArrowLeft size={18} />
+            </button>
             {channel.kind === 'live' && (
               <span className="player-live-badge">LIVE TV</span>
             )}
@@ -10653,7 +11362,10 @@ function Player({
         </div>
 
         {/* Floating Resume Toast */}
-        {showResumeToast && initialTime > 5 && (
+        {/* `!isVod`: ao vivo nao existe "continuar de". A barra de seek ja tinha
+            essa guarda e o toast nao — entao um canal ao vivo com posicao salva
+            mostrava "Continuando de 12:34" sobre o video. */}
+        {showResumeToast && !isVod && initialTime > 5 && (
           <div className="player-resume-toast">
             <span>Continuando de {formatPlayerTime(initialTime)}</span>
             <button

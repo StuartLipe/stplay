@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { List, X } from 'lucide-react'
 import {
   findSeasonForEpisode,
@@ -69,6 +70,8 @@ export function PlayerOverlayApp() {
   const [controlsVisible, setControlsVisible] = useState(true)
   const [booting, setBooting] = useState(true)
   const [failed, setFailed] = useState(false)
+  const [retryInfo, setRetryInfo] = useState<{ n: number; of: number } | null>(null)
+  const [bootPct, setBootPct] = useState<number | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const [volume, setVolume] = useState(readVolume)
   const [muted, setMuted] = useState(false)
@@ -148,6 +151,8 @@ export function PlayerOverlayApp() {
         hasPlayedRef.current = true
         setBooting(false)
         setFailed(false)
+        setRetryInfo(null)
+        setBootPct(null)
         setPlaying(true)
         applyOutputVolume()
       }
@@ -177,6 +182,18 @@ export function PlayerOverlayApp() {
         setPlaying(false)
       }
       if (event.type === 'buffering') {
+        if (typeof event.retry === 'number' && typeof event.of === 'number') {
+          setRetryInfo({ n: event.retry, of: event.of })
+          setBooting(true)
+        }
+        // Percentual 0→100 igual Smarters: sobe no véu enquanto carrega.
+        if (typeof event.percent === 'number') {
+          setBootPct((prev) => {
+            const next = Math.max(0, Math.min(100, Math.round(event.percent as number)))
+            if (prev !== null && next < prev) return prev
+            return next
+          })
+        }
         if (!hasPlayedRef.current && typeof event.percent === 'number' && event.percent < 100) {
           setBooting(true)
         }
@@ -218,6 +235,7 @@ export function PlayerOverlayApp() {
       if (payload?.action === 'boot') {
         hasPlayedRef.current = false
         setFailed(false)
+        setRetryInfo(null)
         setBooting(true)
         setPlaying(false)
       }
@@ -257,6 +275,8 @@ export function PlayerOverlayApp() {
     hasPlayedRef.current = false
     setBooting(true)
     setFailed(false)
+    setRetryInfo(null)
+    setBootPct(null)
     setPlaying(false)
     setCurrent(0)
     const hint =
@@ -371,11 +391,31 @@ export function PlayerOverlayApp() {
   const isLive = meta.kind === 'live'
   const allItems = meta.list || []
   const position = scrubPos ?? current
-  const active = playing && !booting && !failed
+  /*
+   * `active` saiu daqui: era `playing && !booting && !failed`, usado so como
+   * gate da barra de seek, e por isso a barra sumia quando a pessoa pausava.
+   * Quem decide se os controles aparecem e `uiVisible`/`dockVisible`, logo abaixo.
+   */
   const uiVisible = controlsVisible || !playing || listOpen || booting
-  const dockVisible = uiVisible && !failed
+  // Igual Smarters: carregando mostra SÓ o véu + spinner. A barra embaixo
+  // do véu era ruído — controle só depois do 1º frame (ou lista aberta).
+  const dockVisible = uiVisible && !failed && (!booting || listOpen)
   const hideCursor = !uiVisible && !fullscreen
   const showMutedIcon = muted
+
+  /*
+  O botao de voltar mora DENTRO da barra.
+
+  Houve uma tentativa de coloca-lo numa janela SEPARADA no canto superior
+  esquerdo do video (janela de 56x56, criada pelo main). Nao funciona: janela
+  Chromium transparente sobre a HWND reparentada do mpv quebra o swapchain
+  D3D11 do vo=gpu. O sintoma medido e o audioCutting e o quadro parando, e no
+  ao vivo entra em loop. A medicao original que motivou o overlay ser so a barra
+  esta em overlay-bounds.cjs, e ela se aplica aqui tambem.
+
+  Entao o botao fica na barra. Some junto com ela, que e o comportamento
+  pedido: nada fixo na tela.
+*/
 
   const seriesSeasonGroups = useMemo(() => {
     if (meta.kind !== 'series') return []
@@ -513,33 +553,26 @@ export function PlayerOverlayApp() {
       {booting && !failed && (
         <div className="po-loading">
           <div className="po-loading-spinner" />
-          {typeof label === 'string' && label ? (
-            <p className="po-loading-label">{label} carregando...</p>
-          ) : null}
+          {retryInfo ? (
+            <p className="po-loading-label">Reconectando em 5s ({retryInfo.n}/{retryInfo.of})</p>
+          ) : (
+            <p className="po-loading-label">Buffering {bootPct ?? 0}%</p>
+          )}
         </div>
       )}
 
-      {!isLive && active && (
-        <div className={`po-center${uiVisible ? ' is-visible' : ''}`}>
-          <IconBtn title="Voltar 10s" onClick={(e) => seekTo(position - 10, e)}>
-            <span className="po-skip-label">-10</span>
-          </IconBtn>
-          <IconBtn title={playing ? 'Pausar' : 'Reproduzir'} onClick={togglePause}>
-            {playing ? (
-              <svg width="32" height="32" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-                <path d="M4 2h3v12H4zM9 2h3v12H9z" />
-              </svg>
-            ) : (
-              <svg width="32" height="32" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-                <path d="M4 2.5v11l9-5.5-9-5.5z" />
-              </svg>
-            )}
-          </IconBtn>
-          <IconBtn title="Avançar 10s" onClick={(e) => seekTo(position + 10, e)}>
-            <span className="po-skip-label">+10</span>
-          </IconBtn>
-        </div>
-      )}
+      {/*
+        O trio central `-10 / pause / +10` saiu daqui.
+
+        Ele vivia em `.po-center`, que e `position: absolute` dentro da JANELA do
+        overlay — e essa janela tem SO 104px de altura durante a reproducao. Logo
+        o trio nao ficava no meio do video: ficava grudado no rodape, colado na
+        barra, parecendo botao quebrado.
+
+        Tambem era duplicata: o pause do `po-dock` e o que realmente pausa, e o
+        `seekTo` dele ja cobre o salto. Os ±10 agora ficam no `po-toolbar`, na
+        MESMA familia do pause e do som — que e a unica familia que funciona.
+      */}
 
       <div
         className={`po-dock${dockVisible ? ' is-visible' : ''}`}
@@ -547,10 +580,39 @@ export function PlayerOverlayApp() {
       >
         {label ? <p className="po-title">{label}</p> : null}
 
-        {!isLive && duration > 0 && active && (
+        {/*
+          A barra de seek NAO pode depender de `active`.
+
+          `active` e `playing && !booting && !failed`, entao ela sumia no pause —
+          e era o comportamento errado: pausado e justamente quando a pessoa
+          quer ver onde esta e quanto falta. O screenshot mostrava a faixa de
+          tempo inteira ausente com o pause ligado, e presente com ele desligado.
+
+          O gate correto e o mesmo dos outros controles: video carregado e com
+          duracao conhecida. `booting` e `failed` ja sao barrados por `dockVisible`
+          (`uiVisible && !failed`), entao aqui basta nao exigir `playing`.
+        */}
+        {!isLive && duration > 0 && !failed && (
           <div className="po-seek-row">
             <span className="po-time">{formatTime(position)}</span>
-            <div className="po-seek-wrap">
+            <div
+              className="po-seek-wrap"
+              /*
+                `--seek-pct` alimenta o gradiente do trilho desenhado em CSS.
+                Durante o arrasto vale o valor de `scrubPos`, e nao o de
+                `position`: enquanto o dedo/cursor esta no slider, o valor
+                real ainda nao mudou, e usar `position` fazia o trilho
+                "voltar" atras do polegar.
+              */
+              style={
+                {
+                  '--seek-pct': `${Math.min(
+                    100,
+                    Math.max(0, (((scrubPos ?? position) / duration) || 0) * 100),
+                  )}%`,
+                } as CSSProperties
+              }
+            >
               {scrubPos !== null && (
                 <span
                   className="po-scrub-tip"
@@ -580,6 +642,34 @@ export function PlayerOverlayApp() {
         {isLive && <div className="po-live-row">AO VIVO</div>}
 
         <div className="po-toolbar">
+          {/*
+            Voltar, no mesmo `po-toolbar` do pause e do som — a MESMA familia.
+
+            Precisa morar AQUI, e nao em `.player-controls` da janela principal,
+            porque durante a reproducao mpv a janela principal fica
+            `is-native-embedded is-native-buffered` e a regra
+            `.player-wrap.is-native-buffered .player-controls { display: none !important }`
+            apaga a barra inteira. O que sobra na tela e a janela do overlay: e
+            ela que precisa ter a saida, porque e o unico caminho que nao depende
+            de teclado.
+
+            `type: 'back'` ja e tratado no App (App.tsx, `onOverlayAction`):
+            embedded -> `player.stop()`, senão -> `onBack()`.
+          */}
+          <IconBtn
+            title="Voltar"
+            onClick={(e) => {
+              e.stopPropagation()
+              void window.sturplay?.player?.sendOverlayAction?.({ type: 'back' })
+              showControls()
+            }}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M19 12H5" />
+              <path d="m12 19-7-7 7-7" />
+            </svg>
+          </IconBtn>
+
           <IconBtn title={playing ? 'Pausar' : 'Reproduzir'} onClick={togglePause}>
             {playing ? (
               <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
@@ -591,6 +681,39 @@ export function PlayerOverlayApp() {
               </svg>
             )}
           </IconBtn>
+
+          {/*
+            -10 / +10, na MESMA familia do pause e do som.
+
+            Vieram do `.po-center`, que era `position: absolute` dentro da janela
+            do overlay — e essa janela tem SO 104px de altura durante a
+            reproducao. O trio ficava grudado no rodape, colado na barra, e nao
+            no meio do video como parecia.
+
+            Aqui eles usam o mesmo `IconBtn` e o mesmo `seekTo` do dock, entao
+            passam a funcionar de verdade: o `-10` reapareceu no `po-toolbar`
+            como qualquer outro botao da barra.
+          */}
+          {!isLive && (
+            <>
+              <IconBtn title="Voltar 10s" onClick={(e) => seekTo(position - 10, e)}>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M11 8H6a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h5" />
+                  <path d="M11 8v8" />
+                  <path d="m15 8-4 4 4 4" />
+                  <path d="M19 8v8" />
+                </svg>
+              </IconBtn>
+              <IconBtn title="Avançar 10s" onClick={(e) => seekTo(position + 10, e)}>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M13 8h5a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-5" />
+                  <path d="M13 8v8" />
+                  <path d="m9 8 4 4-4 4" />
+                  <path d="M5 8v8" />
+                </svg>
+              </IconBtn>
+            </>
+          )}
 
           {!isLive && (
             <IconBtn title="Voltar ao início" onClick={(e) => seekTo(0, e)}>

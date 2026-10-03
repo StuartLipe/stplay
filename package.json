@@ -116,10 +116,10 @@
       ]
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
       "allowElevation": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "ST PLAY 1.0.1",
@@ -131,7 +131,12 @@
     },
     "asar": true,
     "electronDist": "node_modules/electron/dist",
-    "afterPack": "scripts/prune-locales.cjs"
+    "afterPack": "scripts/prune-locales.cjs",
+    "differential": {
+      "type": "nsis",
+      "protocol": "gh",
+      "stripAssert": false
+    }
   },
   "allowScripts": {
     "electron@39.2.7": true,

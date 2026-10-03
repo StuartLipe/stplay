@@ -1,5 +1,6 @@
 import type { PlaybackEngine } from '../../types'
 import { createInternalPlayer } from './internalPlayer'
+import { createMpegPlayer } from './mpegPlayer'
 import { createLibmpvPlayer } from './libmpvPlayer'
 import { createMpvExePlayer } from './mpvExePlayer'
 import { createMpvOnePlayer } from './mpvOnePlayer'
@@ -27,6 +28,7 @@ export type PlayerManagerOptions = {
 
 const factories: Record<PlayerEngine, () => PlayerBackend> = {
   internal: () => createInternalPlayer(() => null),
+  mpeg: () => createMpegPlayer(),
   libmpv: createLibmpvPlayer,
   mpv: createMpvExePlayer,
   'mpv-one': createMpvOnePlayer,
@@ -51,6 +53,7 @@ export class PlayerManager {
   constructor(opts: PlayerManagerOptions) {
     this.opts = opts
     factories.internal = () => createInternalPlayer(opts.getVideo)
+    factories.mpeg = () => createMpegPlayer()
   }
 
   private emit(event: PlayerEvent) {
@@ -260,12 +263,13 @@ export class PlayerManager {
     const playGen = ++this.playGen
     this.cancelled = false
 
-    const auto = preference === 'auto'
     const chain: PlayerEngine[] =
       preference === 'auto'
         ? autoChainFor(startOpts.live)
         : preference === 'internal'
           ? ['internal']
+          : preference === 'mpeg'
+            ? ['mpeg']
           : preference === 'libmpv'
             ? ['libmpv']
             : preference === 'mpv'
@@ -277,6 +281,7 @@ export class PlayerManager {
                   : preference === 'vlc'
                     ? ['vlc']
                     : ['mpc']
+    const auto = preference === 'auto' || chain.length > 1
 
     const targetEngine = chain[0]
     const canSturReload = canHotReloadStur({

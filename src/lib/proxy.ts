@@ -78,18 +78,32 @@ function sleep(ms: number) {
 
 let rateLimitUntil = 0
 
-/** Até 2 requests do painel em paralelo (mais rápido que fila 1 a 1). */
-const PANEL_MAX = 2
+/**
+ * Este painel devolve 429 em rajada: medido em `get_live_streams`, uma
+ * requisição falha e as 5 seguintes passam. Com PANEL_MAX=2 o app dispara
+ * 6+ requests de catálogo de uma vez e estoura a cota. Serializar elimina a
+ * rajada — a latência ganha é de segundos, e o custo de não ter é a carga
+ * inteira caindo.
+ */
+const PANEL_MAX = 1
 let panelActive = 0
 const panelWait: Array<() => void> = []
+
+/** Intervalo mínimo entre requests ao mesmo painel (ms). */
+const PANEL_MIN_GAP_MS = 350
+let panelLastAt = 0
 
 async function acquirePanel() {
   if (panelActive < PANEL_MAX) {
     panelActive += 1
-    return
+  } else {
+    await new Promise<void>((resolve) => panelWait.push(resolve))
+    panelActive += 1
   }
-  await new Promise<void>((resolve) => panelWait.push(resolve))
-  panelActive += 1
+  // Espaça mesmo já tendo pego a vaga, para segurar a cadência entre chamadas.
+  const gap = panelLastAt + PANEL_MIN_GAP_MS - Date.now()
+  if (gap > 0) await sleep(gap)
+  panelLastAt = Date.now()
 }
 
 function releasePanel() {
@@ -106,7 +120,10 @@ function retryWaitMs(response: Response, attempt: number) {
     const asDate = Date.parse(raw)
     if (!Number.isNaN(asDate)) return Math.min(Math.max(0, asDate - Date.now()), 60000)
   }
-  return Math.min(4000 * 2 ** attempt + Math.random() * 1000, 45000)
+  // Sem Retry-After o painel usa backoff próprio curto (medido: ~1-3s).
+  // O piso de 4s de antes segurava mais que o necessário e, com 3 tentativas,
+  // uma rajada de catálogo estourava a cota e derrubava a carga inteira.
+  return Math.min(2000 * 2 ** attempt + Math.random() * 750, 30000)
 }
 
 async function waitRateLimit() {
@@ -129,7 +146,21 @@ async function fetchOnce(url: string, opts?: FetchOpts): Promise<Response> {
   }
 
   if (isXtreamPanelUrl(url)) {
-    return fetch(viaProxy(url), init)
+    const t0 = Date.now()
+    try {
+      const r = await fetch(viaProxy(url), init)
+      // Loga código e tamanho: separa recusa do painel de download gigante
+      // que estoura memória/tempo no renderer.
+      logNet('panel ok', url, { status: r.status, ms: Date.now() - t0 })
+      return r
+    } catch (e) {
+      logNet('panel falhou', url, {
+        erro: e instanceof Error ? e.message : String(e),
+        ms: Date.now() - t0,
+        timeoutMs: opts?.timeoutMs ?? null,
+      })
+      throw e
+    }
   }
 
   try {
@@ -142,21 +173,48 @@ async function fetchOnce(url: string, opts?: FetchOpts): Promise<Response> {
   return fetch(viaProxy(url), init)
 }
 
+/** Diagnóstico de rede. Vai pro console do renderer e pro internal-debug.log. */
+function logNet(message: string, url: string, data: Record<string, unknown>) {
+  const short = url.length > 160 ? url.slice(0, 160) + '...' : url
+  console.debug('[net]', message, short, data)
+  try {
+    const api = (window as unknown as { sturplay?: { dev?: { internalDebug?: (p: unknown) => unknown } } }).sturplay
+    if (api?.dev?.internalDebug) {
+      void Promise.resolve(
+        api.dev.internalDebug({ scope: 'renderer', level: 'info', tag: '[net]', message, data: { url: short, ...data } }),
+      ).catch(() => undefined)
+    }
+  } catch {
+    // ignore
+  }
+}
+
 async function fetchRaw(url: string, opts?: FetchOpts): Promise<Response> {
   const doFetch = async () => {
     let last: Response | undefined
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // 429 deste painel chega em rajada: uma carga de catálogo dispara 6+ requests
+    // e a cota estoura. 3 tentativas não sobrevivem; 6 com espera crescente, sim.
+    // O custo é latência em caso patológico, não throughput no caso normal.
+    const maxAttempts = 6
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const response = await fetchOnce(url, opts)
       last = response
       if (response.ok) return response
       if (response.status === 429 || response.status === 503) {
         const wait = retryWaitMs(response, attempt)
         rateLimitUntil = Math.max(rateLimitUntil, Date.now() + wait)
+        logNet('rate limit, aguardando', url, {
+          attempt: attempt + 1,
+          de: maxAttempts,
+          esperaMs: Math.round(wait),
+          status: response.status,
+        })
         await sleep(wait)
         continue
       }
       break
     }
+    logNet('download falhou apos tentativas', url, { status: last?.status ?? 0 })
     throw new Error(`Falha ao baixar (${last?.status || 0})`)
   }
 
@@ -173,7 +231,10 @@ async function fetchRaw(url: string, opts?: FetchOpts): Promise<Response> {
 
 export async function fetchText(url: string, opts?: FetchOpts) {
   const response = await fetchRaw(url, opts)
-  return response.text()
+  const text = await response.text()
+  // Só o tamanho em log; a playlist deste painel tem >100MB e 300k+ canais.
+  logNet('texto recebido', url, { bytes: text.length })
+  return text
 }
 
 export async function fetchJson<T>(url: string, opts?: FetchOpts): Promise<T> {
@@ -181,11 +242,17 @@ export async function fetchJson<T>(url: string, opts?: FetchOpts): Promise<T> {
   const text = await response.text()
   const trimmed = text.trim()
   if (!trimmed || trimmed.startsWith('<')) {
+    // HTML aqui = o painel devolveu página de erro/login, não JSON.
+    logNet('json invalido', url, {
+      bytes: text.length,
+      inicio: trimmed.slice(0, 120),
+    })
     throw new Error('Resposta da API inválida (bloqueio/vazio)')
   }
   try {
     return JSON.parse(trimmed) as T
   } catch {
+    logNet('json parse falhou', url, { bytes: text.length })
     throw new Error('Resposta da API inválida')
   }
 }

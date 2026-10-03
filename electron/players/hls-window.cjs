@@ -101,6 +101,13 @@ function createWindowState(opts = {}) {
     baseSeq: 0,
     /** Segmentos publicados, do mais antigo para o mais novo. */
     segmentos: [],
+    /**
+     * Seqs proprias onde o conteudo DESCONTINUA (encoder do painel reiniciou
+     * a sequencia). `escreverManifesto` emite `#EXT-X-DISCONTINUITY` antes
+     * delas, para o demuxer tratar a transicao em vez de zerar o relogio e
+     * tocar tudo de novo — era o "volta segundos" com imagem e audio juntos.
+     */
+    quebras: new Set(),
     /** seq -> uri, para resolver fetch de um segmento que ja saiu da janela. */
     lru: new Map(),
     /** Quantas vezes o painel TRouxe conteudo novo. Util para diagnostico. */
@@ -119,7 +126,10 @@ function createWindowState(opts = {}) {
  * normal em HLS ao vivo — a janela anda mais rapido do que o cliente pede.
  */
 function descartar(state, segmentos) {
-  for (const s of segmentos) state.lru.set(s.seq, s.uri)
+  for (const s of segmentos) {
+    state.lru.set(s.seq, s.uri)
+    if (state.quebras) state.quebras.delete(s.seq)
+  }
   if (segmentos.length) state.baseSeq = segmentos[segmentos.length - 1].seq + 1
   while (state.lru.size > state.lruSize) {
     const maisAntigo = state.lru.keys().next().value
@@ -165,13 +175,36 @@ function alinhar(state, painel) {
       // `descartar`).
       const bringing = painel.segments.slice(-d)
       descartar(state, state.segmentos.slice(0, d))
-      const ultimo = state.segmentos.length ? state.segmentos[state.segmentos.length - 1].seq : state.baseSeq - 1
+      /*
+        `ultimo` tem que andar a cada segmento.
+
+        Era `const` e o loop publicava `ultimo + 1` para TODOS os `d` segmentos
+        novos: com `d >= 2` a janela saia com o mesmo numero repetido — medido
+        no ar: `[6,7,8,9,10,10,11,12]`, `[10,10,11,12,13,13,14,15]`.
+
+        Numero de sequencia duplicado num manifesto HLS e indefinido para o
+        demuxer: o mpv tocava o segmento repetido (imagem e audio voltando uns
+        segundos) e zerava o `time-pos` — era o "ao vivo volta segundos" que o
+        dono reportou em TODOS os canais, uma vez por abertura e depois de vez
+        em quando, sempre que o painel deslizava 2+ de uma vez.
+      */
+      let ultimo = state.segmentos.length ? state.segmentos[state.segmentos.length - 1].seq : state.baseSeq - 1
       for (const seg of bringing) {
-        state.segmentos.push({ seq: ultimo + 1, dur: seg.dur, uri: seg.uri })
+        ultimo += 1
+        state.segmentos.push({ seq: ultimo, dur: seg.dur, uri: seg.uri })
         novos += 1
       }
       motivo = `painel deslizou ${d}`
     } else {
+      // Sequencia nao avancou de forma confiavel: pulou alem da janela
+      // (`d >= length`), REGREDIU (`d < 0`, encoder do painel reiniciou —
+      // medido no ar: `seqPainel` 90 -> 7) ou veio sem numero.
+      //
+      // Conteudo apos regressao/salto tem PTS novo: sem
+      // `#EXT-X-DISCONTINUITY` o demuxer zera o relogio e toca tudo de novo
+      // (imagem e audio voltando juntos). Marca a quebra e publica igual.
+      const regressaoOuSalto =
+        Number.isFinite(d) && (d <= 0 || d >= state.segmentos.length)
       // Sequencia nao avançou (ou pulou/regrediu de forma nao confiavel).
       // Alguns paineis mintem a sequencia, entao o teste que vale e: o segmento
       // MAIS NOVO do painel mudou? Se mudou, ele e conteudo novo.
@@ -180,8 +213,9 @@ function alinhar(state, painel) {
       if (ultimoPainel && (!meuNovo || ultimoPainel.uri !== meuNovo.uri)) {
         const ultimo = meuNovo ? meuNovo.seq : state.baseSeq - 1
         state.segmentos.push({ seq: ultimo + 1, dur: ultimoPainel.dur, uri: ultimoPainel.uri })
+        if (regressaoOuSalto) state.quebras.add(ultimo + 1)
         novos = 1
-        motivo = 'cauda mudou sem a sequencia andar'
+        motivo = regressaoOuSalto ? 'sequencia do painel regrediu/saltou (com quebra)' : 'cauda mudou sem a sequencia andar'
       } else {
         motivo = 'painel nao trouxe nada novo'
       }
@@ -219,6 +253,7 @@ function escreverManifesto(state, urlPara) {
     `#EXT-X-MEDIA-SEQUENCE:${primeiro.seq}`,
   ]
   for (const s of state.segmentos) {
+    if (state.quebras && state.quebras.has(s.seq)) linhas.push('#EXT-X-DISCONTINUITY')
     linhas.push(`#EXTINF:${(s.dur || 0).toFixed(6)},`)
     linhas.push(urlPara(s.seq))
   }
