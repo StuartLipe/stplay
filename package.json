@@ -131,12 +131,7 @@
     },
     "asar": true,
     "electronDist": "node_modules/electron/dist",
-    "afterPack": "scripts/prune-locales.cjs",
-    "differential": {
-      "type": "nsis",
-      "protocol": "gh",
-      "stripAssert": false
-    }
+    "afterPack": "scripts/prune-locales.cjs"
   },
   "allowScripts": {
     "electron@39.2.7": true,
