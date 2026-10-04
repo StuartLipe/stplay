@@ -1,5 +1,5 @@
 /**
- * mpv.exe embutido — reescrito do zero (modelo IPTV Player One).
+ * mpv.exe embutido — reescrito do zero.
  * Spawn offscreen → adopt HWND via koffi → IPC JSON.
  */
 const path = require('path')

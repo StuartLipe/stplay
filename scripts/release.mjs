@@ -230,11 +230,30 @@ for (const file of arquivos) {
 
 /* ------------------------------------------------------ 7. commit e push */
 
-if (git('status', '--porcelain')) {
-  git('add', '-A')
+/*
+ * SO O MANIFESTO ENTRA NO COMMIT.
+ *
+ * Era `git('status', '--porcelain')` + `git add -A`, e o `-A` é o problema: ele
+ * varre a arvore INTEIRA e leva junto o que estava solto. Medido nesta 1.0.2: três
+ * `scripts/probe-*.cjs` de diagnóstico, que o dono tinha dito para não commitar,
+ * entraram no commit "build: 1.0.2 publicada" porque estavam untracked na hora do
+ * release. Quem depende disso é o próximo build de quem estiver com um arquivo
+ * qualquer aberto.
+ *
+ * A condição também era a errada: perguntava "a árvore está suja?" e respondia
+ * "então commita tudo". A pergunta certa é "o manifesto mudou?".
+ */
+const manifestoAlterado = git('status', '--porcelain', '--', 'release-exe-manifest.txt').trim()
+if (manifestoAlterado) {
+  git('add', '--', 'release-exe-manifest.txt')
   git('commit', '-m', `build: ${versao} publicada`)
   log('')
   log(`  commit      build: ${versao} publicada`)
+  const foraDoCommit = git('status', '--porcelain')
+  if (foraDoCommit) {
+    log(`  arvore      ${foraDoCommit.split('\n').length} arquivo(s) fora do commit, por design:`)
+    for (const linha of foraDoCommit.split('\n').filter(Boolean)) log(`              ${linha}`)
+  }
   if (semPush) {
     log('  push        pulado (--no-push)')
   } else {
@@ -243,7 +262,7 @@ if (git('status', '--porcelain')) {
   }
 } else {
   log('')
-  log('  commit      nada a commitar, a arvore ja estava igual')
+  log('  commit      nada a commitar, o manifesto ja estava igual')
 }
 
 log(`\n  pronto. https://github.com/${repo}/releases/tag/${tag}\n`)

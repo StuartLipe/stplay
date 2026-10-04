@@ -60,7 +60,7 @@ async function loadM3uPlaylist(playlist: Playlist) {
 
 type ProgressCb = (items: Channel[]) => void
 
-/** SÉRIES — API Xtream como o Expert (M3U com user/pass também). */
+/** SÉRIES — API Xtream  com user/pass também). */
 async function loadSeriesCatalog(playlist: Playlist, onProgress?: ProgressCb): Promise<Channel[]> {
   const cacheKey = key(playlist.id, 'series')
   const xtream = toXtreamPlaylist(playlist)

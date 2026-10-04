@@ -1,5 +1,28 @@
-/** Altura da janela overlay (barra inferior — dock completo com seek + toolbar). */
-const OVERLAY_BAR_HEIGHT = 148
+/**
+ * Altura MINIMA da janela overlay durante a reproducao.
+ *
+ * Medido no modo janela (video de 277px de altura), com o dock atual:
+ *
+ *   titulo 20 + busca 22 + toolbar 92 (duas fileiras de 44) + padding 16 = 150px
+ *
+ * O piso era 72px, e a janela ficava em 72 com o dock pedindo 159. O que sobra
+ * de uma janela menor que o conteudo e o FIM da lista: os botoes de baixo saem
+ * pelo `overflow: hidden`, e sobrava so o ultimo — o de tela cheia. Era o
+ * "no modo janela aparece so o icone de tela cheia".
+ *
+ * 168px da folga para duas fileiras de botoes mesmo com o seek, e ainda e
+ * proporcional: a barra e limitada pelos 20% de `overlayBarRect`.
+ */
+const OVERLAY_BAR_MIN_HEIGHT = 168
+
+/**
+ * Faixa NO TOPO reservada ao botao de voltar.
+ *
+ * Nao e altura reservada: e o quanto o botao desce dentro da janela do overlay.
+ * Serve para o `top` do `.po-back` e o `bottom` do `.po-dock` baterem com o
+ * mesmo numero, em vez de dois valores repetidos no CSS que divergem sozinhos.
+ */
+const OVERLAY_TOP_STRIP = 56
 
 /** Espaço inferior reservado aos controles React — o HWND do mpv não cobre essa faixa. */
 const CONTROL_INSET_PX = 100
@@ -9,12 +32,29 @@ const CONTROL_INSET_PX = 100
  */
 function overlayBarRect(videoRect) {
   if (!videoRect || videoRect.width < 32 || videoRect.height < 32) return videoRect
-  const h = Math.min(OVERLAY_BAR_HEIGHT, Math.max(112, Math.round(videoRect.height * 0.2)))
+  /*
+   * JANELA DO OVERLAY = O VIDEO INTEIRO.
+   *
+   * Antes era so a barra de baixo, porque o dock era a unica coisa que morava
+   * nela. Com o botao de voltar no topo esquerdo, a janela precisa pegar as DUAS
+   * pontas: o topo para o botao, a base para o dock. Uma janela so na base obriga
+   * o dock a subir junto - foi o que aconteceu na primeira tentativa, com o dock
+   * aparecendo no TOPO do video.
+   *
+   * A alternativa seria uma segunda janela minuscula so para o botao. Duas
+   * janelas do Chromium sobre o video custam mais apresentacao do que uma.
+   *
+   * O preco de cobrir o video esta medido no comentario de `videoContentRect`: o
+   * HWND do mpv e reparentado dentro da janela principal, e Chromium em cima
+   * dele quebra o swapchain D3D11. O drawer de canais JA usava `full: true`
+   * sobre o video sem congelar, entao o caminho existe e esta no ar. O que
+   * continua reservado e a faixa de baixo, onde o dock mora.
+   */
   return {
     x: Math.round(videoRect.x),
-    y: Math.round(videoRect.y + videoRect.height - h),
+    y: Math.round(videoRect.y),
     width: Math.max(64, Math.round(videoRect.width)),
-    height: h,
+    height: Math.max(64, Math.round(videoRect.height)),
   }
 }
 
@@ -68,9 +108,15 @@ function overlayShellRect(videoRect, opts = {}) {
 function videoContentRect(videoRect, opts = {}) {
   if (!videoRect || videoRect.width < 32 || videoRect.height < 120) return videoRect
   const fullscreen = opts.fullscreen === true
+  /*
+   * O recuo tem que ser >= a barra, nunca menor: e ele que tira o HWND do mpv de
+   * baixo da janela do overlay. Com a barra em 168px e o recuo em 100px, os 68px
+   * de cima da barra ficavam SOBRE o video — que e o que a janela do Chromium
+   * nao pode fazer sem congelar a apresentacao do swapchain D3D11.
+   */
   const inset = fullscreen
-    ? Math.min(88, Math.max(64, Math.round(videoRect.height * 0.1)))
-    : Math.min(CONTROL_INSET_PX, Math.max(72, Math.round(videoRect.height * 0.16)))
+    ? Math.min(168, Math.max(64, Math.round(videoRect.height * 0.1)))
+    : Math.min(videoRect.height - 80, Math.max(72, Math.round(videoRect.height * 0.16)))
   return {
     x: Math.round(videoRect.x),
     y: Math.round(videoRect.y),
@@ -80,7 +126,8 @@ function videoContentRect(videoRect, opts = {}) {
 }
 
 module.exports = {
-  OVERLAY_BAR_HEIGHT,
+  OVERLAY_BAR_MIN_HEIGHT,
+  OVERLAY_TOP_STRIP,
   CONTROL_INSET_PX,
   overlayBarRect,
   overlayShellRect,

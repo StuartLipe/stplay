@@ -4,7 +4,7 @@
 // confirmava a remocao, o modal fechava, e o item continuava na lista. Sem erro,
 // sem log — so a sensacao de que o botao nao faz nada.
 //
-// A causa era o撞 de namespace: o card da serie no browse tem id 'series-123',
+// A causa era o choque de namespace: o card da serie no browse tem id 'series-123',
 // mas o item guardado para aquela serie tem channel.id 'ep-456' (o EPISODIO
 // assistido) e seriesId '123' (numero cru). O menu da pre-visualizacao ainda
 // descartava o channelId que o chamador mandava e re-montava o alvo pelo canal

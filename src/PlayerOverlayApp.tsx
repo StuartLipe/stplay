@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { List, X } from 'lucide-react'
 import {
   findSeasonForEpisode,
@@ -60,7 +61,72 @@ function IconBtn({
   )
 }
 
-/** Overlay Windows — layout igual IPTV Player One (barra compacta, seek vermelho). */
+/**
+ * Ícone de ±10s.
+ *
+ * Antes cada lado eram 4 `<path>`s — um colchete, uma barra, um chevron e outra
+ * barra — desenhados entre y=8 e y=16 dentro de um viewBox 24. Ocupavam um terço
+ * da altura do ícone, e a 22px na tela viravam dois tralços: o colchete lia como
+ * "0" cortado e a barra como "1", mas fora de esmoço, com o "10" impossível de
+ * confirmar. O usuário pointed pro ícone e perguntou o que aquilo era.
+ *
+ * O desenho é um anel quase fechado com a seta na
+ * ponta e o "10" dentro. Três informações separadas — o anel diz "tempo", a seta
+ * diz o sentido, o número diz a distância. Cada uma legível isolada.
+ *
+ * A geometria do arco: centro (12,12), raio 8.5, varrendo 300° com a abertura
+ * de 60° no topo. Os dois `path` de cada botão são o mesmo arco espelhado em x=12,
+ * então o par fica simétrico por construção, não porAccordar dois números.
+ */
+function Seek10Icon({ dir }: { dir: 'back' | 'fwd' }) {
+  const back = dir === 'back'
+  return (
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {/* Arco: 300° de volta. A seta fica na ponta, tangente à direção do giro. */}
+      <path d={back ? 'M12 3.5a8.5 8.5 0 1 1-6.01 2.49' : 'M12 3.5a8.5 8.5 0 1 0 6.01 2.49'} />
+      {/*
+        Ponta da seta. `back` fecha o arco pela esquerda com a cabeça apontando
+        para baixo-esquerda (anti-horário); `fwd` espelha. Os dois triângulos são
+        filled de propósito — um traço de 1.7px a esse tamanho não tem área
+        suficiente para ler como seta.
+      */}
+      <path
+        d={back ? 'M3.6 3.1l3.9 3.05-4.55 2.2z' : 'M20.4 3.1l-3.9 3.05 4.55 2.2z'}
+        fill="currentColor"
+        stroke="none"
+      />
+      {/* O "10". dy=0.35 Recentra o glifo na caixa da linha — sem ele o texto
+          assenta na baseline e o número fica 1px alto dentro do anel. */}
+      <text
+        x="12"
+        y="12"
+        dy="0.35"
+        textAnchor="middle"
+        dominantBaseline="central"
+        fontSize="8.5"
+        fontWeight="700"
+        fill="currentColor"
+        stroke="none"
+        letterSpacing="-0.2"
+      >
+        10
+      </text>
+    </svg>
+  )
+}
+
+/** Overlay Windows — layout compacto, com seek vermelho. */
 export function PlayerOverlayApp() {
   const [meta, setMeta] = useState<OverlayMeta>({})
   const [playing, setPlaying] = useState(false)
@@ -69,6 +135,17 @@ export function PlayerOverlayApp() {
   const [controlsVisible, setControlsVisible] = useState(true)
   const [booting, setBooting] = useState(true)
   const [failed, setFailed] = useState(false)
+  const [retryInfo, setRetryInfo] = useState<{ n: number; of: number } | null>(null)
+  const [bootPct, setBootPct] = useState<number | null>(null)
+  /**
+   * Veredito da sondagem de VOD, quando ela condemna o titulo.
+   *
+   * `null` = carregando de verdade, e o `bootPct` manda.
+   * `'indisponivel'` = o painel respondeu que nao tem o arquivo. A partir dai o
+   * percentual sobe por relogio, nao por progresso, e mostrar "Buffering 82%"
+   * seria anunciar um progresso inexistente.
+   */
+  const [bootMotivo, setBootMotivo] = useState<string | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const [volume, setVolume] = useState(readVolume)
   const [muted, setMuted] = useState(false)
@@ -148,6 +225,8 @@ export function PlayerOverlayApp() {
         hasPlayedRef.current = true
         setBooting(false)
         setFailed(false)
+        setRetryInfo(null)
+        setBootPct(null)
         setPlaying(true)
         applyOutputVolume()
       }
@@ -177,6 +256,31 @@ export function PlayerOverlayApp() {
         setPlaying(false)
       }
       if (event.type === 'buffering') {
+        if (typeof event.retry === 'number' && typeof event.of === 'number') {
+          setRetryInfo({ n: event.retry, of: event.of })
+          setBooting(true)
+        }
+        /*
+         * `motivo: 'indisponivel'` = a sondagem de 256 bytes ja respondeu que o
+         * painel nao tem o arquivo.
+         *
+         * Nesse caso o percentual e mentira: ele e uma curva de tempo, nao uma
+         * medicao, entao continua subindo depois da recusa. Medido no Dalmatas
+         * (1575711): recusa em +1,2 s, "Buffering 82%" na tela, falha em +11,8 s.
+         * A pessoa ficava 10 s esperando um progresso que nao existia.
+         *
+         * Aqui o texto passa a ser o veredito e o `%` some. A falha definitiva
+         * chega logo depois, com o botao de tentar de novo.
+         */
+        setBootMotivo(typeof event.motivo === 'string' ? event.motivo : null)
+        // Percentual 0-100: sobe no véu enquanto carrega.
+        if (typeof event.percent === 'number') {
+          setBootPct((prev) => {
+            const next = Math.max(0, Math.min(100, Math.round(event.percent as number)))
+            if (prev !== null && next < prev) return prev
+            return next
+          })
+        }
         if (!hasPlayedRef.current && typeof event.percent === 'number' && event.percent < 100) {
           setBooting(true)
         }
@@ -218,6 +322,7 @@ export function PlayerOverlayApp() {
       if (payload?.action === 'boot') {
         hasPlayedRef.current = false
         setFailed(false)
+        setRetryInfo(null)
         setBooting(true)
         setPlaying(false)
       }
@@ -257,6 +362,8 @@ export function PlayerOverlayApp() {
     hasPlayedRef.current = false
     setBooting(true)
     setFailed(false)
+    setRetryInfo(null)
+    setBootPct(null)
     setPlaying(false)
     setCurrent(0)
     const hint =
@@ -371,11 +478,58 @@ export function PlayerOverlayApp() {
   const isLive = meta.kind === 'live'
   const allItems = meta.list || []
   const position = scrubPos ?? current
-  const active = playing && !booting && !failed
+  /*
+   * `active` saiu daqui: era `playing && !booting && !failed`, usado so como
+   * gate da barra de seek, e por isso a barra sumia quando a pessoa pausava.
+   * Quem decide se os controles aparecem e `uiVisible`/`dockVisible`, logo abaixo.
+   */
   const uiVisible = controlsVisible || !playing || listOpen || booting
-  const dockVisible = uiVisible && !failed
-  const hideCursor = !uiVisible && !fullscreen
+  // Carregando mostra só o véu + spinner. A barra embaixo
+  // do véu era ruído — controle só depois do 1º frame (ou lista aberta).
+  const dockVisible = uiVisible && !failed && (!booting || listOpen)
+  /*
+   * CURSOR: JUNTO COM OS CONTROLES, E SEMPRE QUE O VIDEO ESTE RODANDO.
+   *
+   * Duas viradas, nesta ordem:
+   *
+   * 1. Estava invertido: `!uiVisible && !fullscreen` escondia no modo JANELA e
+   *    nunca na tela cheia — o oposto do pedido.
+   *
+   * 2. Depois veio `fullscreen && !uiVisible && playing`. Funcionava como
+   *    condicao, mas nao como mecanismo: assim que os controles escondem, o
+   *    overlay liga `setOverlayIgnoreMouse(true)`, sai do hit-test, e quem decide
+   *    o cursor passa a ser a janela do mpv embaixo. O CSS daqui vira enfeite.
+   *    Quem esconde o cursor agora e o mpv (`--cursor-autohide` em buildMpvArgs).
+   *
+   * Esta variavel ficou como o espelho do estado, porque e ela que acende a
+   * classe no `<html>` nos intervals em que a janela ainda e alvo do ponteiro —
+   * o listOpen, e os primeiros ms depois de os controles sumirem.
+   *
+   * O `&& playing` mantem o cursor visivel com o video parado: pausado, a pessoa
+   * vai clicar em botao, e sumir o cursor debaixo da mao dela impede isso.
+   */
+  /*
+   * O overlay segura o hit-test quando o dock esta aceso OU em tela cheia.
+   * Ver o bloco do efeito de `setOverlayIgnoreMouse` para por que a tela cheia
+   * precisa disso apesar de os controles estarem escondidos.
+   */
+  const overlayHitTest = dockVisible || fullscreen
+  const hideCursor = fullscreen && !uiVisible && playing
   const showMutedIcon = muted
+
+  /*
+  O botao de voltar mora DENTRO da barra.
+
+  Houve uma tentativa de coloca-lo numa janela SEPARADA no canto superior
+  esquerdo do video (janela de 56x56, criada pelo main). Nao funciona: janela
+  Chromium transparente sobre a HWND reparentada do mpv quebra o swapchain
+  D3D11 do vo=gpu. O sintoma medido e o audioCutting e o quadro parando, e no
+  ao vivo entra em loop. A medicao original que motivou o overlay ser so a barra
+  esta em overlay-bounds.cjs, e ela se aplica aqui tambem.
+
+  Entao o botao fica na barra. Some junto com ela, que e o comportamento
+  pedido: nada fixo na tela.
+*/
 
   const seriesSeasonGroups = useMemo(() => {
     if (meta.kind !== 'series') return []
@@ -504,42 +658,172 @@ export function PlayerOverlayApp() {
     }
   }, [handleEscape, handleRemoteKey, position, togglePause, seekTo, showControls])
 
+  /*
+   * `cursor: none` no `.po-root` NAO FUNCIONA, e a razao e o `pointer-events`.
+   *
+   * O root tem `pointer-events: none` — sem isso a janela do overlay engole o
+   * mouse e o clique nunca chega no catalogo. Sem ser o alvo do hit-test, o
+   * `cursor` do root nunca e consultado: o Windows pede o cursor a janela que o
+   * ponteiro esta sobre, e essa e a janela de baixo.
+   *
+   * Entao a classe vai no `<html>`, que e a raiz do documento inteiro e cobre as
+   * duas janelas (overlay e principal). E o no BrowserWindow tem `setIgnoreMouse
+   * Events`, que nao afeta o cursor — entao nao ha caminho melhor por la.
+   */
+  useEffect(() => {
+    const raiz = document.documentElement
+    if (hideCursor) raiz.classList.add('is-cursor-none')
+    else raiz.classList.remove('is-cursor-none')
+    return () => raiz.classList.remove('is-cursor-none')
+  }, [hideCursor])
+
+  /*
+   * MOUSE: A JANELA ESCUTA, O DOM NAO.
+   *
+   * O overlay e uma BrowserWindow TRANSPARENTE por cima do video, e `main` decide
+   * se ela engole o mouse com `setIgnoreMouseEvents`. Esse sinal tem dois
+   * consumidores, e eles estao em camadas diferentes:
+   *
+   *   - os CLIQUES dependem do `setIgnoreMouseEvents` da JANELA. Com `false`, a
+   *     janela engole tudo e o clique nunca chega no catalogo de baixo. Com
+   *     `true`, o clique passa direto para a janela principal.
+   *   - o MOVIMENTO depende do DOM. `setIgnoreMouseEvents(true, { forward: true })`
+   *     repassa a mensagem de `mousemove` para o renderer, mas o `pointer-events`
+   *     do alvo ainda manda: com `.po-root { pointer-events: none }` o hit test cai
+   *     no `<body>` e o `onMouseMove` de um div NAO dispara. Foi o que quebrou ao
+   *     passar o root para `none` — os controles sumiam e o clique morria no
+   *     nada, porque os dois handlers estavam no `.po-root`.
+   *
+   * Entao os dois ficam em `window`, que e o unico lugar que ve o evento
+   * encaminhado. O `stopPropagation` dos widgets impede o clique de chegar aqui
+   * e virar toggle de controle junto.
+   */
+  useEffect(() => {
+    const onMove = () => showControls()
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('click', onBackgroundClick)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('click', onBackgroundClick)
+    }
+  }, [showControls, onBackgroundClick])
+
+  /*
+   * QUANDO A JANELA ENGOLE O MOUSE.
+   *
+   * Antes: `false` desde que o overlay aparecia, e `true` so quando ele escondia
+   * (as duas unicas chamadas de `setIgnoreMouse` no `overlay-window.cjs`). No meio
+   * do playback a janela ficava engolindo o mouse, entao o clique no video nunca
+   * chegava no catalogo — que era a intencao declarada do recurso, e nunca
+   * aconteceu.
+   *
+   * Agora segue o estado dos controles, que e a mesma coisa que o usuario espera:
+   *
+   *   controles escondidos -> a janela ignora o clique e so encaminha o movimento.
+   *     O video e so video, e mexer o mouse traz os controles de volta.
+   *   controles visiveis   -> a janela engole, porque a pessoa esta interagindo com
+   *     o pause e o volume. O clique fora dos botoes e o que fecha.
+   *
+   * TELA CHEIA E A EXCECAO QUE ABRE O HIT-TEST DE PROPOSITO.
+   *
+   * A regra acima era "esconder = clicar atraves", e isso e o que matava o cursor:
+   * com a janela em ignore-mouse, o Windows para de perguntar o cursor a ela e
+   * pergunta a janela de baixo, que e a HWND do mpv. O `cursor: none` no `<html>`
+   * do overlay ficava correto e sem efeito — so manda enquanto a janela e alvo do
+   * ponteiro.
+   *
+   * Em tela cheia nao existe nada para o clique atravessar: atras do video so tem
+   * video. O video esta em tela cheia, os controles do catalogo estao fora, e
+   * projeto nenhum tem handler de wheel (grep em `onWheel`/`deltaY`: zero
+   * resultado), entao nada do que se perde aqui estava sendo usado.
+   *
+   * Entando o hit-test, o SO volta a perguntar o cursor a janela do overlay, e o
+   * CSS manda. O movimento continua chegando no catalogo porque os botoes do dock
+   * tem `pointer-events: auto` e o clique fora deles e o que fecha os controles —
+   * igual antes, so que agora a janela tambem responde pelo cursor.
+   *
+   * O drawer de canais e a excecao: ele precisa de clique e mouse normalmente,
+   * entao abre a janela de vez, independente dos controles.
+   */
+  useEffect(() => {
+    void window.sturplay?.player?.setOverlayIgnoreMouse?.(!overlayHitTest)
+  }, [overlayHitTest])
+
   return (
-    <div
-      className={`po-root${hideCursor ? ' is-cursor-none' : ''}`}
-      onMouseMove={showControls}
-      onClick={onBackgroundClick}
-    >
+    <div className={`po-root${hideCursor ? ' is-cursor-none' : ''}`}>
       {booting && !failed && (
         <div className="po-loading">
           <div className="po-loading-spinner" />
-          {typeof label === 'string' && label ? (
-            <p className="po-loading-label">{label} carregando...</p>
-          ) : null}
+          {retryInfo ? (
+            <p className="po-loading-label">Reconectando em 5s ({retryInfo.n}/{retryInfo.of})</p>
+          ) : bootMotivo === 'indisponivel' ? (
+            /*
+              O titulo foi CONDENADO pela sondagem, nao esta carregando devagar.
+              Mostrar o `%` aqui e o que produzia "Buffering 82%" num arquivo que
+              o painel ja tinha dito, 10 s antes, que nao existe.
+            */
+            <p className="po-loading-label">Indisponível no servidor</p>
+          ) : (
+            <p className="po-loading-label">Buffering {bootPct ?? 0}%</p>
+          )}
         </div>
       )}
 
-      {!isLive && active && (
-        <div className={`po-center${uiVisible ? ' is-visible' : ''}`}>
-          <IconBtn title="Voltar 10s" onClick={(e) => seekTo(position - 10, e)}>
-            <span className="po-skip-label">-10</span>
-          </IconBtn>
-          <IconBtn title={playing ? 'Pausar' : 'Reproduzir'} onClick={togglePause}>
-            {playing ? (
-              <svg width="32" height="32" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-                <path d="M4 2h3v12H4zM9 2h3v12H9z" />
-              </svg>
-            ) : (
-              <svg width="32" height="32" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-                <path d="M4 2.5v11l9-5.5-9-5.5z" />
-              </svg>
-            )}
-          </IconBtn>
-          <IconBtn title="Avançar 10s" onClick={(e) => seekTo(position + 10, e)}>
-            <span className="po-skip-label">+10</span>
-          </IconBtn>
-        </div>
-      )}
+      {/*
+        O trio central `-10 / pause / +10` saiu daqui.
+
+        Ele vivia em `.po-center`, que e `position: absolute` dentro da JANELA do
+        overlay — e essa janela tem SO 104px de altura durante a reproducao. Logo
+        o trio nao ficava no meio do video: ficava grudado no rodape, colado na
+        barra, parecendo botao quebrado.
+
+        Tambem era duplicata: o pause do `po-dock` e o que realmente pausa, e o
+        `seekTo` dele ja cobre o salto. Os ±10 agora ficam no `po-toolbar`, na
+        MESMA familia do pause e do som — que e a unica familia que funciona.
+      */}
+
+      {/*
+        SAIR, NO TOPO ESQUERDO DO VIDEO.
+
+        Morava no `po-toolbar`, embaixo, junto do pause e do som. Subiu por dois
+        motivos que nao sao de gosto:
+
+        1. O dock tem uma unica fileira e o botao de sair e um gesto diferente de
+           pausa: e sair do video, e precisa de ar em volta.
+        2. Em tela cheia o dock inteiro sai da tela com o video, e o botao de sair
+           ficava embaixo de tudo, no canto onde o olho ja foi.
+
+        Precisa morar no OVERLAY, e nao em `.player-controls` da janela principal,
+        porque durante a reproducao mpv a janela principal fica
+        `is-native-embedded is-native-buffered` e a regra
+        `.player-wrap.is-native-buffered .player-controls { display: none !important }`
+        apaga a barra inteira. Pior: o HWND do mpv e uma janela NATIVA sobre o
+        DOM da janela principal, entao um botao la dentro ficaria ATRAS do video.
+        O overlay e a unica janela acima dele.
+
+        `is-hidden` acompanha o `dockVisible`: os dois somem juntos, e o video
+        volta a ser so video. Botao de saida fixo em cima de video rodando e a
+        unica coisa parada na tela.
+
+        `type: 'back'` ja e tratado no App (App.tsx, `onOverlayAction`):
+        embedded -> sai do video, senao -> `onBack()`.
+      */}
+      <button
+        type="button"
+        className={`po-btn po-back${dockVisible ? '' : ' is-hidden'}`}
+        title="Voltar"
+        aria-label="Voltar"
+        onClick={(e) => {
+          e.stopPropagation()
+          void window.sturplay?.player?.sendOverlayAction?.({ type: 'back' })
+          showControls()
+        }}
+      >
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M19 12H5" />
+          <path d="m12 19-7-7 7-7" />
+        </svg>
+      </button>
 
       <div
         className={`po-dock${dockVisible ? ' is-visible' : ''}`}
@@ -547,10 +831,39 @@ export function PlayerOverlayApp() {
       >
         {label ? <p className="po-title">{label}</p> : null}
 
-        {!isLive && duration > 0 && active && (
+        {/*
+          A barra de seek NAO pode depender de `active`.
+
+          `active` e `playing && !booting && !failed`, entao ela sumia no pause —
+          e era o comportamento errado: pausado e justamente quando a pessoa
+          quer ver onde esta e quanto falta. O screenshot mostrava a faixa de
+          tempo inteira ausente com o pause ligado, e presente com ele desligado.
+
+          O gate correto e o mesmo dos outros controles: video carregado e com
+          duracao conhecida. `booting` e `failed` ja sao barrados por `dockVisible`
+          (`uiVisible && !failed`), entao aqui basta nao exigir `playing`.
+        */}
+        {!isLive && duration > 0 && !failed && (
           <div className="po-seek-row">
             <span className="po-time">{formatTime(position)}</span>
-            <div className="po-seek-wrap">
+            <div
+              className="po-seek-wrap"
+              /*
+                `--seek-pct` alimenta o gradiente do trilho desenhado em CSS.
+                Durante o arrasto vale o valor de `scrubPos`, e nao o de
+                `position`: enquanto o dedo/cursor esta no slider, o valor
+                real ainda nao mudou, e usar `position` fazia o trilho
+                "voltar" atras do polegar.
+              */
+              style={
+                {
+                  '--seek-pct': `${Math.min(
+                    100,
+                    Math.max(0, (((scrubPos ?? position) / duration) || 0) * 100),
+                  )}%`,
+                } as CSSProperties
+              }
+            >
               {scrubPos !== null && (
                 <span
                   className="po-scrub-tip"
@@ -580,6 +893,13 @@ export function PlayerOverlayApp() {
         {isLive && <div className="po-live-row">AO VIVO</div>}
 
         <div className="po-toolbar">
+          {/*
+            O "Voltar" saiu daqui e virou o `.po-back`, no topo esquerdo da janela
+            do overlay - sempre visivel, fora do `dockVisible`. Ver o bloco do
+            `.po-back` acima, logo antes do `.po-dock`.
+
+            Aqui agora ficam so os controles do video: pausa, saltos e som.
+          */}
           <IconBtn title={playing ? 'Pausar' : 'Reproduzir'} onClick={togglePause}>
             {playing ? (
               <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
@@ -591,6 +911,29 @@ export function PlayerOverlayApp() {
               </svg>
             )}
           </IconBtn>
+
+          {/*
+            -10 / +10, na MESMA familia do pause e do som.
+
+            Vieram do `.po-center`, que era `position: absolute` dentro da janela
+            do overlay — e essa janela tem SO 104px de altura durante a
+            reproducao. O trio ficava grudado no rodape, colado na barra, e nao
+            no meio do video como parecia.
+
+            Aqui eles usam o mesmo `IconBtn` e o mesmo `seekTo` do dock, entao
+            passam a funcionar de verdade: o `-10` reapareceu no `po-toolbar`
+            como qualquer outro botao da barra.
+          */}
+          {!isLive && (
+            <>
+              <IconBtn title="Voltar 10s" onClick={(e) => seekTo(position - 10, e)}>
+                <Seek10Icon dir="back" />
+              </IconBtn>
+              <IconBtn title="Avançar 10s" onClick={(e) => seekTo(position + 10, e)}>
+                <Seek10Icon dir="fwd" />
+              </IconBtn>
+            </>
+          )}
 
           {!isLive && (
             <IconBtn title="Voltar ao início" onClick={(e) => seekTo(0, e)}>

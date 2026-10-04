@@ -31,7 +31,7 @@ function streamProxy(): Plugin {
     }
 
     const headers: Record<string, string> = {
-      // Mesmo UA do Electron / IPTV Expert — browser UA costuma levar 429 no painel
+      // Mesmo UA do Electron — browser UA costuma levar 429 no painel
       'user-agent': 'VLC/3.0.20 LibVLC/3.0.20',
       referer: `${parsed.origin}/`,
       accept: '*/*',

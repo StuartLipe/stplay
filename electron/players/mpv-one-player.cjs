@@ -1,5 +1,5 @@
 /**
- * mpv One — motor separado, modelo IPTV Player One.
+ * mpv One — motor separado.
  * Não altera mpv-exe-player.cjs nem o player interno.
  */
 const path = require('path')

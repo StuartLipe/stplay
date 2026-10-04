@@ -1,5 +1,5 @@
 /**
- * Ao vivo: igual IPTV Player One — loadfile na URL do painel.
+ * Ao vivo: loadfile na URL do painel.
  * Não pré-resolve 302 (atrasa e pinna token) e não cai no proxy HTTP.
  */
 function shouldPreResolveRedirect(url, live) {

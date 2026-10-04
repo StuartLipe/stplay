@@ -43,6 +43,20 @@ contextBridge.exposeInMainWorld('sturplay', {
     onOverlayMeta: (callback) => onChannel('player:overlay-meta', callback),
     onOverlayAction: (callback) => onChannel('player:overlay-action', callback),
     onOverlayUi: (callback) => onChannel('player:overlay-ui', callback),
+    /**
+     * A JANELA mudou de posicao (arrastada, ou trocou de monitor).
+     *
+     * O renderer nao tem como descobrir isso sozinho: o rect do elemento e
+     * medido em coordenadas de janela, entao `x/y/w/h` ficam identicos antes e
+     * depois da mudanca, e o `ResizeObserver` tambem nao dispara porque o
+     * elemento nao mudou de tamanho. Quem sabe do evento e o main — e o unico
+     * que enxerga o `move` da janela.
+     *
+     * Medido: arrastar a janela para o segundo monitor deixava o video cobrindo
+     * a janela inteira, porque o main continuava com o retangulo da tela
+     * anterior.
+     */
+    onWindowMoved: (callback) => onChannel('player:window-moved', callback),
   },
   window: {
     setFullscreen: (enabled) => ipcRenderer.invoke('window:set-fullscreen', enabled),

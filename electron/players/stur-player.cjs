@@ -1,5 +1,5 @@
 /**
- * STUR — mpv embutido + proxy ffmpeg-static (modelo IPTV Player One).
+ * STUR — mpv embutido + proxy ffmpeg-static .
  * Motor separado; não altera mpv-one, mpv-exe nem player interno.
  */
 const path = require('path')
@@ -27,6 +27,11 @@ const {
   networkTimeoutSecs,
 } = require('./live-load-policy.cjs')
 const { profileFor, diffProfile, commitApplied } = require('./playback-profile.cjs')
+const {
+  vodMaxBytes,
+  vodReadaheadSecs,
+  descreverVodBuffer,
+} = require('./vod-buffer-limits.cjs')
 const hwndHelper = require('./hwnd-helper.cjs')
 const log = require('./player-log.cjs')
 const { isPlayableUrl } = require('./play-url.cjs')
@@ -56,6 +61,20 @@ const winApi =
   process.platform === 'win32'
     ? (() => {
         const user32 = koffi.load('user32.dll')
+        /*
+         * `RECT` como STRUCT com ponteiro de saida. A sonda anterior tentou
+         * `_Out_ int32_t[4]` e o koffi recusou ("Array types decay to
+         * pointers") - array nao serve. Struct com `_Out_ <ptr>` funciona, e e
+         * a unica forma de ler a posicao REAL do HWND sem passar por
+         * `MoveWindow` e confiar no que ele pediu.
+         */
+        koffi.struct('stplay_RECT', {
+  left: 'int32',
+  top: 'int32',
+  right: 'int32',
+  bottom: 'int32',
+        })
+        koffi.struct('stplay_POINT', { x: 'int32', y: 'int32' })
         return {
           FindWindowExW: user32.func('intptr __stdcall FindWindowExW(intptr, intptr, str16, str16)'),
           GetWindowThreadProcessId: user32.func('uint32 __stdcall GetWindowThreadProcessId(intptr, _Out_ uint32*)'),
@@ -68,9 +87,62 @@ const winApi =
           MoveWindow: user32.func('bool __stdcall MoveWindow(intptr, int, int, int, int, bool)'),
           ShowWindow: user32.func('bool __stdcall ShowWindow(intptr, int)'),
           SetWindowPos: user32.func('bool __stdcall SetWindowPos(intptr, intptr, int, int, int, int, uint32)'),
+          GetWindowRect: user32.func('bool __stdcall GetWindowRect(intptr, _Out_ stplay_RECT*)'),
+          GetDpiForWindow: user32.func('uint32 __stdcall GetDpiForWindow(intptr)'),
+          ClientToScreen: user32.func('bool __stdcall ClientToScreen(intptr, _Inout_ stplay_POINT*)'),
         }
       })()
     : null
+
+/**
+ * Origem do CLIENTE do pai, em coordenadas de tela.
+ *
+ * O `MoveWindow` do mpv recebe coordenada de CLIENTE; o `GetWindowRect` devolve
+ * coordenada de TELA. Para comparar os dois - que e a unica forma de saber se a
+ * janela esta onde o app pediu - os dois lados precisam estar no mesmo sistema.
+ */
+function clienteNaTela(hwnd) {
+  if (!winApi || !hwnd) return null
+  try {
+    const p = { x: 0, y: 0 }
+    if (!winApi.ClientToScreen(hwnd, p)) return null
+    return { x: p.x, y: p.y }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Retangulo REAL do HWND, em coordenadas de tela.
+ *
+ * E a unica leitura que nao passa pelo que o app ACHOU que pediu. Todo o resto -
+ * `lastBounds`, `setBounds`, `refreshLayout` - e o que o app QUER. Se a diferenca
+ * entre os dois aparecer aqui, o bug e de atribuicao; se nao aparecer, o bug e de
+ * valor.
+ *
+ * Devolve `null` quando o handle morreu, para o chamador distinguir "recusou" de
+ * "deu errado" - os dois significam coisas opostas.
+ */
+function janelaReal(hwnd) {
+  if (!winApi || !hwnd) return null
+  try {
+    const r = {}
+    if (!winApi.GetWindowRect(hwnd, r)) return null
+    return { x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top }
+  } catch {
+    return null
+  }
+}
+
+/** DPI real do HWND em pixels por polegada. 96 = 100%, 120 = 125%, 144 = 150%. */
+function dpiDe(hwnd) {
+  if (!winApi || !hwnd) return 0
+  try {
+    return winApi.GetDpiForWindow(hwnd)
+  } catch {
+    return 0
+  }
+}
 
 /** @type {import('child_process').ChildProcess | null} */
 let mpvProc = null
@@ -87,6 +159,30 @@ let mpvHwnd = 0
 let videoHidden = false
 let lastPlacedKey = ''
 let surfaceActive = false
+/*
+  O painel respondeu e disse que NAO tem midia neste titulo?
+
+  Diferente de "o mpv nao conseguiu abrir" - aqui a sondagem de 256 bytes tem a
+  resposta na mao. `false` no `vodUrlHasMedia` significa corpo que comeca em
+  `<!doctype html` ou `text/html`, que e a pagina de erro do painel vestida de
+  200 OK. Nesse caso o `reason` tem que dizer isso, e nao "verifique conexao".
+
+  NO ESCOPO DO MODULO, E NAO DO `openUrl`. Este flag era declarado dentro do
+  `openUrl`, e o `armLoadWatchdog` - que e quem declara a falha, 28 s depois - le
+  de outra funcao. Em CJS sem modo estrito, ler uma variavel nao declarada nao
+  da erro: devolve `undefined`, que e sempre falso. Medido no Dálmatas (1575711,
+  ID morto):
+
+    04:36:26.224  vod: painel devolveu pagina de erro, nao midia   flag = true
+    04:36:56.706  no file-loaded before timeout  recusadoPeloPainel: false
+    04:36:56.706  failed: "o servidor nao respondeu"
+
+  A sondagem acertou em 814 ms, e a resposta 28 s depois saiu como se ela nao
+  tivesse dito nada. O `let` local e o `vodUrlRefused = false` do `start` eram o
+  mesmo bug em dois lugares: um nao escrevia onde o leitor le, e o outro zerava
+  um flag que o watchdog nunca via.
+*/
+let vodUrlRefused = false
 let requestId = 0
 let ipcBuf = ''
 let running = false
@@ -94,6 +190,15 @@ let waitingFirstFrame = false
 let fileLoaded = false
 /** @type {number | null} */
 let firstFrameBase = null
+/**
+ * Quantas vezes o `time-pos` AVANCOU desde que `firstFrameBase` foi fixado.
+ *
+ * Em VOD aberto em 0, um avanco ja e prova de quadro. Em CONTINUACAO o primeiro
+ * avanco e o seek, entao o segundo e o que prova reproducao rodando — ver o
+ * handler de `time-pos`. Resetado junto com `firstFrameBase` em todo lugar que
+ * ele e resetado, porque os dois descrevem a mesma janela.
+ */
+let timePosAdvanceCount = 0
 /** @type {ReturnType<typeof setInterval> | null} */
 let raiseTimer = null
 const CACHE_PAUSE_WAIT = 8
@@ -174,6 +279,15 @@ const LIVE_SILENCE_MS = 20000
  */
 const LIVE_PRESENTABLE_CACHE_SECS = 3
 /**
+ * Quantas vezes reancorar a superficie antes de abrir o processo de novo.
+ *
+ * 1: a primeira constatacao ja reabre. O reancorar e barato e costuma
+ * resolver, porque o problema e apresentacao e nao dados. Se nao resolveu, a
+ * segunda vez ja eopatia — e continuar tentando e o que produzia o laco de ~20s
+ * sem fim.
+ */
+const LIVE_PRESENTABLE_MAX_RETRY = 1
+/**
  * Avanco MINIMO do playhead para contar como tempo andando.
  *
  * O 	ime-pos do mpv tem ruido de float: oscila nos ultimos digitos mesmo
@@ -185,6 +299,21 @@ const LIVE_PRESENTABLE_CACHE_SECS = 3
  * e bem acima do ruido.
  */
 const LIVE_TIME_POS_MIN_STEP = 0.15
+/**
+ * Avanco MINIMO para zerar o contador de tentativas, bem abaixo do piso de
+ * deteccao acima.
+ *
+ * Serve so para `liveStallRecoverCount = 0`, nao para decidir se o canal esta
+ * travado. O `time-pos` do HLS ao vivo avanca por segmento e fica parado
+ * entre eles; se o zerador usasse o mesmo piso de 0,15s, o contador nunca
+ * zeraria entre dois segmentos num canal saudavel, o watchdog armaria, e o
+ * `softReloadLive` reiniciaria a reproducao — o "repete a mesma frase" que a
+ * pessoa viu.
+ *
+ * 0,01s = menos de um frame a 30fps, e muito acima do jitter de float do mpv
+ * (ordem de 1e-6), entao nao reintroduz o bug que o piso maior corrigiu.
+ */
+const LIVE_TIME_POS_EPS = 0.01
 
 /**
  * Buffer cheio + playback parado NÃO é congelamento — é a borda viva.
@@ -243,7 +372,45 @@ function emit(payload) {
   }
 }
 
+/** Tenta a cadeia VOD inteira de novo com 5s (painel oscilando).
+ * Devolve true se agendou (chamador não deve falhar ainda). */
+function scheduleVodTimeRetry() {
+  if (liveMode || !sourceUrl || vodTimeRetries >= STUR_VOD_MAX_TIME_RETRIES) return false
+  vodTimeRetries += 1
+  const gen = loadGeneration
+  // Aqui SIM é reconexão de verdade: a cadeia inteira vai ser refeita, com
+  // STUR_VOD_RETRY_MS de espera. O contador só aparece da 2ª em diante — na 1ª
+  // o usuário não reconnectou nada ainda, e o texto mentiria sobre a espera.
+  const showRetry = vodTimeRetries > 1
+  emit({
+    type: 'buffering',
+    value: true,
+    percent: 0,
+    retry: showRetry ? vodTimeRetries : undefined,
+    of: showRetry ? STUR_VOD_MAX_TIME_RETRIES : undefined,
+  })
+  log.warn('stur', 'vod time retry', { try: `${vodTimeRetries}/${STUR_VOD_MAX_TIME_RETRIES}` })
+  clearVodRetry()
+  vodRetryTimer = setTimeout(() => {
+    vodRetryTimer = null
+    if (gen !== loadGeneration || !running) return
+    vodTriedUrls = new Set()
+    void openUrl(mainWindow, sourceUrl, lastStartSec, lastBounds, { live: false })
+  }, STUR_VOD_RETRY_MS)
+  return true
+}
+/** @type {ReturnType<typeof setTimeout> | null} */
+let vodRetryTimer = null
+
+function clearVodRetry() {
+  if (vodRetryTimer) {
+    clearTimeout(vodRetryTimer)
+    vodRetryTimer = null
+  }
+}
+
 function emitFailed(reason) {
+  clearFirstFrameConfirm()
   waitingFirstFrame = false
   log.warn('stur', 'failed', { reason })
   try {
@@ -321,11 +488,20 @@ const LOAD_TIMEOUT_MS = 20_000
 const VOD_LOAD_TIMEOUT_MS = 28_000
 /** Continuar assistindo: seek demora — precisa de mais tempo antes de falhar. */
 const VOD_RESUME_LOAD_TIMEOUT_MS = 32_000
+/**
+ * VOD que o painel já recusou por sondagem.
+ *
+ * Mesmo argumento dos 28s: o remux não sinaliza falha em página de erro, então
+ * a única prova possível é a ausência de `file-loaded`. Dar a ele a mesma
+ * janela que tem em qualquer VOD (8s, com `cacheTickSinceLoad`°) — se ele fosse
+ * mesmo abrir, abriria nesse prazo.
+ */
+const VOD_REFUSED_WAIT_MS = 8_000
 /** Seek pós file-loaded (mais confiável que mpv --start em URLs remotas). */
 let pendingVodSeekSec = 0
 
 /**
- * Ordem igual ao IPTV Player One no Windows:
+ * Ordem de compra no Windows:
  * 1) URL direta no mpv (caminho principal)
  * 2) proxy HTTP passthrough (/stream ≈ /p do One)
  * 3) remux ffmpeg (/f ≈ /t do One) — só se os dois falharem
@@ -336,6 +512,7 @@ function bumpLoadGeneration() {
   cacheTickSinceLoad = false
   cacheWaitRounds = 0
   pendingVodSeekSec = 0
+  bufferPollStartedAt = 0
   clearLoadWatchdog()
   resolveEndFileWaiters()
   return loadGeneration
@@ -345,6 +522,35 @@ function bumpLoadGeneration() {
 let nextLoadSoft = false
 /** Zap 1 tela: ignora end-file error do canal antigo (não dispara fallback/failed). */
 let releasingLiveSlot = false
+
+/**
+ * Quantas URLs ja foram tentadas para ESTE VOD, sem sucesso.
+ *
+ * Medido antes deste teto, no filme e na serie que o usuario reportou:
+ *
+ *   [10:58:23.295] loadfile ok    1607372.mp4
+ *   [10:58:23.769] end-file error 1607372.mp4
+ *   [10:58:23.770] vod fallback -> ext
+ *   [10:58:24.232] loadfile ok    1607372.mkv
+ *   [10:58:24.688] end-file error 1607372.mkv
+ *   [10:58:24.688] vod fallback -> ext
+ *   ... a cada ~460 ms, indefinidamente
+ *
+ * A causa NAO e o guard de generation (esse esta correto). E que `loadStream`
+ * devolve `true` assim que o comando `loadfile` e aceito pelo IPC — o erro de
+ * verdade so chega 400-500 ms depois, como `end-file error`. Entao o
+ * `tryFallbackLoad` achava que tinha funcionado, voltava, e a proxima tentativa
+ * usava `sourceUrl`, que ja tinha virado `.mkv`. O `.filter(item => item !== url)`
+ * so filtrava a extensao corrente do inicio; depois disso as duas extensoes
+ * continuavam no ciclo, uma contra a outra.
+ *
+ * Sem este contador o fallback e um `while (true)`: a tela fica em "carregando"
+ * para sempre e nunca mostra erro.
+ */
+let vodTriedUrls = new Set()
+
+/** Teto de URLs distintas por VOD. Acima disso o titulo esta indisponivel. */
+const VOD_MAX_URL_TRIES = 5
 
 /** stop() do mpv responde antes de fechar o TCP — waiters esperam o end-file. */
 let endFileWaiters = []
@@ -443,6 +649,81 @@ const PREFLIGHT_MEMO_MAX = 400
  * carimbado para sempre, senao o canal lento fica condensado no `.ts` pelo
  * resto da sessao.
  */
+/**
+ * A URL de VOD responde, mas o arquivo NAO existe?
+ *
+ * Este painel tem o mesmo episodio cadastrado duas vezes, com IDs diferentes, e
+ * so um dos dois tem arquivo de verdade. Medido em `Brave 10 [L]` (series_id
+ * 44008), episodio 1:
+ *
+ *   /series/.../1607372.mp4  -> 200 text/html, corpo comeca com `<html>`
+ *   /series/.../2187891.mp4  -> 200 video/mp4, bytes `00 00 00 20 66 74 79 70`
+ *
+ * O `1607372` responde 200 e `Content-Type: text/html`: e a pagina 404 do XUI.one
+ * ("Debug Mode / notfound") vestida de sucesso. O mpv abre, pede o arquivo, leva
+ * `<html>` para o demuxer, e morre com `end-file error` — sem nunca dizer que o
+ * arquivo nao esta la.
+ *
+ * Sem esta sondagem, o `tryFallbackLoad` so descobria isso tentando `.mp4`, `.mkv`,
+ * `.avi`, `.ts`, http e ffmpeg do MESMO ID morto: seis URLs, ~4,5 s, e o titulo
+ * nunca abre. Com a sondagem, a recusa e imediata e o erro diz a verdade.
+ *
+ * Mesmo contrato de tres estados do preflight de live: `false` so quando o painel
+ * respondeu e o corpo NAO e midia. Timeout/erro de rede devolvem `null` ("nao
+ * sei") e nao condenam a URL — um servidor lento nao e um arquivo ausente.
+ */
+const VOD_HTML_PREFIX = /^\s*(<!doctype html|<html)/i
+
+async function vodUrlHasMedia(url) {
+  if (!/\.(mp4|mkv|avi|ts|mov|flv|webm|m4v)(\?|#|$)/i.test(url)) return true
+  const memo = preflightVerdict.get(url)
+  if (memo !== undefined) return memo
+
+  let healthy = true
+  try {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), PREFLIGHT_TIMEOUT_MS)
+    try {
+      const res = await withTimeout(
+        electronNet.fetch(url, {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Lavf/60.16.100',
+            Referer: `${new URL(url).origin}/`,
+            Range: 'bytes=0-255',
+          },
+          signal: ctrl.signal,
+        }),
+        PREFLIGHT_TIMEOUT_MS,
+      )
+      const type = String(res.headers.get('content-type') || '')
+      if (/text\/html/i.test(type)) {
+        healthy = false
+      } else {
+        // Alguns servidores ignoram o Range e devolvem 200 com o corpo inteiro.
+        // Ler 256 bytes e barato e é o que separa midia de pagina de erro.
+        const peek = await res.text()
+        if (VOD_HTML_PREFIX.test(peek)) healthy = false
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch (error) {
+    log.info('stur', 'preflight de VOD indefinido (nao e veredito negativo)', {
+      error: error instanceof Error ? error.message : String(error),
+      url: url.slice(-60),
+    })
+    return null
+  }
+
+  if (preflightVerdict.size >= PREFLIGHT_MEMO_MAX) {
+    const oldest = preflightVerdict.keys().next()
+    if (!oldest.done) preflightVerdict.delete(oldest.value)
+  }
+  preflightVerdict.set(url, healthy)
+  return healthy
+}
+
 async function liveManifestHealthy(url) {
   if (!liveMode || !/\.m3u8(\?|#|$)/i.test(url)) return true
   const memo = preflightVerdict.get(url)
@@ -674,7 +955,39 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
 
   await releaseP
   if (gen !== loadGeneration) return null
-  const softLiveZap = nextLoadSoft || (liveMode && livePlaybackReady)
+  /*
+   * ZAPE = o renderer pediu troca de canal. So isso.
+   *
+   * Este era `nextLoadSoft || (liveMode && livePlaybackReady)`, e a segunda
+   * clausula era um erro de categoria: `livePlaybackReady` responde "ha live
+   * tocando", nao "veio troca de canal". Depois do primeiro quadro do canal,
+   * ela ficava verdadeira para o resto da sessao — e TODA a cadeia de fallback
+   * interna passava a se achar zape.
+   *
+   * O que isso produzia, medido:
+   *
+   *   start .m3u8 -> loadfile ok -> first frame          (livePlaybackReady = true)
+   *   end-file error
+   *   live fallback -> direct .ts
+   *   loadfile ok .ts                                   <- chamado com softLiveZap = true
+   *
+   * O perfil de zape e `[cache-pause=false, pause=false]`. Aplicado num `.ts`
+   * direto, que para o mpv e um ARQUIVO que cresce — nao tem borda ao vivo — ele
+   * le o stream inteiro na velocidade do link. O perfil normal de live pede
+   * `cache-secs=8` justamente para nao deixar isso acontecer.
+   *
+   *   cacheTime 668.8   <- 11 minutos de canal na memoria
+   *   timePos    668.8  <- tocando do inicio do arquivo
+   *   cacheParadoMs 23136
+   *
+   * Ou seja: o preview de ao vivo mostrava 11 minutos de atraso e depois
+   * travava. Nao era banda nem o `demuxer-max-bytes`: era o perfil de zape
+   * aplicado ao fallback do proprio canal.
+   *
+   * `nextLoadSoft` sozinho cobre o zape de verdade — ele e setado em `reload()`,
+   * que e a unica porta de entrada de troca de canal.
+   */
+  const softLiveZap = nextLoadSoft === true
   if (!softLiveZap) {
     waitingFirstFrame = true
     cachePercent = 0
@@ -685,6 +998,7 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
   fileLoaded = false
   fileLoadedAt = 0
   firstFrameBase = null
+  timePosAdvanceCount = 0
   if (!softLiveZap) clearLiveShowTimer()
   await applyPlaybackProfile(liveMode, { softZap: softLiveZap })
   const deferSeek = !liveMode && startSec > 0 && mode !== 'ffmpeg'
@@ -710,7 +1024,38 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
   // do reload era `http://127.0.0.1:PORT/m/aHR0cDovLzIyMDhhaHNn...` (o
   // base64 do proprio base64).
   if (liveMode && /^https?:\/\/(?!127\.0\.0\.1|localhost)/i.test(url)) livePanelUrl = url
-  const res = await sendIpc(['loadfile', playUrl, 'replace'])
+  /*
+   * O `start` vai DENTRO do `loadfile`, e nao num `seek` separado depois.
+   *
+   * Medido na continuacao de 2382920 (alvo 167.584 s):
+   *
+   *   start { startTime: 167.584 }
+   *   loadfile ok                       <- sem `start`
+   *   vod resume seek { seekTo: 167 }    <- comando separado, depois
+   *   cacheSecs: 166.2 -> 172.3 -> 178.9
+   *
+   * `cacheSecs` em 178 s numa continuacao de 2:47 e a assinatura de ter lido do
+   * byte 0 ate o alvo E mais o `demuxer-readahead-secs=120` por cima. O `seek`
+   * separado obriga o demuxer a abrir em 0 e caminhar; o `start` no `loadfile`
+   * deixa o mpv usar o indice do container e pular direto.
+   *
+   * `applyPendingVodSeek` continua existindo como rede de seguranca: ele cobre o
+   * caso em que o `start` no loadfile e recusado pelo mpv ou ignorado pelo
+   * demuxer de rede, e nesse caso ainda e melhor um `seek` atras do que nenhum.
+   * Com o `start` funcionando, o seek extra cai no mesmo ponto e nao custa nada.
+   *
+   * SEM `pause: yes`. Pausado, o `time-pos` nao avanca, e a confirmacao de
+   * primeiro quadro (que exige avanco) so viria pelo prazo de 1.2 s — um atraso
+   * fixo em toda continuacao, trocado por um ganho que o pause nao da: pausar o
+   * VO nao impede o `demuxer-readahead-secs` de continuar baixando.
+   */
+  const loadOpts =
+    !liveMode && startSec > 0 ? [['start', String(startSec)]] : undefined
+  const res = await sendIpc(
+    loadOpts
+      ? ['loadfile', playUrl, 'replace', loadOpts]
+      : ['loadfile', playUrl, 'replace'],
+  )
   releasingLiveSlot = false
   if (!res.ok) {
     log.warn('stur', 'loadfile failed', { mode, error: res.error, url: playUrl.slice(0, 120) })
@@ -740,11 +1085,24 @@ async function applyPendingVodSeek(gen = loadGeneration) {
 
 function armLoadWatchdog(gen = loadGeneration) {
   clearLoadWatchdog()
-  const waitMs = liveMode
-    ? LOAD_TIMEOUT_MS
-    : lastStartSec > 0 || pendingVodSeekSec > 0
-      ? VOD_RESUME_LOAD_TIMEOUT_MS
-      : VOD_LOAD_TIMEOUT_MS
+  /*
+   * Quando o painel JA disse que não tem o arquivo, a espera longa é perda de
+   * tempo puro. O remux por ffmpeg não tem como sinalizar falha aqui: ele aceita
+   * HTML, o `loadfile` responde `ok`, e nenhum `file-loaded` chega — o único
+   * sinal possível é a ausência dele.esperar 28s por essa ausência é o que o
+   * usuário viu.
+   *
+   * `VOD_REFUSED_WAIT_MS` dá o ffmpeg a mesma janela que ele tem em qualquer
+   * outro VOD (8s, com cache enchendo) — se ele fosse destravar, destravava
+   * nesse prazo. Passou disso, esperar mais é só enrolar o mesmo resultado.
+   */
+  const waitMs = vodUrlRefused
+    ? VOD_REFUSED_WAIT_MS
+    : liveMode
+      ? LOAD_TIMEOUT_MS
+      : lastStartSec > 0 || pendingVodSeekSec > 0
+        ? VOD_RESUME_LOAD_TIMEOUT_MS
+        : VOD_LOAD_TIMEOUT_MS
   loadWatchdog = setTimeout(async () => {
     loadWatchdog = null
     if (!running || gen !== loadGeneration) return
@@ -771,8 +1129,28 @@ function armLoadWatchdog(gen = loadGeneration) {
           return
         }
       }
-      log.warn('stur', 'no file-loaded before timeout', { sourceUrl })
-      emitFailed('Stream não iniciou — verifique conexão ou URL')
+      /*
+       * Fim da espera, com o motivo certo.
+       *
+       * Este era o unico lugar que realmente decide "o titulo nao abre", e ele
+       * nao sabia a diferença entre duas coisas opostas:
+       *
+       *   - o painel respondeu e disse que NAO tem o arquivo  -> catalogo
+       *   - o painel nao respondeu dentro do prazo           -> rede
+       *
+       * O texto era sempre o segundo, que manda o usuario revisar Wi-Fi e URL.
+       * Medido no 1575711 (Dalmatas): 28.4s de espera para descobrir o que a
+       * sondagem de 256 bytes ja tinha dito em 200ms.
+       */
+      log.warn('stur', 'no file-loaded before timeout', {
+        sourceUrl,
+        recusadoPeloPainel: vodUrlRefused,
+      })
+      emitFailed(
+        vodUrlRefused
+          ? 'Este título não está disponível no servidor'
+          : 'Não foi possível reproduzir — o servidor não respondeu',
+      )
       killMpv()
       return
     }
@@ -805,12 +1183,14 @@ function armLoadWatchdog(gen = loadGeneration) {
           max: LIVE_MAX_UNHEALTHY_LOADS,
           url: (livePlayUrl || sourceUrl || '').slice(0, 100),
         })
+        clearFirstFrameConfirm()
         waitingFirstFrame = false
         void recoverLiveStall('sem primeiro quadro')
         return
       }
       log.warn('stur', 'forcing first frame after watchdog')
       void sendIpc(['set_property', 'pause', false])
+      firstFrameViaWatchdog = true
       onFirstFrame()
       return
     }
@@ -837,20 +1217,110 @@ function armLoadWatchdog(gen = loadGeneration) {
 function percentFromCacheTime(secs) {
   if (secs <= 0) return 0
   const wait = liveMode ? 1 : VOD_CACHE_PAUSE_WAIT
-  return Math.max(1, Math.min(99, Math.round((secs / wait) * 100)))
+  const pct = Math.round((secs / wait) * 100)
+  return Math.max(1, Math.min(99, pct))
+}
+
+/**
+ * Cache do último `cache-buffering-state` recebido via observe_property.
+ *
+ * O mpv só emite essa property quando ele PAUSA por cache. Em VOD o perfil
+ * desliga `cache-pause`, então o número nunca chega — e o poll de
+ * `demuxer-cache-time` devolve `null` porque enfileira requisição a cada 200ms
+ * contra um `get_property` que só responde em ~1,2s. Medido: 46 tiques seguidos
+ * com `secs: null`, todos virando 1%.
+ *
+ * Ou seja: nos dois caminhos de "sem dado", não existe leitura confiável. O
+ * número honesto aqui é TEMPO DECORRIDO desde o loadfile — que e o tempo de espera real
+ * mostra antes de ter decodificado qualquer byte.
+ */
+let bufferPollStartedAt = 0
+
+/**
+ * Progresso por tempo decorrido, curva que não gruda em 100%.
+ *
+ * 0→80% nos primeiros 8s (o start normal), 80→95% até 20s (CDN/HTTPS lento),
+ * e 95% até 28s — onde o `armLoadWatchdog` já declare a falha. Chega a 100% só
+ * com dado real do mpv (`onFirstFrame` reporta 100), nunca no relógio.
+ */
+function estimatedBufferPercent() {
+  if (!bufferPollStartedAt) return 1
+  const elapsedMs = Date.now() - bufferPollStartedAt
+  let pct
+  if (elapsedMs < 8000) pct = Math.round((elapsedMs / 8000) * 80)
+  else if (elapsedMs < 20000) pct = 80 + Math.round(((elapsedMs - 8000) / 12000) * 15)
+  else pct = 95
+  return Math.max(1, Math.min(95, pct))
 }
 
 async function applyPlaybackProfile(live, opts = {}) {
   liveMode = live === true
+  logVodBufferUmaVez()
   // Ver `playback-profile.cjs`: a tabela do perfil e o calculo do diff estao la
   // porque sao puros e testaveis. Aqui so orquestra o envio.
   const profile = profileFor(live, opts.softZap === true)
   const { fresh, stale } = diffProfile(profile, appliedProfile)
   if (stale.length > 0) profileMemoSkipped += stale.length
 
+  /*
+   * POR QUE `cache-pause` PRECISA VIR NO FRESCO.
+   *
+   * O perfil de live tem `cache-pause=yes`; o de zape tem `cache-pause=false`.
+   * O diff so manda o que MUDA. Numa sessao que comecou num canal e caiu no
+   * fallback `.ts`, o perfil ja aplicado era o de zape, e o caminho de live
+   * normal mandaria `cache-pause=yes` de volta — mas so se ele estiver na lista
+   * do perfil. Como o perfil de live NAO lista `cache-pause` para o caso de
+   * zape (ele volta a `false` explicitamente), qualquer divergencia depende do
+   * `fresh` estar certo.
+   *
+   * Este log existe para separar "o perfil estava certo" de "o diff nao mandou".
+   * Sem ele, o `cache-pause` efetivo era conjectura: o log da sessao passada
+   * mostrava `live fallback -> direct .ts` e `cacheTime 668.8` ao mesmo tempo, e
+   * nao dava para saber qual dos dois derrubou o `cache-pause`.
+   */
+  if (process.env.STPLAY_PROFILE_DEBUG) {
+    log.info('stur', 'perfil aplicado', {
+      live,
+      softZap: opts.softZap === true,
+      fresh: fresh.map((p) => `${p[0]}=${p[1]}`),
+      stale: stale.length,
+      cachePauseNoPerfil: profile.some((p) => p[0] === 'cache-pause'),
+    })
+  }
+
   // Um unico write no named pipe, em vez de 5-9 awaits sequenciais.
   const results = await sendIpcBatch(fresh.map((pair) => ['set_property', pair[0], pair[1]]))
   commitApplied(appliedProfile, fresh, results)
+}
+
+/**
+ * Uma vez por boot: o que o app decidiu sobre os tetos de buffer.
+ *
+ * Existe porque `STPLAY_VOD_MAX_BYTES` e `STPLAY_VOD_READAHEAD_SECS` sao
+ * override de ambiente, e um override que ninguem consegue ver no log e um
+ * override que ninguem vai lembrar de desfazer. Este log responde "qual teto
+ * rodou?" sem abrir o codigo.
+ */
+let vodBufferLogged = false
+function logVodBufferUmaVez() {
+  if (vodBufferLogged) return
+  vodBufferLogged = true
+  try {
+    const d = descreverVodBuffer()
+    log.info('stur', 'tetos de buffer do VOD', {
+      maxBytes: d.maxBytes,
+      readaheadSecs: d.readaheadSecs,
+      padrao: d.doPadrao,
+      fonte: d.doPadrao ? 'padrao do modulo' : 'STPLAY_VOD_*',
+    })
+  } catch (error) {
+    // `vodMaxBytes` lanca em env invalido. O throw nao pode derrubar o motor
+    // inteiro — quem falha e o motor, e sem teto conhecido ele volta ao
+    // ultimo valor aplicado pelo perfil, que e o padrao conhecido.
+    log.warn('stur', 'tetos de buffer do VOD invalidos; usando o padrao', {
+      erro: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 function clearLiveShowTimer() {
@@ -871,13 +1341,32 @@ function armLiveShowSoon() {
 
 function reportBufferPercent(pct, opts = {}) {
   const { forceActive } = opts
-  const next = Math.max(cachePercent, Math.round(pct))
+  // `pct <= 1` e o marcador de "nao tenho leitura". Nesse caso o relogio manda.
+  const effectivePct = pct <= 1 ? estimatedBufferPercent() : Math.round(pct)
+  const next = Math.max(cachePercent, effectivePct)
   cachePercent = Math.max(0, Math.min(100, next))
   if (liveMode && livePlaybackReady && !waitingFirstFrame && !forceActive) return
   if (!liveMode && playbackStable && !waitingFirstFrame && !forceActive) return
   const active =
     forceActive ?? (waitingFirstFrame ? cachePercent < 100 : cachePercent > 0 && cachePercent < 100)
-  emit({ type: 'buffering', value: active, percent: cachePercent })
+  /*
+   * `motivo` carrega o VEREDITO da sondagem para a UI.
+   *
+   * Sem ele, o titulo morto ficava 11,8 s na tela com "Buffering 82%" subindo,
+   * como se estivesse progredindo. A sondagem de 256 bytes ja tinha respondido em
+   * 1,2 s que o painel nao tem o arquivo - e o percentual e uma curva de tempo,
+   * nao uma medicao, entao ela continua subindo DEPOIS da recusa. Isso e pior
+   * que nao mostrar nada: faz a pessoa esperar por um progresso que nao existe.
+   *
+   * Medido no Dalmatas (1575711): flag ligada em +1,2 s, falha declarada em
+   * +11,8 s, e a tela mostrando "Buffering 82%" no meio do caminho.
+   */
+  emit({
+    type: 'buffering',
+    value: active,
+    percent: cachePercent,
+    motivo: vodUrlRefused ? 'indisponivel' : undefined,
+  })
 }
 
 function emitBuffering(active, percent = cachePercent) {
@@ -971,9 +1460,73 @@ function getProperty(name) {
   })
 }
 
+/**
+ * Tique do véu de boot: 0→100% enquanto o 1º frame não chega.
+ *
+ * O `getProperty` NÃO entra no laço. Medido: `get_property` leva ~1,2s para
+ * responder (o timeout em `getProperty` é esse), e um tique a cada 200ms
+ * enfileira 6 requisições no named pipe antes da primeira resposta — o mpv
+ * nunca respondia e o log تسجيلava `secs: null` em 46 tiques seguidos. Ou
+ * seja, o poll existia e não media nada.
+ *
+ * `cache-buffering-state` também não serve: o mpv só emite ao pausar por
+ * cache, e o perfil VOD desliga `cache-pause` (`playback-profile.cjs`). No
+ * live ele emite, mas só depois do primeiro quadro, quando o véu já saiu.
+ *
+ * Sobrou o relógio. Ele não mente sobre o que já carregou, e a curva em
+ * `estimatedBufferPercent` é calibrada contra `VOD_LOAD_TIMEOUT_MS` (28s).
+ */
+/** Último `demuxer-cache-time` do trace de gargalho (STPLAY_GASP_TRACE). */
+let lastTraceCache = -1
+
 function startBufferPoll() {
-  // Player One: % só via observe cache-buffering-state — sem progresso falso.
   stopBufferPoll()
+  bufferPollStartedAt = Date.now()
+  const gen = loadGeneration
+  bufferPollTimer = setInterval(() => {
+    if (gen !== loadGeneration || !running || !waitingFirstFrame) {
+      stopBufferPoll()
+      return
+    }
+    reportBufferPercent(estimatedBufferPercent(), { forceActive: true })
+  }, 250)
+
+  /*
+   * LEITURA DO `cache-pause` EFETIVO, SO COM PORTAO.
+   *
+   * A pergunta que o log da sessao passada nao respondia: no canal que caiu no
+   * fallback `.ts`, o `cache-pause` estava ligado ou desligado? Tudo dependia
+   * dessa leitura. `applyPlaybackProfile` registra o que ele MANDA; o que o mpv
+   * ACEITOU so aparece lendo a propriedade de volta.
+   *
+   * Fora do laço de boot e a 5 s, porque `get_property` leva ~1,2 s para
+   * responder (o timeout em `getProperty`) e enfileirar isso a 250 ms seria o
+   * proprio bug que o comentario acima descreve: 46 tiques com `null` e nada
+   * medido.
+   */
+  if (!process.env.STPLAY_PROFILE_DEBUG) return
+  const pollPause = setInterval(() => {
+    if (gen !== loadGeneration || !running) {
+      clearInterval(pollPause)
+      return
+    }
+    void (async () => {
+      const [pause, cache, pauseInit] = await Promise.all([
+        getProperty('cache-pause'),
+        getProperty('demuxer-cache-time'),
+        getProperty('cache-pause-initial'),
+      ])
+      if (gen !== loadGeneration) return
+      log.info('stur', 'cache-pause efetivo', {
+        cachePause: pause,
+        cachePauseInitial: pauseInit,
+        cacheSecs: cache,
+        live: liveMode,
+        modo: currentLoadMode,
+      })
+    })()
+  }, 5000)
+  void pollPause
 }
 
 function windowHwnd(win) {
@@ -1156,9 +1709,48 @@ function isSurfaceLost() {
   }
   if (!visible) return true
   if (videoHidden) return true
-  // `hideVideo()` estaciona em -32000 e marca videoHidden. A coordenada é a
-  // assinatura: nenhum outro caminho do app escreve -32000.
-  return lastPlacedKey.startsWith('-32000,')
+  // `hideVideo()` estaciona em -32000 e marca videoHidden. A coordenada e a
+  // assinatura: nenhum outro caminho do app escreve -32000. O `videoHidden` e
+  // verificado antes porque `hideVideo` deixa `lastPlacedKey` em -32000 E a
+  // janela escondida - os dois sinais dizem a mesma coisa, e checar os dois
+  // deixaria o `lastPlacedKey` de uma sessao Velha marcar a superficie como
+  // perdida para sempre.
+  if (!videoHidden && lastPlacedKey.startsWith('-32000,')) return true
+
+  /*
+   * POSICAO ERRADA E SUPERFICIE PERDIDA.
+   *
+   * A checagem acima cuida de pai, visibilidade e estacionamento. Nenhuma delas
+   * pega o caso que o usuario viu: uma HWND visivel, com o pai certo, no lugar
+   * errado. O `raiseTimer` rodava a cada 1.5 s, achava tudo certo e nao refazia
+   * o `MoveWindow` - entao o video ficava torto indefinidamente.
+   *
+   * Aqui a superficie e declarada perdida quando o retangulo real nao bate com o
+   * retangulo pedido. O `raiseTimer` refaz o `showVideo` no mesmo tique, entao o
+   * app se corrige sozinho mesmo se o renderer ficar em silencio. E o
+   * comportamento que importa: a tela para de depender de o renderer lembrar de
+   * reenviar o numero.
+   */
+  if (!lastBounds) return false
+  const real = janelaReal(mpvHwnd)
+  const origem = clienteNaTela(parentHwnd)
+  if (!real || !origem) return true
+  const sf = scaleFactor()
+  const esperado = {
+    x: origem.x + Math.round(lastBounds.x * sf),
+    y: origem.y + Math.round(lastBounds.y * sf),
+    width: Math.max(16, Math.round(lastBounds.width * sf)),
+    height: Math.max(16, Math.round(lastBounds.height * sf)),
+  }
+  // Tolerancia de 2 px: o Windows arredonda para pixel inteiro, e o
+  // `ClientToScreen` pode devolver meio pixel arredondado para baixo.
+  const TOL = 2
+  return (
+    Math.abs(real.x - esperado.x) > TOL ||
+    Math.abs(real.y - esperado.y) > TOL ||
+    Math.abs(real.width - esperado.width) > TOL ||
+    Math.abs(real.height - esperado.height) > TOL
+  )
 }
 
 function showVideo(bounds) {
@@ -1173,15 +1765,102 @@ function showVideo(bounds) {
   const w = Math.max(16, Math.round(bounds.width * s))
   const h = Math.max(16, Math.round(bounds.height * s))
   const placeKey = `${x},${y},${w},${h}`
+  /*
+   * O DEDUP COMPARAVA COM A PERGUNTA, NAO COM A JANELA.
+   *
+   * `lastPlacedKey` guardava o que o app JA PEDIU. Se a HWND fosse movida por
+   * fora do `showVideo` - pelo proprio Windows durante o arraste da janela, por
+   * um `MoveWindow` de outro caminho, por um `WM_DPICHANGED` - o cache continuava
+   * dizendo que a janela estava no lugar certo, e TODO retangulo correto
+   * seguinte era descartado como duplicado.
+   *
+   * O video ficava onde o Windows deixou, e o `raiseTimer` repetia
+   * `showVideo(lastBounds)` a cada 1.5 s sem nunca refazer o `MoveWindow`. O
+   * sintoma era o video cobrindo a janela inteira enquanto o log insistia que o
+   * retangulo estava certo - `placedKey` igual, `surfaceLost: false`.
+   *
+   * MEDIDO: janela em 1576 de largura com o mpv em (0,0) 1584x861, enquanto o
+   * log repetia `bounds { 597, 8, 972, 837 }` e `placedKey '597,8,972,837'`, e o
+   * overlay continuava no lugar CERTO (596,677 em coord de cliente). Duas janelas,
+   * um `lastBounds`, resultados opostos - porque uma recebia o cache e a outra nao.
+   *
+   * Agora o dedup so vale quando a janela REAL ja esta no lugar. Custa um
+   * `GetWindowRect` por chamada, e `showVideo` ja e chamado por rAF no maximo a
+   * 30 Hz por 1.2 s apos um gatilho - o resto do tempo nem chega aqui.
+   */
   if (!wasHidden && !wasDetached && lastPlacedKey === placeKey) {
-    winApi.EnableWindow(mpvHwnd, false)
-    elevateOverlay()
-    return
+    const real = janelaReal(mpvHwnd)
+    const origem = real ? clienteNaTela(parentHwnd) : null
+    const jaNoLugar =
+      real &&
+      origem &&
+      real.x === origem.x + x &&
+      real.y === origem.y + y &&
+      real.width === w &&
+      real.height === h
+    if (jaNoLugar) {
+      winApi.EnableWindow(mpvHwnd, false)
+      elevateOverlay()
+      return
+    }
   }
   lastPlacedKey = placeKey
   winApi.EnableWindow(mpvHwnd, false)
   winApi.MoveWindow(mpvHwnd, x, y, w, h, true)
+
+  /*
+   * O LOG QUE FECHA A INVESTIGACAO.
+   *
+   * Antes daqui so existia o que o app PEDIU (`boundsCru`, `scale`, `final`).
+   * Falta o que a janela REALMENTE virou - e sao tres numeros que decidem onde o
+   * bug esta:
+   *
+   *   - `pedido` vs `real`: se batem, o `MoveWindow` foi aplicado e o bug e de
+   *     VALOR (o rect que chegou e o errado). Se nao batem, o bug e de
+   *     ATRIBUICAO (o `MoveWindow` nao pegou).
+   *   - `dpiJanela` vs `dpiMpv`: os dois filhos tem o mesmo pai, entao DPI
+   *     divergente aqui significa DPI por MONITOR sendo aplicado duas vezes.
+   *   - `cliente`: o retangulo real estourando a janela e o sintoma, nao a
+   *     causa.
+   *
+   * Medido antes disso (log de 03:05): `bounds { 597, 8, 972, 837 }` repetido a
+   * cada tique do `raiseTimer`, com `placedKey` igual e `surfaceLost: false` - o
+   * main repetindo um numero obsoleto com toda a confiança.
+   */
+  if (process.env.STPLAY_BOUNDS_DEBUG) {
+    const real = janelaReal(mpvHwnd)
+    const cb = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getContentBounds() : null
+    log.info('stur', 'showVideo posicionou', {
+      pedidoCru: {
+        x: Math.round(bounds.x),
+        y: Math.round(bounds.y),
+        w: Math.round(bounds.width),
+        h: Math.round(bounds.height),
+      },
+      scale: s,
+      enviado: { x, y, w, h },
+      real,
+      dpiJanela: dpiDe(parentHwnd),
+      dpiMpv: dpiDe(mpvHwnd),
+      cliente: cb ? `${Math.round(cb.width)}x${Math.round(cb.height)}` : null,
+      pai: winApi.GetParent(mpvHwnd) === parentHwnd,
+    })
+  }
   if (wasHidden || wasDetached) {
+    winApi.SetWindowPos(mpvHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+    winApi.ShowWindow(mpvHwnd, SW_SHOWNA)
+    videoHidden = false
+  } else if (videoHidden) {
+    /*
+      `wasHidden` vem de uma copia lida ANTES do `ensureEmbedded`. Se o
+      `ensureEmbedded` reancorar o pai, `isMpvDetached()` passa a falso e os
+      dois flags caem juntos, mas a janela segue escondida: o `else if` pegava
+      esse caso e mantinha `videoHidden` verdadeiro para sempre.
+
+      E o estado inconsistente faz o `isSurfaceLost()` do `raiseTimer` continuar
+      verdadeiro a cada tique, o que produzia o log repetido de "superficie de
+      video perdida — reancorando" (136 vezes no log) sem nada mudar.
+    */
     winApi.SetWindowPos(mpvHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
     winApi.ShowWindow(mpvHwnd, SW_SHOWNA)
     videoHidden = false
@@ -1213,6 +1892,7 @@ function placeVideo(bounds) {
 
 function killMpv(opts = {}) {
   running = false
+  clearFirstFrameConfirm()
   waitingFirstFrame = false
   livePlaybackReady = false
   playbackStable = false
@@ -1235,6 +1915,7 @@ function killMpv(opts = {}) {
   livePlayUrl = null
   livePanelUrl = null
   firstFrameBase = null
+  timePosAdvanceCount = 0
   cachePercent = 0
   knownDuration = 0
   propertiesObserved = false
@@ -1255,6 +1936,8 @@ function killMpv(opts = {}) {
   liveStallRecoverBusy = false
   liveStallRecoverCount = 0
   liveUnhealthyLoads = 0
+  vodTimeRetries = 0
+  clearVodRetry()
   for (const [, cb] of pendingRequests) {
     try {
       cb({ error: 'killed' })
@@ -1295,6 +1978,40 @@ function killMpv(opts = {}) {
   return forceKillProc(proc, { sync: opts.sync === true })
 }
 
+/**
+ * Qual PROCESSO este socket atende.
+ *
+ * Cada `mpv` novo abre o seu proprio named pipe, entao o socket e a fronteira
+ * natural entre "evento do processo velho" e "evento do processo atual". O
+ * `killMpv` fecha o socket do velho ANTES do novo subir, mas o `end-file` do
+ * velho ja foi enfileirado no `ipcBuf` e sai no proximo `data` — que pode
+ * acontecer depois que o novo processo ja conectou.
+ *
+ * POR QUE ISTO E O PID, E NAO A `loadGeneration`:
+ *
+ * A primeira versao do guard comparava com `loadGeneration`, e isso QUEBROU o
+ * VOD inteiro. Medido:
+ *
+ *   [10:38:57.953] end-file de carga antiga, ignorado  reason=error gen=56 atual=57
+ *   [10:39:25.406] no file-loaded before timeout, trying fallback
+ *   [10:39:25.407] vod fallback -> ext   (.mp4 -> .mkv)
+ *   [10:39:43.9..] repete, 28 s por ciclo, para sempre
+ *
+ * `loadGeneration` conta CARGAS, nao processos. O fallback de VOD recarrega no
+ * MESMO processo vivo: `loadStream` chama `bumpLoadGeneration()` e manda
+ * `loadfile` pelo socket que ja estava conectado. Entao a generation do socket
+ * ficava uma atras, e o `end-file error` do processo VIVO — que e exatamente o
+ * sinal que dispara o proximo fallback — era descartado como "carga antiga".
+ *
+ * Sem o sinal, o fallback so avancava pelo timeout de 28 s, um ext por vez,
+ * para sempre: filme e serie nunca carregavam. Era o "carregando dos filmes ta
+ * demorando muito".
+ *
+ * O PID nao tem esse problema: muda quando o processo muda, e nao muda quando so
+ * a carga muda.
+ */
+let ipcGeneration = -1
+
 function connectIpcOnce() {
   return new Promise((resolve) => {
     if (!pipePath) {
@@ -1313,6 +2030,9 @@ function connectIpcOnce() {
     socket.once('connect', () => {
       clearTimeout(timer)
       ipcSocket = socket
+      // Carimba o socket com o PID que ele atende. Mudar de carga no mesmo
+      // processo NAO muda este numero — so `spawn` novo muda.
+      ipcGeneration = mpvProc && !mpvProc.killed ? mpvProc.pid : -1
       ipcBuf = ''
       socket.on('data', (chunk) => {
         ipcBuf += chunk.toString('utf8')
@@ -1322,7 +2042,13 @@ function connectIpcOnce() {
           const trimmed = line.trim()
           if (!trimmed) continue
           try {
-            handleIpcMessage(JSON.parse(trimmed))
+            const parsed = JSON.parse(trimmed)
+            // Carimba a generation de quem enviou. O `handleIpcMessage`
+            // descarta o que nao for da carga viva.
+            if (parsed && typeof parsed === 'object') {
+              parsed._stplayGeneration = ipcGeneration
+            }
+            handleIpcMessage(parsed)
           } catch {
             // ignore
           }
@@ -1389,6 +2115,13 @@ function presentLoadingShell() {
       if (overlay.reshow) overlay.reshow()
     }
     overlay.sendUi({ action: 'boot' })
+    /*
+     * O `show-controls` aqui e so para o renderer ter os controles acesos. Ele
+     * NAO pode derrubar a janela para a barra enquanto o canal carrega: e o que
+     * fazia a roda de `carregando...` aparecer colada no rodape em vez de no meio
+     * do video. Quem fecha a tela cheia do loading e `playback-ready` /
+     * `hide-loading`, em `presentPlayback`.
+     */
     overlay.sendUi({ action: 'show-controls' })
   } catch {
     // ignore
@@ -1497,6 +2230,14 @@ function noteLiveLoadHealth() {
  */
 let lastCacheTime = -1
 let lastCacheTimeAt = 0
+/**
+ * Ultimo `time-pos` visto, em qualquer modo.
+ *
+ * Vive aqui e nao no `noteLiveTimePos` porque o `armFirstFrameConfirm` precisa do
+ * numero em VOD tambem: e a unica prova de que um quadro foi entregue ao VO, e o
+ * log do `dwidth` sem avanco precisa mostrar que numero era.
+ */
+let lastTimePosSeen = -1
 
 function noteLiveCacheTime(secs) {
   if (!liveMode || typeof secs !== 'number') return
@@ -1578,6 +2319,32 @@ function noteLiveTimePos(pos) {
   // esta bem abaixo de qualquer avanco real (o painel publica a cada ~10s) e bem
   // acima do ruido do float.
   if (Math.abs(pos - lastLiveTimePosAtPos) >= LIVE_TIME_POS_MIN_STEP) {
+    lastLiveTimePosAtPos = pos
+    lastLiveTimePosAt = Date.now()
+    liveStallRecoverCount = 0
+    return
+  }
+
+  /*
+    AVANCO PEQUENO AINDA E AVANCO.
+
+    O `time-pos` do HLS ao vivo NAO corre continuamente: ele avanca por
+    segmento. Entre dois segmentos ele fica no mesmo valor por 8 a 12s, e o
+    piso de `LIVE_TIME_POS_MIN_STEP` (0,15s) rejeita esse avanco intermediario
+    como jitter.
+
+    E o `liveStallRecoverCount = 0` vivia SO dentro do if. Num canal em que o
+    playhead so se move de um salto a cada segmento, o contador nao era
+    zerado NUNCA entre dois segmentos: acumulava, o watchdog armava em canal
+    saudavel, e o `softReloadLive` reiniciava a reproducao do zero. O sintoma
+    e exatamente o relatado: "roda liso e de repente repete a mesma frase",
+    porque recarregar um live volta para o comeco do que ja tinha tocad.
+
+    O piso aqui e menor de proposito: 1 frame a 30fps e 0,033s, entao qualquer
+    avanco real passa, e o jitter de float do mpv (ordem de 1e-6) continua
+    fora.
+  */
+  if (Math.abs(pos - lastLiveTimePosAtPos) >= LIVE_TIME_POS_EPS) {
     lastLiveTimePosAtPos = pos
     lastLiveTimePosAt = Date.now()
     liveStallRecoverCount = 0
@@ -1691,8 +2458,34 @@ async function recoverLiveStall(reason) {
     // Quem consome(video bufferizado) e o VO. A resposta certa e reancorar a
     // superficie e cutucar o presentation, que e barato e reversivel.
     if (lastCacheTime >= LIVE_PRESENTABLE_CACHE_SECS) {
+      /*
+        REAPRESENTAR E SO UMA TENTATIVA, NAO UM CAMINHO SEM FIM.
+
+        O log mediu o ciclo: `reapresentando` com cacheTime 5.96 seguido de
+        `live stall recover count=2` 21 s depois, com o MESMO cacheTime. O
+        reancorar a superficie nao puxa quadro nenhum, entao o `raiseTimer`
+        reavisa, o VO continua sem apresentar, e o ciclo se repete para sempre
+        — que e o "fica em loop" que a pessoa viu no ao vivo.
+
+        A correcao e contar esta tentativa como qualquer outra: ela ja
+        incrementa `liveStallRecoverCount` no topo da funcao, e o teto logo
+        abaixo (`>= LIVE_STALL_MAX_RECOVER`) manda para `softReloadLive`. Com o
+        buffer cheio e o video ainda parado apos uma reapresentacao, abrir o
+        processo de novo e o que traz os quadros de volta.
+      */
+      if (liveStallRecoverCount > LIVE_PRESENTABLE_MAX_RETRY) {
+        log.warn('stur', 'reapresentar nao resolveu, reabrindo', {
+          tentativas: liveStallRecoverCount,
+          cacheTime: lastCacheTime,
+          url: (livePlayUrl || sourceUrl || '').slice(0, 100),
+        })
+        liveStallRecoverCount = 0
+        await softReloadLive()
+        return
+      }
       log.info('stur', 'reapresentando: ha video bufferizado, nao e rede', {
         cacheTime: lastCacheTime,
+        tentativa: liveStallRecoverCount,
       })
       if (lastBounds) {
         lastPlacedKey = ''
@@ -1715,8 +2508,74 @@ async function recoverLiveStall(reason) {
   }
 }
 
+/**
+ * `dwidth` viu video. Espera a confirmacao de que ele apareceu.
+ *
+ * O `time-pos` avancando e a prova de que um quadro foi decodificado e entregue
+ * ao VO — e o handler dele chama `onFirstFrame` direto. Entao aqui a funcao nao
+ * precisa decidir nada: ela so evita o caso em que o `dwidth` chega e o
+ * `time-pos` nunca mais avanca.
+ *
+ * Esse caso existe: stream que abre pausado, ou `cache-pause` segurando antes
+ * do primeiro quadro em VOD antigo. Nesses casos esperar o `time-pos` deixa o
+ * veu de buffering preso na tela, que e pior que aparecer cedo.
+ *
+ * Entao o prazo existe, e o log diz QUAL dos dois caminhos aconteceu — porque
+ * "apareceu cedo" e "apareceu depois de confirma" sao diagnosticos diferentes.
+ */
+const FIRST_FRAME_CONFIRM_MS = 1200
+let firstFrameConfirmTimer = null
+let firstFrameViaDwidth = false
+/*
+ * O watchdog e um TERCEIRO caminho para o primeiro quadro, e ele precisa de nome
+ * proprio no log. Sem isto, `forcing first frame after watchdog` aparecia e o
+ * `via` seguinte dizia `time-pos x0` — duas linhas que se contradizem, e foi
+ * exatamente essa contradicao que me fez procurar no lugar errado antes.
+ */
+let firstFrameViaWatchdog = false
+
+function armFirstFrameConfirm() {
+  if (firstFrameConfirmTimer || !waitingFirstFrame) return
+  firstFrameConfirmTimer = setTimeout(() => {
+    firstFrameConfirmTimer = null
+    if (!waitingFirstFrame) return
+    firstFrameViaDwidth = true
+    log.warn('stur', 'primeiro quadro pelo dwidth: time-pos nao avancou', {
+      ms: FIRST_FRAME_CONFIRM_MS,
+      tempoPos: lastTimePosSeen,
+    })
+    onFirstFrame()
+  }, FIRST_FRAME_CONFIRM_MS)
+}
+
+function clearFirstFrameConfirm() {
+  if (!firstFrameConfirmTimer) return
+  clearTimeout(firstFrameConfirmTimer)
+  firstFrameConfirmTimer = null
+}
+
 function onFirstFrame() {
   if (!waitingFirstFrame) return
+  clearFirstFrameConfirm()
+  /*
+   * `via` tem que nomear o caminho real, e sao tres:
+   *
+   *   time-pos xN (continuacao)  playback de verdade, N amostras avancadas
+   *   dwidth-sem-avanco          o prazo de 1.2 s venceu sem nenhum avanco
+   *   watchdog                   o watchdog de 6 s forçou — NINGUM quadro
+   *                              confirmado, é o unico caminho que mente
+   *
+   * Sem o terceiro, o watchdog produzia `time-pos x0`: o log dizia "nenhuma
+   * amostra contada" com a assinatura de "samples contadas". Foi esse mismatch
+   * que jogou a busca no `cache-buffering-state` errado.
+   */
+  const via = firstFrameViaWatchdog
+    ? 'watchdog (forcado, sem amostra)'
+    : firstFrameViaDwidth
+      ? 'dwidth-sem-avanco'
+      : `time-pos x${timePosAdvanceCount}${firstFrameBase && firstFrameBase > 1 ? ' (continuacao)' : ''}`
+  firstFrameViaDwidth = false
+  firstFrameViaWatchdog = false
   waitingFirstFrame = false
   playbackStable = true
   if (liveMode) livePlaybackReady = true
@@ -1744,14 +2603,39 @@ function onFirstFrame() {
     void sendIpc(['set_property', 'cache-pause', false])
     void sendIpc(['set_property', 'cache-pause-initial', false])
     void sendIpc(['set_property', 'pause', false])
-    void sendIpc(['set_property', 'demuxer-readahead-secs', 60])
-    void sendIpc(['set_property', 'demuxer-max-bytes', '256MiB'])
+    /*
+     * O `set_property demuxer-max-bytes` QUE ESTAVA AQUI SAIU, e o porque importa mais
+     * que o numero.
+     *
+     * O comentario original trazia uma medicao real - `cache 3s -> 106s -> 207s ->
+     * 265s, verdict 'enchendo' SEMPRE` no Matrix, e a conclusao de que 256MB
+     * preenchendo enquanto o decoder pede quadro engasga a apresentacao. A medicao e
+     * confiavel. O problema e que o problema medido JA TINHA PARADO quando o numero
+     * foi mudado, entao a mudanca nao resolveu nada: so trocou um parametro sem
+     * ninguem voltar a medir.
+     *
+     * E o efeito colateral apontava para o lado oposto do raciocinio. 96MiB sao ~30s
+     * de video a 8Mbps; qualquer oscilacao de rede acima disso vira rebuffer visivel,
+     * que e justamente o sintoma que a mudanca supostamente servia.
+     *
+     * SAIU por dois motivos:
+     *
+     *   1. Fonte unica. Em VOD o `cache-pause` e `false`, entao quem dimensiona o
+     *      runway e o teto. Este `set_property` competia com o perfil pelo mesmo
+     *      valor, sem fonte unica, e um envio que falha silencioso deixa o teto
+     *      anterior valendo sem o log dizer.
+     *   2. Momento errado. `onFirstFrame` e depois do playback comecar; mudar o
+     *      teto ali pega o canal ja rodando com o valor velho.
+     *
+     * O teto do VOD agora vem de `vodMaxBytes()` (padrao 512MiB, override por
+     * `STPLAY_VOD_MAX_BYTES`) e chega pelo perfil, no loadfile.
+     */
     startDurationPoll()
   }
   // Mostra o overlay ANTES do playing — senão o React perde o evento e a bolinha fica
   presentPlayback()
   emit({ type: 'playing' })
-  log.info('stur', 'first frame', { live: liveMode })
+  log.info('stur', 'first frame', { live: liveMode, via })
 }
 
 function handleIpcMessage(msg) {
@@ -1763,10 +2647,98 @@ function handleIpcMessage(msg) {
   if (msg.event === 'property-change') {
     if (msg.name === 'time-pos' && typeof msg.data === 'number') {
       emit({ type: 'timeupdate', current: msg.data })
+      /*
+        TRACE TEMPORARIO de rewind no ao vivo (STPLAY_TP_TRACE=1).
+
+        O dono relata que o ao vivo "volta uns segundos de vez em quando". Nem
+        reload (raro no log) nem o normalizador (sequencia propria monotonica)
+        explicam. Este trace registra toda vez que o `time-pos` ANDA PARA TRAS
+        mais de 1s, com o antes/depois — e sai sozinho sem a variavel.
+      */
+      if (
+        process.env.STPLAY_TP_TRACE === '1' &&
+        liveMode &&
+        typeof lastLiveTimePos === 'number' &&
+        lastLiveTimePos >= 0 &&
+        msg.data < lastLiveTimePos - 1
+      ) {
+        log.warn('stur', 'time-pos VOLTOU', {
+          de: Number(lastLiveTimePos.toFixed(2)),
+          para: Number(msg.data.toFixed(2)),
+          voltaSeg: Number((lastLiveTimePos - msg.data).toFixed(2)),
+          cacheTime: lastCacheTime,
+          cacheParadoMs: lastCacheTimeAt > 0 ? Date.now() - lastCacheTimeAt : -1,
+          modo: currentLoadMode,
+          janelaNormalizada: (() => {
+            try {
+              return normalizer.inspecionar(sourceUrl)
+            } catch {
+              return null
+            }
+          })(),
+        })
+      }
       noteLiveTimePos(msg.data)
-      if (fileLoaded && waitingFirstFrame && (liveMode || !pausedForCache)) {
+      if (typeof msg.data === 'number') lastTimePosSeen = msg.data
+      /*
+       * `&& (liveMode || !pausedForCache)` ESTAVA AQUI, E DESLIGAVA O
+       * CONTROLE INTEIRO NO MOMENTO ERRADO.
+       *
+       * `paused-for-cache` e `true` no enchimento de buffer logo apos carregar —
+       * que e a janela em que o cache ainda esta construindo. Entao o `time-pos`
+       * que chega nessa hora era descartado, incluindo a primeira amostra que
+       * define `firstFrameBase`. O bloco inteiro so voltava a contar depois que
+       * o cache passava do limite, e nesse interim o UNICO caminho que
+       * confirmava o primeiro quadro era o watchdog de 6 s:
+       *
+       *   file-loaded
+       *   forcing first frame after watchdog        <- 6 s depois, na marra
+       *   first frame { via: 'time-pos x0' }       <- contador em ZERO
+       *   cacheSecs: 8.5
+       *
+       * `x0` e a assinatura desse caminho: `onFirstFrame()` sem nenhuma amostra
+       * contada. Isso explica as tres coisas que nao fechavam:
+       *
+       *   - o `!msg.data` do `cache-buffering-state` nao era a causa do veu
+       *     cedo; era o watchdog que Always chegava primeiro;
+       *   - o gate de DUAS amostras da continuacao nunca exerceu, porque
+       *     `firstFrameBase` continuava `null` e `precisaDuas` nunca era
+       *     computado — codigo morto;
+       *   - "o percentual completa e ai o video comeca" era o relogio de 6 s, nao
+       *     um quadro decodificado. O `%` e o tempo de buffer; o video so
+       *     aparecia quando o watchdog vencia.
+       *
+       * Nao ha risco em contar durante `paused-for-cache`: pausado por cache, o
+       * `time-pos` nao anda, entao nao ha avanco falso para contar. O que anda
+       * e o Seek da continuacao — e esse e exatamente o advance que o gate de
+       * duas amostras existe para nao aceitar sozinho.
+       */
+      if (fileLoaded && waitingFirstFrame) {
         if (firstFrameBase === null) firstFrameBase = msg.data
-        else if (msg.data > firstFrameBase + 0.05) onFirstFrame()
+        else if (msg.data > firstFrameBase + 0.05) {
+          /*
+           * NA CONTINUACAO, O PRIMEIRO SALTO E O SEEK — nao um quadro.
+           *
+           * Medido: `start { startTime: 159.951 }` → `vod resume seek { seekTo:
+           * 159 }` → `time-pos` salta de 0 para ~159. Isso satisfaz
+           * `> firstFrameBase + 0.05` sem que nada tenha sido decodificado, e o
+           * veu saía com a tela ainda preta.
+           *
+           * O que prova quadro entregue e um SEGUNDO avanco: apos o seek, o
+           * `time-pos` so anda de novo quando a reproducao esta de fato rodando,
+           * o que exige decodificar. Entao a continuacao exige duas amostras
+           * avancadas, e um titulo aberto em 0 so precisa da primeira.
+           *
+           * A tela preta de 3-5 s na continuacao nao e este bug sozinho: e o mpv
+           * lendo do container ate 159 s com `demuxer-readahead-secs=120` e
+           * `cache-pause=false`. Isso e baud, e tem portao de A/B. O que este
+           * gate garante e que o veu NAO some antes da imagem — que e o que a
+           * pessoa viu.
+           */
+          timePosAdvanceCount += 1
+          const precisaDuas = !liveMode && firstFrameBase > 1
+          if (timePosAdvanceCount >= (precisaDuas ? 2 : 1)) onFirstFrame()
+        }
       }
     }
     if (msg.name === 'duration') {
@@ -1797,8 +2769,25 @@ function handleIpcMessage(msg) {
       }
     }
     if (msg.name === 'dwidth' && typeof msg.data === 'number' && msg.data > 0) {
-      // VOD: mostra assim que há quadro decodificado (não espera cache-pause acabar)
-      if (fileLoaded && waitingFirstFrame) onFirstFrame()
+      /*
+       * `dwidth` NAO E "TEM QUADRO". E a largura do track de video — o mpv sabe
+       * dela no parse do cabecalho, antes de decodificar um unico quadro.
+       *
+       * Medido no Matrix 4K: `file-loaded` e `first frame` com 5 ms de
+       * diferenca. Nenhum quadro 4K decodifica em 5 ms. O efeito na tela era o
+       * veu de buffering sumindo na hora, o dock aparecendo, e o video PRETO por
+       * 3-5 s enquanto oSurface ainda nao tinha nada.
+       *
+       * Entao `dwidth` passou a ser o que ele e: um SINAL de que existe video, e
+       * nao de que ele ja apareceu. Quem confirma e o `time-pos` avancando (linha
+       * do `firstFrameBase`), porque reproducao andar exige quadro decodificado
+       * e entregue ao VO.
+       *
+       * O `dwidth` so ainda e acionado quando o `file-loaded` chegou atrasado
+       * demais e o `time-pos` ja passou do primeiro quadro: nesse caso nao ha mais
+       * o que esperar, e o veu ficaria preso para sempre.
+       */
+      if (fileLoaded && waitingFirstFrame) armFirstFrameConfirm()
     }
     if (msg.name === 'cache-buffering-state' && typeof msg.data === 'number') {
       reportBufferPercent(Math.round(msg.data), { forceActive: waitingFirstFrame || !fileLoaded })
@@ -1823,17 +2812,82 @@ function handleIpcMessage(msg) {
           percent: cachePercent,
         })
       }
-      if (fileLoaded && waitingFirstFrame && !msg.data) onFirstFrame()
+      /*
+       * `!msg.data` AQUI ESTAVA ERRADO, E O LOG PROVOU.
+       *
+       * `cache-buffering-state` e 0 quando o cache esta VAZIO — que e o estado
+       * normal logo apos carregar um arquivo. Entao `!msg.data` era "primeiro
+       * quadro" com o buffer em zero. Medido no 2382920:
+       *
+       *   16:35:11.971  cacheSecs: null
+       *   16:35:13.067  first frame { via: 'time-pos x0' }   <- counter em ZERO
+       *   16:35:16.970  cacheSecs: 3.07
+       *
+       * `via: 'time-pos x0'` e a prova: nenhum avanco de `time-pos` foi
+       * contado, entao quem disparou foi este `!msg.data`, com o veu ainda no
+       * comeco do download. O filme comecou a tocar com 3 s de runway — que e
+       * exatamente a condicao de gagueira em uma origem que entrega ~1x tempo
+       * real.
+       *
+       * Cache VAZIO e o oposto de "primeiro quadro". A confirmacao correta e a
+       * de sempre: `dwidth` arma o prazo de 1.2 s, e o `time-pos` avancando
+       * confirma. Este caminho sai inteiro.
+       */
     }
     if (msg.name === 'demuxer-cache-time' && typeof msg.data === 'number') {
       cacheTickSinceLoad = true
       noteLiveCacheTime(msg.data)
+
+      /*
+       * TRACE DE GARGALHO (STPLAY_GASP_TRACE=1).
+       *
+       * Sintoma: o video abre, toca e vai "gargalhando" — cada quadro e bom,
+       * mas entre eles a imagem para. Pausar um pouco e despausar resolve por
+       * um tempo. Esse trace responde a unica pergunta que importa aqui, que e
+       * se o gargalho e BANDA ou DEMUXER:
+       *
+       *   banda   -> `demuxer-cache-time` CRESCE (o playback consome mais do que
+       *              chega). O `delta` negativo repetido e a assinatura.
+       *   demuxer -> `demuxer-cache-time` fica PARADO (nem cresce nem cai). O
+       *              socket esta aberto mas nao entrega byte. Pausar nao
+       *              resolveria, e o usuario nao veria melhora.
+       *
+       * A distincao importa porque a receita e oposta: banda baixa pede buffer
+       * maior e cache-pause mais tolerante; demuxer morto pede processo novo.
+       * Sem este numero eu teria que escolher uma das duas no escuro.
+       */
+      if (process.env.STPLAY_GASP_TRACE === '1') {
+        const delta = lastTraceCache >= 0 ? msg.data - lastTraceCache : 0
+        lastTraceCache = msg.data
+        log.warn('gasp', 'cache', {
+          cache: Number(msg.data.toFixed(2)),
+          delta: Number(delta.toFixed(3)),
+          verdict: delta < -0.5 ? 'consome-mais-do-que-chega' : Math.abs(delta) < 0.01 ? 'parado' : 'enchendo',
+          pausedForCache,
+          pause: pausedForCache ? 1 : 0,
+          playing: !pausedForCache,
+        })
+      }
       // NÃO renova `lastLiveTimePosAt`. O código antigo fazia isso, e aí o
       // "stall de time-pos" só podia disparar quando o cache TAMBÉM parava de
       // crescer — ou seja, o detector já era um detector de silêncio
       // disfarçado, só que com 30s de atraso. Agora os dois relógios são
       // independentes e o log diz qual dos dois quebrou.
       if (!playbackStable) armLoadWatchdog(loadGeneration)
+    }
+  }
+  if (process.env.STPLAY_TP_TRACE === '1' && msg.event === 'seek') {
+    log.warn('stur', 'mpv SEEK (demuxer reposicionou sozinho)', {
+      live: liveMode,
+      timePos: typeof lastLiveTimePos === 'number' ? Number(lastLiveTimePos.toFixed(2)) : null,
+    })
+  }
+  if (msg.event === 'playback-restart') {
+    if (process.env.STPLAY_TP_TRACE === '1') {
+      log.warn('stur', 'mpv playback-restart', {
+        live: liveMode,
+        timePos: typeof lastLiveTimePos === 'number' ? Number(lastLiveTimePos.toFixed(2)) : null,
+      })
     }
   }
   if (msg.event === 'file-loaded') {
@@ -1860,6 +2914,7 @@ function handleIpcMessage(msg) {
       // tinham como rodar.
       waitingFirstFrame = true
       firstFrameBase = null
+      timePosAdvanceCount = 0
       fileLoadedAt = Date.now()
       armLoadWatchdog(loadGeneration)
       void (async () => {
@@ -1872,6 +2927,7 @@ function handleIpcMessage(msg) {
     }
     waitingFirstFrame = true
     firstFrameBase = null
+    timePosAdvanceCount = 0
     fileLoadedAt = Date.now()
     knownDuration = 0
     pausedForCache = false
@@ -1905,6 +2961,43 @@ function handleIpcMessage(msg) {
     log.info('stur', 'file-loaded', { live: liveMode })
   }
   if (msg.event === 'end-file') {
+    /*
+      END-FILE DO PROCESSO ANTIGO, CHEGANDO DEPOIS DO ZAP.
+
+      Medido nesta sessao:
+
+        04:56:17.228  end-file stop       2396229.m3u8   (canal A)
+        04:56:22.431  start               2396229.m3u8   (mesmo canal, zap)
+        04:56:22.780  end-file stop       2396226.m3u8   (canal B, ANTIGO)
+        04:56:22.786  reloaded            2396226.m3u8   reinicia o canal ERRADO
+
+      O `stop`/`error` do processo que MORREU chega some frames DEPOIS do
+      `start` do novo. Este handler nao checa de qual processo o evento veio, entao
+      tratava o evento velho como se fosse do canal atual: disparava
+      `tryFallbackLoad` / `softReloadLive` e reiniciava a reproducao do canal que
+      acabara de subir.
+
+      O sintoma era o "repete 3 a 4 segundos e segue normal": o canal tocava,
+      o end-file velho chegava, e o `reloaded` voltava o mesmo canal no inicio.
+      A cada ~5 s. E o video pareceia congelado sem nunca dar erro.
+
+      A guarda e o PID: o evento so age se veio do processo VIVO. Ver o
+      comentario de `ipcGeneration` para por que `loadGeneration` nao serve aqui
+      — usar ela descartava o `end-file error` do processo vivo e travava o
+      fallback de VOD em ciclo de 28 s.
+    */
+    const evPid = msg._stplayGeneration
+    const atualPid = mpvProc && !mpvProc.killed ? mpvProc.pid : -1
+    const stale = typeof evPid === 'number' && evPid !== atualPid
+    if (stale) {
+      log.info('stur', 'end-file de processo morto, ignorado', {
+        reason: msg.reason,
+        pidDoEvento: evPid,
+        pidVivo: atualPid,
+        sourceUrl: (sourceUrl || '').slice(0, 90),
+      })
+      return
+    }
     fileLoaded = false
     resolveEndFileWaiters()
     if (msg.reason === 'eof') {
@@ -1933,9 +3026,54 @@ function handleIpcMessage(msg) {
         currentLoadMode !== 'ffmpeg' &&
         currentLoadMode !== 'http-ts'
       if (canFallback) {
+        /*
+         * SEM contador aqui. O que vem a seguir NÃO é reconexão: é a cadeia de
+         * URLs do mesmo ID (.mp4 -> .mkv -> .avi -> .ts -> http proxy), e cada
+         * uma é tentada UMA vez.
+         *
+         * Medido no 1575711 (Dálmatas, ID morto no painel):
+         *
+         *   00:24:54.282  end-file error  .mp4
+         *   00:24:54.282  sem midia      .mkv
+         *   00:24:54.283  sem midia      .avi
+         *   00:24:54.283  sem midia      .ts
+         *   00:24:54.283  http proxy
+         *   00:24:54.783  end-file error
+         *
+         * 1,5s no total. O contador dizia "Reconectando em 5s (5/5)" — mas não
+         * houve uma única reconexão, e o texto prometia 5 segundos de espera que
+         * nunca aconteceram. `vodTriedUrls.size` conta VARIANTES de extensão, que
+         * é outra coisa: o usuário viu "5/5" e entendeu que o app estava quase
+         * desistindo, quando na verdade ele tinha acabado de queimar a lista.
+         *
+         * O contador de reconexão de verdade vive no bloco de `vod time retry`
+         * abaixo, onde a cadeia inteira é refeita com 5s de espera — e é o único
+         * lugar onde "reconectando" é verdade.
+         */
+        emit({ type: 'buffering', value: true, percent: 0 })
         void (async () => {
           const ok = await tryFallbackLoad(sourceUrl, lastStartSec)
           if (!ok) {
+            // Cadeia esgotada mas painel pode estar oscilando (404 agora, play
+            // depois — medido no 2357481 que o MPEG abriu minutos depois). Em
+            // VOD tenta a cadeia inteira de novo, 5x com 5s. Live não: live
+            // tem o próprio ciclo de unhealthy/reload.
+            if (!liveMode && sourceUrl && vodTimeRetries < STUR_VOD_MAX_TIME_RETRIES) {
+              vodTimeRetries += 1
+              const gen = loadGeneration
+              // Só mostra contador se for retry de verdade (>1). 1ª tentativa da cadeia completa não é "retry".
+              const showRetry = vodTimeRetries > 1
+              emit({ type: 'buffering', value: true, percent: 0, retry: showRetry ? vodTimeRetries : undefined, of: showRetry ? STUR_VOD_MAX_TIME_RETRIES : undefined })
+              log.warn('stur', 'vod time retry', { try: `${vodTimeRetries}/${STUR_VOD_MAX_TIME_RETRIES}` })
+              clearVodRetry()
+              vodRetryTimer = setTimeout(() => {
+                vodRetryTimer = null
+                if (gen !== loadGeneration || !running) return
+                vodTriedUrls = new Set()
+                void openUrl(mainWindow, sourceUrl, lastStartSec, lastBounds, { live: false })
+              }, STUR_VOD_RETRY_MS)
+              return
+            }
             emitFailed(
               liveMode
                 ? 'Canal indisponível no momento (offline ou ainda não começou)'
@@ -2074,6 +3212,9 @@ function observeProperties() {
 async function tryFallbackLoad(url, startSec) {
   if (fallbackBusy || !running || !url) return false
   fallbackBusy = true
+  // Modo cru falhou: vira 'direct' pra cadeia de fallback existente
+  // (variantes de extensão no VOD, .ts/http no live) valer igual pros dois.
+  if (currentLoadMode === 'raw') currentLoadMode = 'direct'
   try {
     const asTs = (u) => (/\.m3u8(\?|$)/i.test(u) ? u.replace(/\.m3u8(\?|$)/i, '.ts$1') : null)
 
@@ -2133,9 +3274,39 @@ async function tryFallbackLoad(url, startSec) {
           }
         }
       } else {
-        const variants = vodUrlVariants(url).filter((item) => item !== url)
+        /*
+         * So Variantes que ainda NAO foram tentadas, e com teto.
+         *
+         * O `vodTriedUrls` e o que fecha o ciclo: cada URL so entra no conjunto
+         * uma vez, entao `.mp4` e `.mkv` nao ficam alternando para sempre. E o
+         * teto garante que, mesmo com URLs novas aparecendo, o VOD desiste e
+         * mostra erro em vez de girar em "carregando" ate o fim dos tempos.
+         */
+        if (vodTriedUrls.size >= VOD_MAX_URL_TRIES) {
+          log.warn('stur', 'vod sem plano B — todas as URLs falharam', {
+            tentadas: vodTriedUrls.size,
+            ultima: url,
+          })
+          return false
+        }
+        const variants = vodUrlVariants(url).filter(
+          (item) => item !== url && !vodTriedUrls.has(item),
+        )
         for (const variant of variants) {
-          log.info('stur', 'vod fallback → ext')
+          if (vodTriedUrls.size >= VOD_MAX_URL_TRIES) break
+          /*
+           * Sonda ANTES de gastar uma carga. Sem isso, trocar `.mp4` por `.mkv`
+           * nao adianta nada quando o ID esta morto no painel: todas as extensoes
+           * do mesmo ID devolvem a mesma pagina 404 em HTML.
+           */
+          const temMidia = await vodUrlHasMedia(variant)
+          if (temMidia === false) {
+            log.info('stur', 'vod: URL sem midia, pulando', { tentativa: vodTriedUrls.size + 1, url: variant })
+            vodTriedUrls.add(variant)
+            continue
+          }
+          vodTriedUrls.add(variant)
+          log.info('stur', 'vod fallback → ext', { tentativa: vodTriedUrls.size, url: variant })
           if (await loadStream(variant, startSec, 'direct')) {
             sourceUrl = variant
             armLoadWatchdog(loadGeneration)
@@ -2252,17 +3423,92 @@ function buildMpvArgs(url, wid = 0) {
     '--osc=no',
     '--osd-level=0',
     '--osd-bar=no',
+
+    /*
+     * `SetCursor(NULL)` / ESCONDER O CURSOR: O MPV NAO PODE, E O CSS DO OVERLAY
+     * SO ALCANCA O QUE A JANELA DO OVERLAY ESTIVER COBRINDO.
+     *
+     * Duas opcoes que nao servem, ambas medidas nesta build:
+     *
+     * 1. O mpv 0.41.0-912 removiu `--cursor-autohide`, `--cursor-autohide-fs` e
+     *    `--cursor-autohide-delay`. Probe com `--log-file` nesta mpv.exe:
+     *
+     *      sem as opcoes          -> exit 0, log de 241 linhas
+     *      --cursor-autohide      -> exit 1, log de 1 linha
+     *      --cursor-autohide-fs   -> exit 1, log de 1 linha
+     *      --cursor-autohide-delay-> exit 1, log de 1 linha
+     *
+     *    Opcao desconhecida no mpv e FATAL, nao um warning: ele nao abre. Entao
+     *    a opcao "e so o mpv que esconde o cursor" morre aqui, com numero.
+     *
+     * 2. Electron nao tem `setCursor`. Nao existe IPC, preload ou processo
+     *    principal que mande o SO sumir o cursor de uma janela que nao e nossa —
+     *    o SO pergunta o cursor a janela que esta sob o ponteiro, e enquanto o
+     *    overlay for clique-atravesso a resposta vem de baixo.
+     *
+     * Sobra o CSS, e ele so funciona enquanto a janela do overlay for alvo do
+     * hit-test. Ver o efeito de `setOverlayIgnoreMouse` em PlayerOverlayApp.tsx:
+     * em tela cheia a janela segura o hit-test de proposito, e ai o `cursor: none`
+     * no `<html>` manda. No painel embarcado o overlay precisa ser clique-atravesso
+     * (ele cobre o catalogo), ai o SO consulta a janela de baixo e o CSS nao tem
+     * atalho — e o preco de um clique no catalogo funcionando.
+     */
     '--osd-on-seek=no',
     '--no-input-default-bindings',
     '--input-vo-keyboard=no',
-    '--vo=gpu',
-    '--hwdec=auto-safe',
+    // gpu-next: 4K DV/HDR abre (tonemapping via libplacebo). O vo=gpu antigo
+    // não decodifica Dolby Vision e o filme morria em end-file error.
+    '--vo=gpu-next',
+    '--hwdec=auto',
+    '--hdr-compute-peak=yes',
+    '--tone-mapping=auto',
     '--cache=yes',
-    liveMode ? '--demuxer-max-bytes=96MiB' : '--demuxer-max-bytes=512MiB',
-    liveMode ? '--demuxer-readahead-secs=8' : '--demuxer-readahead-secs=120',
+    /*
+     * Teto do demuxer: 96MiB nos DOIS modos. Era 512MiB no VOD.
+     *
+     * Este e o parametro que produzia o gargalho. Medido com
+     * STPLAY_GASP_TRACE=1 no Matrix (~8 Mbps):
+     *
+     *   cache  3s -> 106s -> 207s -> 265s   verdict 'enchendo' SEMPRE
+     *
+     * Sem uma unica amostra de `consome-mais-do-que-chega` e sem uma de
+     * `parado`: 207s de buffer NAO tem falta de dado, entao banda esta
+     * descartada como causa do video engasgando. E 256s de buffer a 8Mbps da
+     * exatamente o 512MiB/2 do request — o limite de bytes e o que manda, o
+     * `cache-secs=30` do perfil e ignorado no demuxer de arquivo progressivo.
+     *
+     * Encher meio gigabyte de memoria enquanto o decoder pede quadro e o que
+     * engasga a apresentacao. 96MiB (~30s) cobre o jitter de rede com folga:
+     * o sweep de `live-load-policy.cjs` mediu 50s+ de runway no mesmo painel.
+     *
+/*
+ * OS TETOS DE BYTES E READAHEAD VEM DE `vod-buffer-limits.cjs`, e nao sao
+ * escritos aqui.
+ *
+ * Estes dois numeros foram 512MiB/120 no VOD, caíram para 96MiB/30 por um
+ * raciocinio sobre um problema de apresentacao que ja tinha sido resolvido, e
+ * voltaram. O caminho vai pelo modulo porque eles precisam de tres lugares
+ * coerentes ao mesmo tempo — linha de comando no spawn, `set_property` no
+ * primeiro quadro, e perfil no IPC — e tres literais iguais sao tres chances de
+ * divergirem em silencio.
+ *
+ * A RAMAL DO VOD esta no perfil (`playback-profile.cjs`), nao aqui: em VOD o
+ * `cache-pause` e `false`, entao quem dimensiona o runway e o teto de bytes, e
+ * reenviar por `set_property` no primeiro quadro seria contender com ele.
+ */
+    '--demuxer-max-bytes=96MiB',
+    liveMode ? '--demuxer-readahead-secs=8' : `--demuxer-readahead-secs=${vodReadaheadSecs()}`,
     liveMode ? '--cache-pause-initial=no' : '--cache-pause-initial=yes',
     liveMode ? '--cache-pause-wait=1' : '--cache-pause-wait=8',
-    liveMode ? '--cache-secs=8' : '--cache-secs=30',
+    /*
+      EXPERIMENTO (volta-segundos no live): cache de 8s para 30s.
+
+      Hipotese: com `cache-secs=8` e segmento de 10s/3.5MB, qualquer
+      oscilacao da rede esvazia o cache, o mpv emite `playback-restart` e
+      zera o `time-pos` — imagem e audio voltando juntos. Se com 30s o VOLTOU
+      sumir ou espacar, a causa e fome de buffer e o numero fica.
+    */
+    liveMode && process.env.STPLAY_DEEP_CACHE === '1' ? '--cache-secs=30' : liveMode ? '--cache-secs=8' : '--cache-secs=30',
     '--volume=100',
     '--user-agent=VLC/3.0.21 LibVLC/3.0.21',
     // 10s no live, 60s no VOD. O valor importava: um socket aberto que não
@@ -2271,8 +3517,14 @@ function buildMpvArgs(url, wid = 0) {
     // ele segurava um minuto de tela parada antes de reagir.
     `--network-timeout=${networkTimeoutSecs(liveMode)}`,
     '--tls-verify=no',
-    '--no-terminal',
+    ...(process.env.STPLAY_MPV_DEBUG === '1' ? [] : ['--no-terminal']),
   ]
+  if (process.env.STPLAY_MPV_DEBUG === '1') {
+    // TRACE TEMPORARIO do demuxer (investigacao do "volta segundos" no live).
+    // Sem `--no-terminal`: ele silencia o stderr, e o pipe do scope `mpv`
+    // fica mudo mesmo com `msg-level` alto.
+    args.push('--msg-level=demux=debug')
+  }
   if (liveMode) {
     args.push(`--demuxer-lavf-o=${liveDemuxerLavfO(true)}`)
   } else if (isHls) {
@@ -2419,10 +3671,37 @@ function startRaiseTimer() {
       return
     }
     if (isSurfaceLost()) {
-      log.warn('stur', 'superficie de video perdida — reancorando', {
+      /*
+        AVISO CURTO, DETALHE SO COM PORTAO.
+
+        Este aviso dispara no BOOT normal: o mpv nasce com a janela do video
+        estacionada em -32000 e `placedKey` vazio, e `isSurfaceLost` — agora que
+        compara posicao — diz "perdida" logo no primeiro tique. Com o
+        `janelaReal`/`clienteNaTela` dentro do aviso, cada boot despejava tres
+        leituras de HWND e um bloco de numeros que ninguem lia.
+
+        Os numeros ficam no `STPLAY_BOUNDS_DEBUG`, que ja existe e ja responde
+        "por que o video cobre o catalogo". Aqui fica a pergunta, nao a resposta.
+      */
+      log.warn('stur', 'superficie de video perdida - reancorando', {
         detached: isMpvDetached(),
         videoHidden,
         placedKey: lastPlacedKey,
+        ...(process.env.STPLAY_BOUNDS_DEBUG
+          ? {
+              real: janelaReal(mpvHwnd),
+              origem: clienteNaTela(parentHwnd),
+              pedido: lastBounds
+                ? {
+                    x: lastBounds.x,
+                    y: lastBounds.y,
+                    w: lastBounds.width,
+                    h: lastBounds.height,
+                    scale: scaleFactor(),
+                  }
+                : null,
+            }
+          : null),
       })
       lastPlacedKey = ''
       showVideo(lastBounds)
@@ -2528,18 +3807,129 @@ async function openUrl(win, url, startTime = 0, bounds = null, opts = {}) {
   //
   // Antes o live tentava SÓ `direct`: `shouldTryHttpFallback(true)` era false, e
   // o proxy ficava fora da jogada por completo, não como fallback.
+  // Igual MPEG: URL CRUA direta primeiro, sem preflight, sem
+  // normalizer, sem redirect. Se o mpv abrir, acabou — o resto da cadeia
+  // (proxy/normalizer/remux) só entra se o direto falhar.
   let playUrl = null
   let usedMode = null
-  for (const mode of loadModeOrder(liveMode)) {
-    const url2 = await loadStream(url, startSec, mode)
+
+  /*
+   * Sonda a URL ORIGINAL antes de gastar um `loadfile`.
+   *
+   * `vodUrlHasMedia` existia para exatamente isto e so era chamada nas VARIANTES
+   * — o `tryFallbackLoad` sondava `.mkv`, `.avi`, `.ts`, mas a `.mp4` que o
+   * usuario pediu ia direto pro mpv sem passar por ela.
+   *
+   * O preco de pular essa etapa, medido no 1575711 (Dálmatas, ID morto):
+   *
+   *   00:24:53.735  loadfile ok  raw  .mp4
+   *   00:24:54.282  end-file error       547ms
+   *   00:24:54.289  loadfile ok  http
+   *   00:24:54.783  end-file error       494ms
+   *   00:24:54.790  loadfile ok  ffmpeg   <-- o remux nao devolve nada
+   *   00:25:33.177  no file-loaded       28.4s de espera
+   *
+   * E o ffmpeg e o pior neighbour possivel: o `loadfile` responde `ok` porque o
+   * comando foi aceito, mas o ffmpeg nao consegue abrir HTML e nunca emite
+   * `file-loaded`. O app espera o watchdog inteiro (VOD_LOAD_TIMEOUT_MS = 28s)
+   * para descobrir algo que a sondagem de 256 bytesRespondia em ~200ms.
+   *
+   * `false` = o painel RESPONDEU e nao e midia (a pagina 404 do XUI.one). AI o
+   * titulo esta indisponivel e a cadeia inteira nao vai adiantar — todas as
+   * extensoes do mesmo ID devolvem a mesma pagina.
+   *
+   * `null` = timeout/erro de rede, "nao sei". Nao condena o titulo: um servidor
+   * lento e um arquivo ausente sao coisas diferentes, e o `loadModeOrder` normal
+   * (raw -> http -> ffmpeg) roda como sempre. Quem decide se abre e o mpv, com
+   * o watchdog dele.
+   */
+  if (!liveMode) {
+    const temMidia = await vodUrlHasMedia(url)
     if (gen !== loadGeneration) {
       nextLoadSoft = false
       return null
     }
-    if (url2) {
-      playUrl = url2
-      usedMode = mode
-      break
+    if (temMidia === false) {
+      // A sondagem e um VEREDITO, nao um palpite: `false` so sai quando o painel
+      // respondeu e o corpo NAO e midia. `null` (timeout/rede) nao entra aqui.
+      vodUrlRefused = true
+      vodTriedUrls.add(url)
+      log.warn('stur', 'vod: painel devolveu pagina de erro, nao midia', {
+        url: url.slice(-60),
+        tentativa: vodTriedUrls.size,
+      })
+      // Ainda assim tenta o caminho normal. Existe painel que responde HTML no
+      // GET curto e serve os bytes certos no ffmpeg, e o `loadModeOrder` inclui
+      // o remux. O que NAO fazemos e gastar 28s de watchdog numa URL que ja
+      // sabemos ser pagina de erro.
+      const rawFirst = await loadStream(url, startSec, 'raw')
+      if (gen !== loadGeneration) {
+        nextLoadSoft = false
+        return null
+      }
+      if (rawFirst) {
+        playUrl = rawFirst
+        usedMode = 'raw'
+      } else {
+        for (const mode of loadModeOrder(liveMode)) {
+          const url2 = await loadStream(url, startSec, mode)
+          if (gen !== loadGeneration) {
+            nextLoadSoft = false
+            return null
+          }
+          if (url2) {
+            playUrl = url2
+            usedMode = mode
+            break
+          }
+        }
+      }
+      if (!playUrl || gen !== loadGeneration) {
+        if (vodUrlRefused) {
+          nextLoadSoft = false
+          log.warn('stur', 'titulo indisponivel no painel', {
+            tentativa: vodTriedUrls.size,
+            max: VOD_MAX_URL_TRIES,
+          })
+          return null
+        }
+        nextLoadSoft = false
+        log.info('stur', 'preflight negatou mas o mpv desistiu — reporta generico', {
+          tentativa: vodTriedUrls.size,
+        })
+        return null
+      }
+      currentLoadMode = usedMode
+      log.info('stur', 'load mode', { mode: usedMode, live: liveMode })
+      nextLoadSoft = false
+      armLoadWatchdog(gen)
+      startBufferPoll()
+      startRaiseTimer()
+      if (bounds) lastBounds = bounds
+      return { playUrl, mode: currentLoadMode, startSec }
+    }
+  }
+
+  const rawFirst = await loadStream(url, startSec, 'raw')
+  if (gen !== loadGeneration) {
+    nextLoadSoft = false
+    return null
+  }
+  if (rawFirst) {
+    playUrl = rawFirst
+    usedMode = 'raw'
+  } else {
+    for (const mode of loadModeOrder(liveMode)) {
+      const url2 = await loadStream(url, startSec, mode)
+      if (gen !== loadGeneration) {
+        nextLoadSoft = false
+        return null
+      }
+      if (url2) {
+        playUrl = url2
+        usedMode = mode
+        break
+      }
     }
   }
   if (playUrl) {
@@ -2553,7 +3943,7 @@ async function openUrl(win, url, startTime = 0, bounds = null, opts = {}) {
 
   nextLoadSoft = false
   armLoadWatchdog(gen)
-  if (!liveMode) startBufferPoll()
+  startBufferPoll()
   startRaiseTimer()
   if (bounds) lastBounds = bounds
   return { playUrl, mode: currentLoadMode, startSec }
@@ -2575,6 +3965,13 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
   log.info('stur', 'start', { live: opts.live === true, startTime, url: String(url).slice(0, 120) })
 
   liveMode = opts.live === true
+  /*
+   * Cada `start` e um titulo novo, entao o historico de URLs que falharam nao
+   * vale contra este. Sem esta limpeza o teto de `VOD_MAX_URL_TRIES` continuaria
+   * valendo de um filme para o outro, e o segundo titulo nem comecaria a tentar.
+   */
+  vodTriedUrls = new Set()
+  if (!liveMode) vodTriedUrls.add(url)
   livePlaybackReady = false
   playbackStable = false
   overlayPresented = false
@@ -2589,6 +3986,8 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
   // Zera o contador de canal morto: `start` é o início de uma tentativa nova,
   // e o histórico de frustração do canal anterior não vale contra este.
   liveUnhealthyLoads = 0
+  vodTimeRetries = 0
+  clearVodRetry()
 
   if (isRunning()) {
     const fast = await reload(win, url, startTime, bounds, opts)
@@ -2605,12 +4004,17 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
   videoHidden = true
   fileLoaded = false
   firstFrameBase = null
+  timePosAdvanceCount = 0
   cachePercent = 0
   clearLiveShowTimer()
   reportBufferPercent(0, { forceActive: true })
   presentLoadingShell()
 
   const gen = bumpLoadGeneration()
+  // Zera ANTES do `openUrl`: é lá que a sondagem escreve nela. Sem o reset, o
+  // veredito de um título condemnado contaminava o seguinte — e o usuário lia
+  // "não está disponível no servidor" num filme que estava lá.
+  vodUrlRefused = false
   starting = true
   // try/finally é obrigatório: ensureMpv chama koffi e win32 (prepareParent,
   // adoptMpvWindow, windowHwnd) e qualquer um deles pode lançar. Sem o finally,
@@ -2644,9 +4048,26 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
 
   const opened = await openUrl(win, url, startTime, bounds, opts)
   if (!opened) {
-    log.warn('stur', 'start failed: openUrl returned null', { live: liveMode })
     killMpv()
-    return { ok: false, error: 'Falha ao abrir stream no STUR' }
+    /*
+     * A mensagem é o produto desta ramificação.
+     *
+     * "Falha ao abrir stream no STUR" manda o usuário revisar o Wi-Fi, a URL e
+     * as configurações do player — três coisas que estão todas certas quando o
+     * painel respondeu 200 com a página de erro do título. O `vodUrlRefused`
+     * carrega o veredito da sondagem de 256 bytes, que é o único teste aqui que
+     * realmente sabe a diferença entre "não tem rede" e "esse filme não existe
+     * no servidor".
+     */
+    const error = vodUrlRefused
+      ? 'Este título não está disponível no servidor'
+      : 'Não foi possível reproduzir — o servidor não respondeu'
+    log.warn('stur', 'start failed: openUrl returned null', {
+      live: liveMode,
+      recusadoPeloPainel: vodUrlRefused,
+      error,
+    })
+    return { ok: false, error }
   }
 
   log.info('stur', 'started', {
@@ -2694,6 +4115,7 @@ async function reload(win, url, startTime = 0, bounds = null, opts = {}) {
     waitingFirstFrame = true
     reportBufferPercent(0, { forceActive: true })
   } else {
+    clearFirstFrameConfirm()
     waitingFirstFrame = false
   }
   userPausedLive = false
@@ -2703,9 +4125,25 @@ async function reload(win, url, startTime = 0, bounds = null, opts = {}) {
   stopDurationPoll()
   fileLoaded = false
   firstFrameBase = null
+  timePosAdvanceCount = 0
   if (!softLiveZap) cachePercent = 0
   clearLiveShowTimer()
+  // Zap limpa o frame velho na hora + véu de boot, sempre (sempre e
+  // igual MPEG). Quadro congelado enquanto o novo não chega era o "trava e
+  // abre só depois". Vale live, filme e série.
+  try {
+    hideVideo()
+  } catch {
+    // ignore
+  }
   if (!softLiveZap) presentLoadingShell()
+  else {
+    try {
+      overlay.sendUi({ action: 'boot' })
+    } catch {
+      // ignore
+    }
+  }
 
   const opened = await openUrl(win, url, startTime, bounds, opts)
   nextLoadSoft = false
@@ -2738,6 +4176,7 @@ function abortActiveLoad() {
   softReloadBusy = false
   releasingLiveSlot = false
   pausedForCacheSince = 0
+  clearFirstFrameConfirm()
   waitingFirstFrame = false
   clearLoadWatchdog()
   clearLiveShowTimer()
@@ -2817,6 +4256,30 @@ async function command(op, value) {
 
 function setBounds(rect) {
   if (!rect) return { ok: false }
+  // REGISTRO DO RECT QUE A JANELA PRINCIPAL MANDA.
+  //
+  // Sem esta linha nao ha como responder por que a superficie do mpv cobre o
+  // catalogo. Medido no sintoma: a HWND 'mpv' estava em (168,101) 1584x861 —
+  // a area do cliente INTEIRA, com o browse embaixo — e `placedKey` chegava
+  // vazio no aviso de superficie perdida. `lastBounds` e o que decide o
+  // tamanho, e ele vinha de algum lugar que o log nao mostrava.
+  //
+  // POR TRAS DO PORTAO: `setBounds` e chamado em toda troca de canal, em todo
+  // resize, em toda entrada e saida de tela cheia — pelo ResizeObserver. Logar
+  // incondicionalmente enche o arquivo de ruido e mascara o que importa. O
+  // mesmo desenho de portao que `STPLAY_STATS` e `STPLAY_FS_DEBUG` ja usam.
+  if (process.env.STPLAY_BOUNDS_DEBUG) {
+    log.info('stur', 'setBounds', {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      w: Math.round(rect.width),
+      h: Math.round(rect.height),
+      cliente: mainWindow ? (() => {
+        const c = mainWindow.getContentBounds()
+        return `${Math.round(c.width)}x${Math.round(c.height)}`
+      })() : null,
+    })
+  }
   placeVideo(rect)
   return { ok: true }
 }

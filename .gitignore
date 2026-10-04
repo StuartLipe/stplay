@@ -38,6 +38,16 @@ PLAYER-FIX-LOG.md
 # Design interno de spike, nunca virou documentacao do produto.
 docs/superpowers/
 
+# Credenciais de painel, so para a maquina de desenvolvimento.
+#
+# `src/dev/saved-endpoints-data.ts` e `src/dev/seed-endpoints.ts` guardam host,
+# usuario e senha dos painéis em texto puro para o login de teste. Sao consumidos
+# atras de `import.meta.env.DEV`, entao nunca entram no build — mas `git add -A`
+# colocaria a senha no historico do repositorio, que e justamente o lugar de onde
+# nao se apaga nada.
+src/dev/saved-endpoints-data.ts
+src/dev/seed-endpoints.ts
+
 # Build output do electron-builder, caso mude de pasta
 builder-debug.yml
 
