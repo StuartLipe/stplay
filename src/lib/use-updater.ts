@@ -86,8 +86,8 @@ export function useUpdater() {
       // Quem ja tem o instalador pronto ao abrir o app nao precisa de download
       // nenhum — e o unico caso em que o cartaz aparece sem download novo ter
       // acontecido nesta sessao.
-      if (s.available && s.installing === false) {
-        setToast({ phase: 'ready', version: s.shownVersion || undefined })
+      if (s.disponivelParaInstalar && s.installing === false) {
+        setToast({ phase: 'ready', version: s.versaoPronta || s.shownVersion || undefined })
       }
     })
 

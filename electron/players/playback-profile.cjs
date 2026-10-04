@@ -16,6 +16,12 @@
  * vezes comeca com buffer estranho" — sem erro, sem log, só imagem estranha.
  */
 const { networkTimeoutSecs } = require('./live-load-policy.cjs')
+const {
+  vodMaxBytes,
+  vodReadaheadSecs,
+  formatBytes,
+  descreverVodBuffer,
+} = require('./vod-buffer-limits.cjs')
 
 /**
  * Quanto buffer o live precisa — medido, nao escolhido no feeling.
@@ -78,12 +84,25 @@ function profileFor(live, softZap) {
     ]
   }
   // VOD: sem cache-pause no inicio — comeca assim que houver quadro.
+  //
+  // `demuxer-max-bytes` e `demuxer-readahead-secs` vem de `vod-buffer-limits.cjs`,
+  // e nao daqui. Eles efetivo 96MiB/30 por um tempo, num raciocinio sobre um
+  // problema de apresentacao que ja tinha sido resolvido, e o efeito colateral
+  // (buffer curto demais -> rebuffer) nao era distinguivel do sintoma antigo.
+  // Agora o padrao e o valor original, e `STPLAY_VOD_MAX_BYTES` /
+  // `STPLAY_VOD_READAHEAD_SECS` permitem o A/B sem recompilar.
+  //
+  // O perfil VOD mantem `cache-pause=false`: aqui nao ha pausing por cache, o
+  // demuxer le ate o teto de bytes. O teto que dimensiona o runway e o
+  // `demuxer-max-bytes`.
+  const maxBytes = vodMaxBytes()
+  const readaheadSecs = vodReadaheadSecs()
   return [
     ['cache-pause-initial', false],
     ['cache-pause', false],
     ['cache-pause-wait', 1],
-    ['demuxer-readahead-secs', 8],
-    ['demuxer-max-bytes', '96MiB'],
+    ['demuxer-readahead-secs', readaheadSecs],
+    ['demuxer-max-bytes', formatBytes(maxBytes)],
     ['cache-secs', 12],
     ['network-timeout', networkTimeoutSecs(false)],
   ]
@@ -123,4 +142,5 @@ module.exports = {
   LIVE_CACHE_PAUSE_WAIT,
   LIVE_READAHEAD_SECS,
   LIVE_MAX_BYTES,
+  descreverVodBuffer,
 }

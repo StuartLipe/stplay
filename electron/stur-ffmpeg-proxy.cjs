@@ -1,5 +1,5 @@
 /**
- * Proxy local com ffmpeg-static — modelo IPTV Player One (/t + pipe).
+ * Proxy local com ffmpeg-static  (url + pipe).
  * Uma instância ffmpeg por URL de destino; mpv consome via http://127.0.0.1/...
  */
 const http = require('http')
@@ -81,6 +81,77 @@ function tokenOk(incoming) {
 
 function httpRecoveryArgs() {
   return ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2']
+}
+
+/**
+ * Remux rápido pro player MPEG (abre na hora).
+ *
+ * O gargalo medido: o <video> só dá o 1º frame quando o 1º fragmento fmp4
+ * fecha. Com frag de 500ms + probesize/analyzeduration default (o ffmpeg
+ * fareja MBs antes de cuspir o moov), o 1º byte útil demorava segundos.
+ * Aqui: fareja pouco (1MB / 1s), fragmento curto (200ms), flush por pacote
+ * e timeout de rede curto (4s) pra cair rápido pro próximo motor em vez de
+ * rodar 15s num painel morto.
+ */
+function buildFastMpegArgs(targetUrl, startSec = 0) {
+  const args = [
+    '-nostdin',
+    '-hide_banner',
+    '-loglevel',
+    'warning',
+    '-fflags',
+    'nobuffer+discardcorrupt',
+    '-flags',
+    'low_delay',
+    '-probesize',
+    '1048576',
+    '-analyzeduration',
+    '1000000',
+    '-user_agent',
+    IPTV_UA,
+    '-rw_timeout',
+    '4000000',
+    ...httpRecoveryArgs(),
+  ]
+  if (startSec > 0) {
+    args.push('-noaccurate_seek', '-ss', String(startSec))
+  }
+  let origin = ''
+  try {
+    origin = new URL(targetUrl).origin
+  } catch {
+    origin = ''
+  }
+  if (origin) {
+    args.push('-headers', `Referer: ${origin}/\r\n`)
+  }
+  args.push('-i', targetUrl)
+  args.push(
+    '-map',
+    '0:v:0?',
+    '-map',
+    '0:a:0?',
+    '-c:v',
+    'copy',
+    '-c:a',
+    'copy',
+    '-bsf:a',
+    'aac_adtstoasc',
+    '-avoid_negative_ts',
+    'make_non_negative',
+    '-max_muxing_queue_size',
+    '512',
+    '-flush_packets',
+    '1',
+    '-f',
+    'mp4',
+    '-movflags',
+    'frag_keyframe+empty_moov+default_base_moof',
+    '-frag_duration',
+    '200000',
+    'pipe:1',
+  )
+  return args
 }
 
 function buildPassthroughArgs(targetUrl, startSec = 0) {
@@ -229,7 +300,7 @@ function stopOthers(exceptTarget) {
   }
 }
 
-function startFfmpegStream(targetUrl, startSec, res, fresh) {
+function startFfmpegStream(targetUrl, startSec, res, fresh, opts = {}) {
   if (!FFMPEG_PATH) {
     res.writeHead(503)
     res.end('ffmpeg-static indisponível')
@@ -240,6 +311,8 @@ function startFfmpegStream(targetUrl, startSec, res, fresh) {
 
   // Reusa pipe quente (mesmo target, sem seek e sem forçar novo).
   // Retry após falha pede fresh=1 pra não reaproveitar proc preso.
+  // Pipe quente vale pros dois modos: o bytes do remux rápido e do
+  // normal são o mesmo fmp4 — o player só quer o 1º frame cedo.
   if (!fresh && startSec === 0) {
     const warm = ffmpegPerTarget.get(targetUrl)
     if (warm && warm.proc && warm.proc.exitCode === null && warm.proc.killed !== true && warm.doorvoer) {
@@ -251,7 +324,7 @@ function startFfmpegStream(targetUrl, startSec, res, fresh) {
   closeFfmpegForTarget(targetUrl)
   evictOldestWarm()
 
-  const args = buildPassthroughArgs(targetUrl, startSec)
+  const args = opts.fast ? buildFastMpegArgs(targetUrl, startSec) : buildPassthroughArgs(targetUrl, startSec)
   const ffmpeg = spawn(FFMPEG_PATH, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
 
   let stderr = ''
@@ -386,7 +459,8 @@ function ensureStarted() {
 
       const startSec = Math.max(0, Number(incoming.searchParams.get('start') || 0) || 0)
       const fresh = incoming.searchParams.get('fresh') === '1'
-      startFfmpegStream(target, startSec, res, fresh)
+      const fast = incoming.searchParams.get('fast') === '1'
+      startFfmpegStream(target, startSec, res, fresh, { fast })
     })
 
     httpServer.once('error', reject)
@@ -403,10 +477,11 @@ function ensureStarted() {
   })
 }
 
-async function wrapUrl(remoteUrl, startSec = 0, fresh = false) {
+async function wrapUrl(remoteUrl, startSec = 0, fresh = false, opts = {}) {
   const base = await ensureStarted()
   const start = Math.max(0, Math.round(startSec * 1000) / 1000)
-  return `${base}/f/${encodeTarget(remoteUrl)}?start=${start}${fresh ? '&fresh=1' : ''}&t=${PROXY_TOKEN}`
+  const fast = opts.fast === true || fresh === 'fast'
+  return `${base}/f/${encodeTarget(remoteUrl)}?start=${start}${fresh === true ? '&fresh=1' : ''}${fast ? '&fast=1' : ''}&t=${PROXY_TOKEN}`
 }
 
 function stop() {

@@ -28,6 +28,39 @@ const fs = require('fs')
 
 const plog = require('./players/player-log.cjs')
 
+/**
+ * Versao do APP, e nao a do Electron.
+ *
+ * `app.getVersion()` em app nao empacotado devolve a versao do proprio Electron:
+ * medido em dev, a pagina de Novidades escrevia "instalada 39.8.10" com o
+ * `package.json` em 1.0.3. Empacotado o `getVersion()` acerta, porque o
+ * `resources/app.asar` traz o `package.json` do produto — mas a pagina nao pode
+ * mostrar um numero de build do runtime como se fosse a versao que a pessoa
+ * instalou.
+ *
+ * `path.join(__dirname, '..', 'package.json')` funciona nos dois casos: no
+ * empacotado o `__dirname` esta dentro do asar e o `package.json` esta na raiz
+ * dele ao lado de `electron/`. Leitura tolerante a falha — se um dia o arquivo
+ * nao estiver la, o `getVersion()` ainda da um numero, que e melhor do que
+ * derrubar a tela de atualizacoes.
+ */
+let versaoEmCache = null
+function versaoDoApp() {
+  if (versaoEmCache) return versaoEmCache
+  try {
+    const bruto = fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')
+    const pkg = JSON.parse(bruto.replace(/^\uFEFF/, ''))
+    if (pkg && typeof pkg.version === 'string' && pkg.version) {
+      versaoEmCache = pkg.version
+      return versaoEmCache
+    }
+  } catch {
+    // Cai no `getVersion()` abaixo. Nao e motivo para derrubar a tela.
+  }
+  versaoEmCache = app.getVersion()
+  return versaoEmCache
+}
+
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 const STATE_FILE = 'updater-state.json'
 
@@ -211,10 +244,9 @@ function ligarEventos(up) {
   up.on('update-downloaded', (info) => {
     plog.info('updater', 'update-downloaded', { version: info && info.version })
     /*
-     * `shownVersion` e o que impede o cartaz perpetuo. Uma vez mostrado para
-     * esta versao, nao mostra de novo — mesmo que a pessoa feche o app sem
-     * reiniciar. Ela recebe a atualizacao no proximo boot de todo jeito, por
-     * causa do `autoInstallOnAppQuit`.
+     * `aguardandoInstalacao` e a verdade sobre "ha instalador pronto", e ela
+     * precisa sobreviver ao restart: e o que a caixa de "reiniciar" do menu le
+     * depois que o cartaz de 10 s some.
      */
     const estado = lerEstado()
     const versao = String(info.version)
@@ -223,7 +255,11 @@ function ligarEventos(up) {
       version: versao,
       firstTime: estado.shownVersion !== versao,
     })
-    if (estado.shownVersion !== versao) gravarEstado({ shownVersion: versao })
+    gravarEstado({
+      aguardandoInstalacao: true,
+      aguardandoVersao: versao,
+      ...(estado.shownVersion !== versao ? { shownVersion: versao } : null),
+    })
   })
 
   up.on('error', (error) => {
@@ -321,20 +357,25 @@ function instalar() {
   try {
     instalando = true
     plog.info('updater', 'quitAndInstall solicitado')
+    // O instalador assume daqui em diante; se sobrar resquicio no disco, o
+    // proximo boot mostraria a caixa de reiniciar para um pacote velho.
+    gravarEstado({ aguardandoInstalacao: false, aguardandoVersao: null })
     /*
-     * `isSilent` = false: o instalador do NSIS aparece e PERGUNTA.
+     * `isSilent` = TRUE. O instalador roda sem wizard e sem perguntar nada: e o
+     * comportamento de Discord, que e o que foi pedido.
      *
-     * Era `true`, e o dono reclamou — a intencao original era "instalar e
-     * pronto", mas o efeito e trocar uma atualizacao por 145 MB sem a pessoa
-     * decidir nada. A confirmacao do proprio instalador, com a barra e o
-     * botao, e o que da a sensacao de controle que o cartaz promete e nao
-     * entrega.
+     * Era `false`, que no electron-builder com `oneClick: false` significa
+     * "abrir o assistente do NSIS". E o que produzia a caixa de setup inteira a
+     * cada atualizacao: barra de progresso, escolha de pasta, botoes. Pior,
+     * aquele `oneClick: false` tambem desliga o `allowToChangeInstallationDirectory`
+     * efetivo no fluxo silencioso, entao o NSIS caia no caminho de primeira
+     * instalacao e perguntava de novo — dai a sensacao de "instalar o app de novo".
      *
-     * `isForceRunAfter` = false tambem, de proposito: com `isSilent: false` quem
-     * decide o `autoRunAppAfterInstall` (default true) e o proprio NSIS. Passar
-     * `true` aqui ignoraria essa preferencia.
+     * `autoInstallOnAppQuit` segue `false`: quem fecha o app sem querer a
+     * atualizacao NAO deve instalar sozinho. O silencio aqui e so para quem
+     * clicou em "Reiniciar agora", que ja decidiu.
      */
-    setImmediate(() => up.quitAndInstall(false, false))
+    setImmediate(() => up.quitAndInstall(true, false))
     return { ok: true }
   } catch (error) {
     instalando = false
@@ -353,10 +394,28 @@ function registerUpdaterIpc() {
       packaged: app.isPackaged,
       portable: ehPortatil(),
       dev: updaterErro === 'dev',
-      current: app.getVersion(),
+      current: versaoDoApp(),
       lastCheck: estado.ultimoCheck || null,
       shownVersion: estado.shownVersion || null,
-      available: Boolean(up && up.downloadedUpdate),
+      /*
+       * `disponivelParaInstalar` vem do ARQUIVO DE ESTADO, nao de
+       * `up.downloadedUpdate`.
+       *
+       * Era `Boolean(up && up.downloadedUpdate)`, e isso quebrava em dois casos
+       * que sao exatamente os que o dono reclamou:
+       *
+       *   1. o renderer chama `status()` logo apos o evento `downloaded`. Se o
+       *      `carregarAutoUpdater()` ainda nao tiver rodado nesse processo — ou
+       *      tiver devolvido `null` por `!app.isPackaged` — o resultado e
+       *      `false`, a caixa de "reiniciar" nao acende, e so reaparece quando a
+       *      pessoa clica em "Verificar agora" e um check novo roda.
+       *
+       *   2. `downloadedUpdate` e do objeto em memoria. Depois de um restart o
+       *      objeto e recriado vazio, mas o instalador continua em `pending` no
+       *      disco. O estado em disco e o que sobrevive.
+       */
+      disponivelParaInstalar: Boolean(estado.aguardandoInstalacao),
+      versaoPronta: estado.aguardandoInstalacao ? estado.aguardandoVersao || null : null,
       installing: instalando,
     }
   })

@@ -42,7 +42,7 @@ function extinfName(line: string): string {
   return line.trim()
 }
 
-/** Igual ao IPTV Expert: o caminho da URL define se é filme, série ou ao vivo. */
+/** O caminho da URL define se é filme, série ou ao vivo. */
 export function inferKind(group: string, name: string, url = ''): ContentKind {
   if (/\/series\//i.test(url)) return 'series'
   if (/\/movie\//i.test(url)) return 'movie'

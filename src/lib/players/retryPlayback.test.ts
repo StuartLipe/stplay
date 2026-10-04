@@ -123,17 +123,30 @@ test('does not hot-reload STUR after a failed event — process may already be d
 //
 // A classe existe para o player em TELA CHEIA, onde o video tem que ocupar a
 // janela inteira. No painel dividido o shell tem que continuar visivel.
-test('retry em tela cheia (nao embedded) recoloca a chrome', () => {
-  assert.equal(shouldRestorePlayerChrome({ embedded: false }), true)
+//
+// A guarda e `nao-embedded E em tela cheia` — as duas. Com so a primeira, o
+// zape de live (que tem `embedded` e roda retry automatico) escondia o shell,
+// o grid perdia a coluna da lista e o painel do video esticava ate virar a
+// janela toda. Medido no canal A Fazenda as 01:33.
+test('retry em tela cheia (nao embedded + isFs) recoloca a chrome', () => {
+  assert.equal(shouldRestorePlayerChrome({ embedded: false, isFs: true }), true)
 })
 
 test('retry embedded NAO pode recolocar a chrome', () => {
-  assert.equal(shouldRestorePlayerChrome({ embedded: true }), false)
+  assert.equal(shouldRestorePlayerChrome({ embedded: true, isFs: true }), false)
 })
 
-test('embedded ausente assume tela cheia (o padrao do Player cheio)', () => {
-  assert.equal(shouldRestorePlayerChrome({}), true)
-  assert.equal(shouldRestorePlayerChrome({ embedded: undefined }), true)
+// A regressao do live: embedded, JANELA normal, zape com retry automatico.
+test('embedded fora de tela cheia NAO recoloca a chrome (o bug do live)', () => {
+  assert.equal(shouldRestorePlayerChrome({ embedded: true, isFs: false }), false)
+})
+
+// Sem `isFs` a guarda nao sabe, e o padrao e NAO esconder: escondido sem
+// motivo e o estado que lasted o resto da sessao.
+test('isFs ausente nao recoloca a chrome (falhar fechado)', () => {
+  assert.equal(shouldRestorePlayerChrome({ embedded: false }), false)
+  assert.equal(shouldRestorePlayerChrome({}), false)
+  assert.equal(shouldRestorePlayerChrome({ embedded: undefined }), false)
 })
 
 test('o retry sempre pede chrome; quem decide embedded e quem sabe', () => {

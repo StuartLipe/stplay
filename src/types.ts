@@ -58,7 +58,7 @@ export type ContentDetails = {
   cover?: string
 }
 
-export type PlaybackEngine = 'auto' | 'internal' | 'libmpv' | 'mpv' | 'mpv-one' | 'stur' | 'vlc' | 'mpc'
+export type PlaybackEngine = 'auto' | 'internal' | 'libmpv' | 'mpv' | 'mpv-one' | 'stur' | 'mpeg' | 'vlc' | 'mpc'
 
 export type FontSizeSetting = 'small' | 'default' | 'medium' | 'large' | 'xlarge'
 export type DensitySetting = 'compact' | 'cozy' | 'comfortable'

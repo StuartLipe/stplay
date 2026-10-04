@@ -66,7 +66,7 @@ const PLAYER_MIGRATE_V13_KEY = 'sturplay.player-engine-v13'
 
 function normalizeSettings(raw: Partial<AppSettings> & { player?: string }): AppSettings {
   const rawPlayer = String(raw.player || '')
-  const valid = new Set(['auto', 'internal', 'libmpv', 'mpv', 'mpv-one', 'stur', 'vlc', 'mpc'])
+  const valid = new Set(['auto', 'internal', 'libmpv', 'mpv', 'mpv-one', 'stur', 'mpeg', 'vlc', 'mpc'])
   let player: AppSettings['player'] = valid.has(rawPlayer) ? (rawPlayer as AppSettings['player']) : DEFAULT_SETTINGS.player
 
   // v8: Shaka e MPV saíram — quem estava neles vai para o player interno
@@ -111,7 +111,7 @@ function normalizeSettings(raw: Partial<AppSettings> & { player?: string }): App
     // ignore
   }
 
-  // v12: filmes no mpv por padrão (modelo IPTV Player One); ao vivo continua interno
+  // v12: filmes no mpv por padrão; ao vivo continua interno
   try {
     if (!localStorage.getItem(PLAYER_MIGRATE_V12_KEY)) {
       localStorage.setItem(PLAYER_MIGRATE_V12_KEY, '1')
@@ -139,7 +139,7 @@ function normalizeSettings(raw: Partial<AppSettings> & { player?: string }): App
     // ignore
   }
 
-  if (player !== 'auto' && player !== 'internal' && player !== 'stur') player = 'auto'
+  if (player !== 'auto' && player !== 'internal' && player !== 'stur' && player !== 'mpeg') player = 'auto'
 
   const themes = new Set(['dark', 'midnight', 'custom', 'amoled', 'ocean', 'slate'])
   const theme = themes.has(String(raw.theme)) ? (raw.theme as AppSettings['theme']) : DEFAULT_SETTINGS.theme

@@ -97,7 +97,7 @@ function findPlayerOneMpv() {
 }
 
 function findSturMpv() {
-  // Mesmo binário do IPTV Player One quando instalado — mesma velocidade de decode/abertura.
+  // Mesmo binario do mpv empacotado — mesma velocidade de decode/abertura.
   const one = findPlayerOneMpv()
   if (one) return one
   const bundled = fileIfExists(path.join(process.resourcesPath || '', 'mpv', 'mpv.exe'))

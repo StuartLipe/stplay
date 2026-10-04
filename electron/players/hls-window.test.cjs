@@ -60,6 +60,68 @@ test('painel deslizando a sequencia traz os ultimos d como conteudo novo', () =>
   assert.equal(st.segmentos[5].uri, `/hls/tok-b-208-5`)
 })
 
+test('painel deslizando 2+ de uma vez nao duplica numero de sequencia', () => {
+  // REGRESSAO do "ao vivo volta segundos": com `d >= 2` o loop publicava
+  // `ultimo + 1` para todos os segmentos novos, e a janela saia com numero
+  // repetido — medido no ar: `[6,7,8,9,10,10,11,12]`. Numero duplicado num
+  // manifesto HLS e indefinido para o demuxer: o mpv tocava o repetido e zerava
+  // o `time-pos`.
+  const st = createWindowState({ windowSize: 8 })
+  alinhar(st, painelFalso(100, 'a')) // seq 1..6 (cauda de 6)
+  const r = alinhar(st, painelFalso(102, 'b')) // deslizou 2
+  assert.equal(r.novos, 2)
+  const seqs = st.segmentos.map((s) => s.seq)
+  assert.equal(new Set(seqs).size, seqs.length, `sequencia duplicada: ${seqs.join(',')}`)
+  for (let i = 1; i < seqs.length; i++) {
+    assert.equal(seqs[i], seqs[i - 1] + 1, `sequencia quebrou em ${i}: ${seqs.join(',')}`)
+  }
+})
+
+test('painel deslizando 3 de uma vez mantem janela contigua', () => {
+  const st = createWindowState({ windowSize: 8 })
+  alinhar(st, painelFalso(100, 'a'))
+  alinhar(st, painelFalso(103, 'b')) // deslizou 3
+  const seqs = st.segmentos.map((s) => s.seq)
+  assert.equal(new Set(seqs).size, seqs.length, `sequencia duplicada: ${seqs.join(',')}`)
+  for (let i = 1; i < seqs.length; i++) {
+    assert.equal(seqs[i], seqs[i - 1] + 1, `sequencia quebrou em ${i}: ${seqs.join(',')}`)
+  }
+})
+
+test('sequencia do painel regredindo marca quebra e emite DISCONTINUITY', () => {
+  // Encoder do painel reiniciou: seq 90 -> 7, medido no ar. Sem a tag o
+  // demuxer zera o relogio e toca tudo de novo (imagem e audio voltando).
+  const st = createWindowState({ windowSize: 8 })
+  alinhar(st, painelFalso(90, 'a'))
+  const antes = st.segmentos.length
+  const r = alinhar(st, painelFalso(7, 'b')) // regrediu
+  assert.ok(r.novos >= 1, 'conteudo novo entra mesmo com regressao')
+  assert.equal(st.segmentos.length, antes + r.novos - (antes + r.novos > 8 ? antes + r.novos - 8 : 0))
+  const manifesto = escreverManifesto(st, (seq) => `http://127.0.0.1:1/s/${seq}.ts`)
+  assert.ok(manifesto.includes('#EXT-X-DISCONTINUITY'), 'manifesto tem a tag de quebra')
+})
+
+test('salto alem da janela marca quebra sem duplicar sequencia', () => {
+  const st = createWindowState({ windowSize: 6 })
+  alinhar(st, painelFalso(100, 'a'))
+  alinhar(st, painelFalso(200, 'b')) // d=100, bem alem da janela
+  const seqs = st.segmentos.map((s) => s.seq)
+  assert.equal(new Set(seqs).size, seqs.length, `sequencia duplicada: ${seqs.join(',')}`)
+  const manifesto = escreverManifesto(st, (seq) => `http://127.0.0.1:1/s/${seq}.ts`)
+  assert.ok(manifesto.includes('#EXT-X-DISCONTINUITY'), 'salto grande tambem e quebra')
+})
+
+test('quebra sai do manifesto quando o segmento sai da janela', () => {
+  const st = createWindowState({ windowSize: 4 })
+  alinhar(st, painelFalso(90, 'a'))
+  alinhar(st, painelFalso(7, 'b')) // quebra marcada
+  let manifesto = escreverManifesto(st, (seq) => `http://127.0.0.1:1/s/${seq}.ts`)
+  assert.ok(manifesto.includes('#EXT-X-DISCONTINUITY'))
+  for (let i = 0; i < 8; i++) alinhar(st, painelFalso(8 + i, `c${i}`))
+  manifesto = escreverManifesto(st, (seq) => `http://127.0.0.1:1/s/${seq}.ts`)
+  assert.ok(!manifesto.includes('#EXT-X-DISCONTINUITY'), 'quebra antiga nao polui para sempre')
+})
+
 test('sequencias do painel mudam a cada poll, mas a nossa fica estavel e contigua', () => {
   // Este e o cenario real medido: 24 polls, 24 janelas distintas, 0 sobreposicao.
   const st = createWindowState({ windowSize: 6 })

@@ -1,5 +1,6 @@
 import type { PlaybackEngine } from '../../types'
 import { createInternalPlayer } from './internalPlayer'
+import { createMpegPlayer } from './mpegPlayer'
 import { createLibmpvPlayer } from './libmpvPlayer'
 import { createMpvExePlayer } from './mpvExePlayer'
 import { createMpvOnePlayer } from './mpvOnePlayer'
@@ -27,6 +28,7 @@ export type PlayerManagerOptions = {
 
 const factories: Record<PlayerEngine, () => PlayerBackend> = {
   internal: () => createInternalPlayer(() => null),
+  mpeg: () => createMpegPlayer(),
   libmpv: createLibmpvPlayer,
   mpv: createMpvExePlayer,
   'mpv-one': createMpvOnePlayer,
@@ -35,11 +37,28 @@ const factories: Record<PlayerEngine, () => PlayerBackend> = {
   mpc: createMpcPlayer,
 }
 
+/**
+ * Quanto tempo a reconciliacao mede depois de um gatilho.
+ *
+ * Cobre a animacao da janela, que dura ~250 ms no Windows quando a janela sai da
+ * tela cheia. 1200 ms folga com folga: se algo estourar esse orcamento, o proximo
+ * gatilho re-dispara e o laco recomeca.
+ */
+const RECONCILIAR_MS = 1200
+/** 33 ms = ~30 Hz. O olho nao distingue de 60, e o IPC cai pela metade. */
+const RECONCILIAR_HZ_MS = 33
+
 export class PlayerManager {
   private active: PlayerBackend | null = null
   private activeEngine: PlayerEngine | null = null
   private unsub: (() => void) | undefined
   private stopBounds: (() => void) | undefined
+  /** Desinscreve dos gatilhos de bounds e para o laco de reconciliacao. */
+  private stopReconcile: (() => void) | undefined
+  /** Cancela o `requestAnimationFrame` em voo da reconciliacao. */
+  private reconcileCancel: (() => void) | undefined
+  /** Ultimo rect publicado, para nao repetir IPC quando nada mudou. */
+  private ultimoBoundsEnviado = ''
   private readyTimer = 0
   private cancelled = false
   /** Invalida play() antigo quando o usuário troca canal rápido. */
@@ -51,6 +70,7 @@ export class PlayerManager {
   constructor(opts: PlayerManagerOptions) {
     this.opts = opts
     factories.internal = () => createInternalPlayer(opts.getVideo)
+    factories.mpeg = () => createMpegPlayer()
   }
 
   private emit(event: PlayerEvent) {
@@ -68,6 +88,7 @@ export class PlayerManager {
     this.unsub = undefined
     this.stopBounds?.()
     this.stopBounds = undefined
+    this.stopReconcile?.()
     stopWatchingVideoBounds()
     const wasNative = this.activeEngine === 'libmpv' || this.activeEngine === 'mpv' || this.activeEngine === 'mpv-one' || this.activeEngine === 'stur'
     if (this.active) {
@@ -92,6 +113,7 @@ export class PlayerManager {
     this.unsub = undefined
     this.stopBounds?.()
     this.stopBounds = undefined
+    this.stopReconcile?.()
     stopWatchingVideoBounds()
     this.active = null
     this.activeEngine = null
@@ -120,20 +142,153 @@ export class PlayerManager {
 
   private bindBounds(embedded: boolean) {
     if (!embedded) return
+    if (!this.opts.getBoundsElement()) return
+    this.stopBounds = watchVideoBounds(this.opts.getBoundsElement(), (rect) => {
+      this.empurrar(rect)
+    })
+    this.ligarReconciliacao()
+    this.empurrarMedido()
+  }
+
+  /**
+   * Liga os gatilhos que invalidam o retangulo sem que o elemento mude, e a
+   * reconciliacao que fecha a janela de animacao.
+   *
+   * POR QUE UM EVENTO SO NAO CHEGA. O `watchVideoBounds` publica quando o
+   * ELEMENTO muda de tamanho, e o `resize` cobre a janela redimensionada. Fica
+   * um buraco entre o evento e o instante em que o numero estabiliza, porque a
+   * janela anima:
+   *
+   *   1. `win.setFullScreen(false)` dispara `leave-full-screen` no main;
+   *   2. o Electron ainda esta animando a janela de volta ao modo janela;
+   *   3. o `setBounds` chega, e o retangulo de tela cheia ainda e o que mede;
+   *   4. a animacao acaba, o layout assenta, e o numero final NUNCA e publicado,
+   *      porque nenhum evento sobrou para publica-lo.
+   *
+   * O main fica com o retangulo obsoleto, e o `refreshLayout()` - que roda a
+   * cada tique do `raiseTimer` - reposiciona com esse numero velho. O video
+   * cobre a janela inteira.
+   *
+   * MEDIDO. O `raiseTimer` repetia `bounds { x: 597, y: 8, w: 972, h: 837 }` a
+   * cada 1.5 s, num painel que a sonda mediu em 668x709. `597 + 972 = 1569`,
+   * acima da largura do cliente (1384): o retangulo era de outra janela, de outra
+   * monitor.
+   *
+   * A saida e reconciliar por TEMPO, nao por evento: apos qualquer gatilho,
+   * medir e enviar a cada frame por `RECONCILIAR_MS`. O dedup em `empurrar` corta
+   * o trafego de IPC assim que o retangulo assenta - o laco roda, mede, e nao
+   * manda nada.
+   */
+  private ligarReconciliacao() {
+    this.stopReconcile?.()
+    const gatilhos: Array<() => void> = []
+
+    const on = (
+      alvo: Window | Document,
+      tipo: string,
+      cb: EventListener,
+      opts?: AddEventListenerOptions,
+    ) => {
+      alvo.addEventListener(tipo, cb, opts)
+      gatilhos.push(() => alvo.removeEventListener(tipo, cb, opts))
+    }
+
+    /*
+     * `onWindowMoved` vem do main: o renderer nao descobre que a janela foi
+     * arrastada, porque `getBoundingClientRect` e relativo ao viewport da janela
+     * e `x/y/w/h` ficam identicos. O `ResizeObserver` tambem nao dispara, porque
+     * o elemento nao mudou de tamanho.
+     */
+    const offMoved = window.sturplay?.player?.onWindowMoved?.(() => this.reconciliar())
+    if (offMoved) gatilhos.push(() => offMoved())
+
+    /*
+     * `onFullscreenChanged` vem do `enter-full-screen`/`leave-full-screen` do
+     * main. E o caminho do fullscreen NATIVO, que e o que o app usa - o
+     * `fullscreenchange` do documento nao dispara para ele.
+     */
+    const offFs = window.sturplay?.window?.onFullscreenChanged?.(() => this.reconciliar())
+    if (offFs) gatilhos.push(() => offFs())
+
+    // `resize` e `fullscreenchange` ficam tambem por conta propria: nao
+    // dependem de IPC nenhum, e o overlay roda numa janela separada em alguns
+    // caminhos.
+    on(window, 'resize', () => this.reconciliar())
+    on(document, 'fullscreenchange', () => this.reconciliar())
+
+    this.stopReconcile = () => {
+      for (const g of gatilhos) {
+        try {
+          g()
+        } catch {
+          // ignore
+        }
+      }
+      this.reconcileCancel?.()
+      this.reconcileCancel = undefined
+      this.stopReconcile = undefined
+    }
+  }
+
+  /**
+   * Mede o elemento ATUAL e envia, se mudou.
+   *
+   * O elemento e re-buscado a cada medicao, nunca guardado: durante o fullscreen
+   * o `player-wrap` pode ser remontado, e um `el` capturado antes disso vira um no
+   * detached - o `getBoundingClientRect` dele devolve 0x0, o guarda de 32px
+   * descarta, e nenhum bounds sai. Esse era o modo de falha silencioso.
+   */
+  private empurrarMedido() {
     const el = this.opts.getBoundsElement()
     if (!el) return
-    this.stopBounds = watchVideoBounds(el, (rect) => {
-      void syncOverlayBounds(rect)
+    const r = el.getBoundingClientRect()
+    if (r.width < 32 || r.height < 32) return
+    this.empurrar({
+      x: Math.round(r.left),
+      y: Math.round(r.top),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
     })
-    const rect = el.getBoundingClientRect()
-    if (rect.width >= 32) {
-      void syncOverlayBounds({
-        x: Math.round(rect.left),
-        y: Math.round(rect.top),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      })
+  }
+
+  /** Envia, ignorando retangulo identico ao ultimo: dedup de trafego IPC. */
+  private empurrar(rect: VideoRect) {
+    const chave = `${rect.x},${rect.y},${rect.width},${rect.height}`
+    if (chave === this.ultimoBoundsEnviado) return
+    this.ultimoBoundsEnviado = chave
+    void syncOverlayBounds(rect)
+  }
+
+  /**
+   * Mede e envia por `RECONCILIAR_MS`, a ~30 Hz.
+   *
+   * Cobre a animacao da janela: o evento chega no COMECO e o numero so
+   * estabiliza no FIM. 30 Hz basta porque o olho nao distingue de 60, e o IPC
+   * cai pela metade. O dedup em `empurrar` e o que mantem o trafego em zero
+   * quando o retangulo ja assentou.
+   */
+  private reconciliar() {
+    this.reconcileCancel?.()
+    const limite = Date.now() + RECONCILIAR_MS
+    let ultimaMedida = 0
+    let id = 0
+    const passo = (agora: number) => {
+      if (Date.now() > limite) {
+        this.reconcileCancel = undefined
+        return
+      }
+      if (agora - ultimaMedida >= RECONCILIAR_HZ_MS) {
+        ultimaMedida = agora
+        this.empurrarMedido()
+      }
+      id = requestAnimationFrame(passo)
     }
+    this.reconcileCancel = () => {
+      if (id) cancelAnimationFrame(id)
+      id = 0
+      this.reconcileCancel = undefined
+    }
+    id = requestAnimationFrame(passo)
   }
 
   /** Corre backend.start contra o orçamento de timeout; 'timeout' se estourar. */
@@ -260,12 +415,13 @@ export class PlayerManager {
     const playGen = ++this.playGen
     this.cancelled = false
 
-    const auto = preference === 'auto'
     const chain: PlayerEngine[] =
       preference === 'auto'
         ? autoChainFor(startOpts.live)
         : preference === 'internal'
           ? ['internal']
+          : preference === 'mpeg'
+            ? ['mpeg']
           : preference === 'libmpv'
             ? ['libmpv']
             : preference === 'mpv'
@@ -277,6 +433,7 @@ export class PlayerManager {
                   : preference === 'vlc'
                     ? ['vlc']
                     : ['mpc']
+    const auto = preference === 'auto' || chain.length > 1
 
     const targetEngine = chain[0]
     const canSturReload = canHotReloadStur({

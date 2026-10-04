@@ -30,6 +30,13 @@ export type PlayerEventPayload = {
   value?: number | boolean
   percent?: number
   reason?: string
+  retry?: number
+  of?: number
+  /**
+   * Veredito da sondagem de VOD. `'indisponivel'` = o painel respondeu que nao
+   * tem o arquivo; a partir dai o `percent` e curva de relogio, nao progresso.
+   */
+  motivo?: string
 }
 
 /**
@@ -49,7 +56,13 @@ export type UpdaterStatus = {
   current: string
   lastCheck: number | null
   shownVersion: string | null
-  available: boolean
+  /**
+   * Ha instalador baixado esperando? Vem do estado em disco, nao do objeto do
+   * `electron-updater`: esse objeto e recriado a cada boot e perderia a info.
+   */
+  disponivelParaInstalar: boolean
+  /** Versao do instalador pronto, para o texto da caixa de reiniciar. */
+  versaoPronta: string | null
   installing: boolean
 }
 
@@ -120,6 +133,18 @@ declare global {
         onOverlayMeta: (callback: (payload: Record<string, unknown>) => void) => () => void
         onOverlayAction?: (callback: (payload: Record<string, unknown>) => void) => () => void
         onOverlayUi?: (callback: (payload: Record<string, unknown>) => void) => () => void
+        /**
+         * A JANELA mudou de posicao (arrastada, ou trocou de monitor).
+         *
+         * O renderer nao detecta isso pelo rect: `getBoundingClientRect` e
+         * relativo ao viewport da janela, entao `x/y/w/h` ficam identicos antes e
+         * depois, e o `ResizeObserver` nao dispara porque o elemento nao mudou
+         * de tamanho. Quem sabe do evento e o main.
+         *
+         * Quem consome precisa disregard o cache de duplicata do
+         * `overlayBridge` — a chave do rect e a mesma antes e depois.
+         */
+        onWindowMoved?: (callback: () => void) => () => void
       }
       window?: {
         setFullscreen: (enabled: boolean) => Promise<{ ok: boolean; fullscreen?: boolean }>

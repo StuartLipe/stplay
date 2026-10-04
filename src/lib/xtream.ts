@@ -1,6 +1,7 @@
 import type { Channel, ContentDetails, Playlist, SeriesInfo, ShortEpg, XtreamProfile } from '../types'
 import { parseM3u } from './m3u'
 import { matchLiveStream } from './live-stream-match'
+import { dedupeEpisodesByNumber } from './dedupe-episodes'
 import { fetchJson, fetchText, PANEL_LARGE_TIMEOUT_MS } from './proxy'
 import {
   coalesceSeriesInfoLoad,
@@ -291,7 +292,7 @@ function xtreamBase(playlist: Playlist) {
   return normalizeHost(playlist.xtream.host)
 }
 
-/** Mesmo formato do IPTV Expert — catálogo completo de uma vez. */
+/** Catálogo completo de uma vez. */
 function xtreamM3uUrl(playlist: Playlist, output: 'ts' | 'm3u8' = 'ts') {
   const { username, password } = playlist.xtream!
   return `${xtreamBase(playlist)}/get.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&type=m3u_plus&output=${output}`
@@ -486,7 +487,7 @@ export async function loadXtreamLive(playlist: Playlist): Promise<Channel[]> {
     return cid && (!presentCatIds.has(cid) || isAdultCategoryName(getCatName(c)))
   })
 
-  // Como o Expert: completa categorias faltantes com pouca concorrência (evita 429)
+  // Completa categorias faltantes com pouca concorrência (evita 429)
   if (missingCats.length > 0) {
     const existingStreamIds = new Set(streams.map((s) => String(s.stream_id)))
     const extras = await mapPool(missingCats, 2, async (c) => {
@@ -566,7 +567,13 @@ export type XtreamCategory = { id: string; name: string }
 
 const xtreamM3uCache = new Map<string, Channel[]>()
 
-/** Carrega o M3U completo do painel (método do IPTV Expert). */
+/**
+ * Carrega o M3U completo do painel.
+ *
+ * O timeout precisa ser explícito: painéis grandes devolvem 100MB+ / 300k
+ * canais e levam ~100s só no download. Sem isto o fetch aborta no meio e a
+ * falha aparece como "playlist vazia" — que é sintoma, não causa.
+ */
 export async function loadXtreamFullM3u(playlist: Playlist, force = false): Promise<Channel[]> {
   const cacheKey = playlist.id
   if (!force) {
@@ -576,9 +583,9 @@ export async function loadXtreamFullM3u(playlist: Playlist, force = false): Prom
 
   let text = ''
   try {
-    text = await fetchText(xtreamM3uUrl(playlist, 'ts'))
+    text = await fetchText(xtreamM3uUrl(playlist, 'ts'), { timeoutMs: PANEL_LARGE_TIMEOUT_MS })
   } catch {
-    text = await fetchText(xtreamM3uUrl(playlist, 'm3u8'))
+    text = await fetchText(xtreamM3uUrl(playlist, 'm3u8'), { timeoutMs: PANEL_LARGE_TIMEOUT_MS })
   }
 
   if (!text.includes('#EXTINF')) {
@@ -595,7 +602,7 @@ export function clearXtreamM3uCache(playlistId?: string) {
   else xtreamM3uCache.clear()
 }
 
-/** Anexa "(2026)" ao nome se o painel mandou o ano em outro campo (estilo TiviMate). */
+/** Anexa "(2026)" ao nome se o painel mandou o ano em outro campo ). */
 function appendReleaseYearToName(name: string, release?: string): string {
   const base = String(name || '').trim()
   if (!base) return base
@@ -797,7 +804,7 @@ function filterVodByCategory(items: VodStream[], categoryId: string): VodStream[
   // Dump global disfarçado — só descarta se for claramente misturado e enorme
   if (foreign.length > items.length * 0.85 && items.length > 4000) return []
 
-  // Sem tags ou tags vazias → confiar no endpoint (como o Expert / TiviMate)
+  // Sem tags ou tags vazias → confiar no endpoint (pelo endpoint)
   return items
 }
 
@@ -1160,7 +1167,9 @@ export async function loadSeriesInfo(playlist: Playlist, seriesId: string): Prom
 
     const seasons = Object.entries(data.episodes ?? {}).map(([season, episodes]) => ({
       season: Number(season),
-      episodes: (Array.isArray(episodes) ? episodes : []).map((ep) => {
+      episodes: dedupeEpisodesByNumber(
+        Array.isArray(episodes) ? episodes : [],
+      ).map((ep) => {
         const epInfo = ep.info || {}
         const epId = String(ep.id)
         const plot = pickPlot(ep, epInfo) || ''

@@ -49,8 +49,39 @@ const MAX_SESSOES = 4
 const CACHE_POR_SESSAO = 24
 const MAX_REDIREC = 5
 const PAUSA_REFRESH_MS = 400
-/** Teto do aquecimento antes de devolver a URL canonica. */
-const AQUECIMENTO_MS = 2500
+/**
+ * Teto do aquecimento por SEGMENTO EM DISCO.
+ *
+ * MEDIDO, e e o que motivou isto:
+ *
+ *   manifesto do painel ........ 240-325ms
+ *   segmento de 2.859.020 bytes  3,3-4,8s para baixar
+ *
+ * O `AQUECIMENTO_MS` de 2,5s espera so o MANIFESTO, entao `canonicalUrl`
+ * devolvia a URL em ~300ms com a janela VAZIA em disco. O mpv recebia um
+ * playlist sem segmento nenhum e MORRIA:
+ *
+ *   00:18:59.183  loadfile ok
+ *   00:18:59.196  end-file reason:error      <- 13ms
+ *                 publicados:0 janela:0
+ *   00:19:04.686  end-file reason:error      <- 11ms
+ *                 publicados:0 janela:0  motivo:"painel respondeu 404"
+ *
+ * E o app traduzia essa morte de 11ms em "Canal indisponivel no momento", com
+ * o canal no ar. Medido na origem no mesmo instante: peak -17,3 dBFS, sem
+ * clipe. E o "Tentar novamente" da propria pessoa abria normal.
+ *
+ * Entao o aquecimento passou a esperar `stitched.size > 0` — um segmento de
+ * verdade em disco, que e o que `inspecionar()` imprime como `emDisco` (`+`).
+ *
+ * O teto e 9s porque o pior caso medido e 4,8s, e `canonicalUrl` roda dentro
+ * do preflight de `loadStream`, que segura um watchdog de 20s: 9s de
+ * aquecimento deixa 11s de folga. So esperar manifesto nao resolvia; esperar
+ * sem teto seria pior que o problema.
+ */
+const AQUECIMENTO_SEGMENTO_MS = 9000
+/** De quanto em quanto se olha `stitched` durante o aquecimento. */
+const PASSO_AQUECIMENTO_MS = 100
 
 let server = null
 let baseUrl = null
@@ -466,15 +497,26 @@ async function canonicalUrl(alvo) {
   // estourar o watchdog de 20s por causa de um cold start que o mpv tolera
   // sozinho.
   //
-  // Com teto de 2,5s: o caso quente (180-272ms) sempre cabe, o cold nao segura a
-  // abertura, e a janela nasce cheia na overwhelming maioria das vezes.
+  // O comentario antigo falava so do MANIFESTO e por isso a espera parava cedo
+  // demais. Ver `AQUECIMENTO_SEGMENTO_MS`: manifesto e rapido, segmento nao.
   if (!s.state.inicializado) {
     let timer = null
+    let passo = null
     const limite = new Promise((r) => {
-      timer = setTimeout(r, AQUECIMENTO_MS)
+      timer = setTimeout(r, AQUECIMENTO_SEGMENTO_MS)
     })
-    await Promise.race([refrescar(s), limite])
+    // Sai assim que UM segmento estiver em disco. `refrescar` roda em paralelo:
+    // ele traz o manifesto e chama `baixarPendentes`, que e quem popula o
+    // `stitched`. Sem o manifesto nao ha segmento para baixar, entao os dois
+    // andam juntos.
+    const primeiroEmDisco = new Promise((r) => {
+      passo = setInterval(() => {
+        if (s.stitched.size > 0) r(true)
+      }, PASSO_AQUECIMENTO_MS)
+    })
+    await Promise.race([Promise.all([refrescar(s), primeiroEmDisco]), limite])
     if (timer) clearTimeout(timer)
+    if (passo) clearInterval(passo)
   }
   return url
 }

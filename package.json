@@ -1,7 +1,7 @@
 {
   "name": "stplay",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Player IPTV desktop",
   "author": "Felipe",
   "repository": {
@@ -18,6 +18,7 @@
     "lint": "oxlint src electron",
     "test": "node --test --experimental-strip-types \"src/**/*.test.ts\" \"electron/**/*.test.cjs\"",
     "verify": "npm run typecheck && npm run lint && npm run test",
+    "commit": "git add -A && git commit",
     "build": "npm run typecheck && vite build",
     "prepack": "node scripts/guard-build.mjs",
     "desktop": "concurrently -k \"vite --port 5173\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron electron/main.cjs\"",
@@ -116,14 +117,14 @@
       ]
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
       "allowElevation": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ST PLAY 1.0.1",
-      "uninstallDisplayName": "ST PLAY 1.0.1",
+      "shortcutName": "ST PLAY 1.0.2",
+      "uninstallDisplayName": "ST PLAY 1.0.2",
       "artifactName": "ST-PLAY-Setup-${version}.exe"
     },
     "portable": {

@@ -42,23 +42,40 @@ export function playbackUiAfterRetry(): PlaybackRetryUi {
 /**
  * O retry pode recolocar a "chrome" do player em tela cheia?
  *
- * `body.player-active` aplica `visibility: hidden` em `.app-shell`. E
- * `visibility: hidden` esconde os filhos MENOS os que tem `visibility: visible`
- * explicito — que no caso do browse sao os botoes de favorito e o menu. Resultado
- * observado: ao clicar em "Tentar novamente" no painel dividido, os textos, os
- * logos e os nomes de categoria sumiam e sobravam so os icones, ate o retry
- * falhar de novo e `forceShellVisible()` rodar.
+ * `body.player-active` aplica `visibility: hidden` em `.app-shell` E em
+ * `.topbar`. E `visibility: hidden` esconde os filhos MENOS os que tem
+ * `visibility: visible` explicito — que no caso do browse sao os botoes de
+ * favorito e o menu. Resultado observado: ao clicar em "Tentar novamente" no
+ * painel dividido, os textos, os logos e os nomes de categoria sumiam e
+ * sobravam so os icones, ate o retry falhar de novo e `forceShellVisible()` rodar.
  *
  * `player-active` existe para o player em TELA CHEIA, onde o video tem que
  * ocupar a janela inteira. No painel dividido o shell precisa continuar
  * visivel: o video so ocupa a coluna da direita.
  *
- * O caminho normal ja tinha a guarda (`if (embedded) return` no efeito que liga
- * a classe) — o botao de retry e que nao tinha, e por isso era o unico jeito de
- * chegar nesse estado.
+ * POR QUE A GUARDA INVERTEU (medido no live, 01:33):
+ *
+ *   retorno era `input.embedded !== true`
+ *
+ * Isso e `true` no live, que e `<Player embedded .../>` dentro do
+ * `.live-preview-panel` do painel dividido. E o `iniciarRetry` roda sozinho no
+ * zape de canal — nao precisa de clique. Uma vez so:
+ *
+ *   zape -> retry automatico -> player-active -> app-shell hidden
+ *         -> o grid de live perde a coluna da lista
+ *         -> o painel do video ESTICA para a janela toda
+ *         -> "o video foi por cima da categoria e dos canais"
+ *
+ * E o sintoma e enganoso: o video nao foi para tela cheia. O shell escondido
+ * fez o layout colapsar e o unico elemento que sobrava — o painel do video —
+ * virou a janela inteira. Quem assiste ve tela cheia; o log mostra um
+ * `requestFullscreen` que nunca aconteceu.
+ *
+ * A condicao correta e as DUAS: nao-embedded E em tela cheia. O `isFs` e o
+ * mesmo `domFs || winFs` que o efeito acima do retry ja usa.
  */
-export function shouldRestorePlayerChrome(input: { embedded?: boolean }) {
-  return input.embedded !== true
+export function shouldRestorePlayerChrome(input: { embedded?: boolean; isFs?: boolean }) {
+  return input.embedded !== true && input.isFs === true
 }
 
 export function shouldResetManagedEngine(input: { urlChanged: boolean; isRetry: boolean }) {

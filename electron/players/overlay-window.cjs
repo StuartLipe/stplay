@@ -414,7 +414,24 @@ function sendUi(payload = {}) {
   const isBoot = action === 'boot'
   const isPresentable =
     action === 'playback-ready' || action === 'hide-loading' || action === 'playback'
-  const wantsFull = isBoot || (!isPresentable && loadingShell)
+  /*
+   * `show-controls` NAO fecha a tela cheia do loading.
+   *
+   * O sintoma era a roda girando la embaixo, dentro da barra de 168px, em vez de
+   * no meio do video. A causa nao era o `po-loading` (que e `inset: 0` e
+   * centraliza certo) — era a JANELA, que ja tinha voltado a ser barra.
+   *
+   * Quem derrubava a janela era o `bindMouseWake`: ele escuta `WM_MOUSEMOVE` da
+   * janela principal e manda `show-controls` a CADA movimento do mouse. Como
+   * `show-controls` nao e `isPresentable`, a formula `isBoot || (!isPresentable
+   * && loadingShell)` colava a janela de volta na barra — enquanto o canal ainda
+   * estava carregando. E o usuario mouseando sobre o video era o gatilho.
+   *
+   * Entao: enquanto `loadingShell` esta ligado, so uma acao que diga "acabou"
+   * pode fechar a tela cheia. `show-controls` continua repintando os controles,
+   * que e o que ele deve fazer, mas nao mexe mais na geometria.
+   */
+  const wantsFull = isBoot || (loadingShell && !isPresentable)
   if (wantsFull !== loadingShell) {
     loadingShell = wantsFull
     lastAppliedBoundsKey = ''

@@ -143,6 +143,42 @@ async function pipeUpstream(req, res, targetUrl, opts = {}) {
   res.end()
 }
 
+/**
+ * Resposta de ERRO com o cabecalho de CORS.
+ *
+ * MEDIDO, e sem isto o app escondia a causa real. Com um painel novo cadastrado:
+ *
+ *   fetch 'http://127.0.0.1:62112/proxy?...&url=http%3A%2F%2Frplaydigital.online%2Fget.php%3F...'
+ *   from origin 'http://localhost:5173' has been blocked by CORS policy:
+ *   No 'Access-Control-Allow-Origin' header is present on the requested resource.
+ *
+ * A causa real era o painel nao resolver (`getaddrinfo ENOTFOUND`), e o proxy
+ * respondeu 502 SEM cabecalho. O navegador, diante de resposta sem
+ * `access-control-allow-origin` em cross-origin, descarta o corpo e reporta
+ * CORS — o renderer nunca viu o `getaddrinfo` e a tela ficou sem explicacao.
+ *
+ * Antes disto TODA falha — 403, 400, 404, 502, painel fora, DNS quebrado,
+ * timeout — aparecia como "CORS". Agora o renderer le a mensagem de verdade.
+ *
+ * Status e corpo sao os mesmos de antes; o que volta e o cabecalho.
+ */
+function falha(req, res, status, mensagem) {
+  try {
+    res.writeHead(
+      status,
+      sanitizeHeadersObject({
+        'access-control-allow-origin': devOrigin(req),
+        vary: 'Origin',
+        'cache-control': 'no-store',
+        'content-type': 'text/plain; charset=utf-8',
+      }),
+    )
+    res.end(mensagem)
+  } catch {
+    // ignore
+  }
+}
+
 function ensureStreamProxy() {
   if (server && port) return Promise.resolve(port)
   return new Promise((resolve, reject) => {
@@ -151,16 +187,16 @@ function ensureStreamProxy() {
         const incoming = new URL(req.url || '/', 'http://127.0.0.1')
 
         if (!tokenOk(incoming)) {
-          res.writeHead(403)
-          res.end('forbidden')
+          falha(req, res, 403,
+          'forbidden')
           return
         }
 
         if (incoming.pathname === '/proxy') {
           const targetUrl = incoming.searchParams.get('url')
           if (!targetUrl || !isAllowedTarget(targetUrl)) {
-            res.writeHead(400)
-            res.end('bad url')
+            falha(req, res, 400,
+            'bad url')
             return
           }
           await pipeUpstream(req, res, targetUrl)
@@ -170,20 +206,27 @@ function ensureStreamProxy() {
         if (incoming.pathname === '/stream') {
           const targetUrl = incoming.searchParams.get('u')
           if (!targetUrl || !isAllowedTarget(targetUrl)) {
-            res.writeHead(400)
-            res.end('bad url')
+            falha(req, res, 400,
+            'bad url')
             return
           }
           await pipeUpstream(req, res, targetUrl, { streamDefaults: true })
           return
         }
 
-        res.writeHead(404)
-        res.end('not found')
+        falha(req, res, 404,
+        'not found')
       } catch (error) {
+        // O `catch` e o caminho que mais importa: e o que roda quando o painel
+        // nao responde, o DNS quebra, ou o socket morre. Sem o cabecalho aqui, o
+        // navegador descartava o corpo e o renderer recebia "CORS" em vez de
+        // `getaddrinfo ENOTFOUND`. Medido com um painel novo cadastrado.
+        if (!res.headersSent) {
+          falha(req, res, 502, error instanceof Error ? error.message : 'proxy failed')
+          return
+        }
         try {
-          if (!res.headersSent) res.writeHead(502)
-          res.end(error instanceof Error ? error.message : 'proxy failed')
+          res.end()
         } catch {
           // ignore
         }

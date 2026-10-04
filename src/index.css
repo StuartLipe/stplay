@@ -51,6 +51,23 @@ body,
   --accent: #2dd4bf;
   --accent-ink: #061018;
   /*
+   * TOM DE PERIGO
+   *
+   * Antes estas cores viviam escritas em hex dentro do
+   * `.content-option-pill.danger` — e NAO existiam no `.live-options-split
+   * button`, que e onde ficam "Ocultar filme" e "Ocultar categoria". Resultado:
+   * "Remover de Continuar Assistindo" saia vermelho e os dois "Ocultar" saiam
+   * na cor da superficie, sem nenhum vermelho.
+   *
+   * Viraram token porque a aparencia e controlada pelo tema (`data-theme` no
+   * <html>, escrito em App.tsx), e hex solto nao segue a troca. Um lugar, e os
+   * tres botoes Danger leem o mesmo.
+   */
+  --danger: #fb7185;
+  --danger-bg: rgba(239, 68, 68, 0.1);
+  --danger-bg-hover: rgba(239, 68, 68, 0.18);
+  --danger-border: rgba(239, 68, 68, 0.24);
+  /*
    * TOM DE LEVANTAMENTO
    *
    * A luz usada para tirar uma superficie de cima da pagina. `--card-surface`,
@@ -182,7 +199,6 @@ body {
 :root[data-performance='on'] .home-rec-poster,
 :root[data-performance='on'] .home-cat,
 :root[data-performance='on'] .home-rec-card,
-:root[data-performance='on'] .theme-preview-btn,
 :root[data-performance='on'] .details-overlay,
 :root[data-performance='on'] .content-options-modal,
 :root[data-performance='on'] .player-toast {
@@ -1570,88 +1586,6 @@ input {
 
 .settings-page .theme-option-check {
   color: color-mix(in srgb, var(--accent) 82%, var(--text-primary));
-}
-
-.theme-preview {
-  display: grid;
-  grid-template-columns: 92px 1fr;
-  gap: 10px;
-  padding: 12px;
-  margin-bottom: 18px;
-  border-radius: 14px;
-  border: 1px solid var(--border-subtle);
-  background: var(--shell-bg);
-}
-
-.theme-preview-rail {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 6px;
-  border-radius: 10px;
-  background: var(--bg-rail);
-  border: 1px solid var(--border-subtle);
-}
-
-.theme-preview-rail-item {
-  padding: 6px 8px;
-  border-radius: 8px;
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text-muted);
-}
-
-.theme-preview-rail-item.active {
-  color: var(--accent-ink);
-  background: var(--accent);
-}
-
-.theme-preview-main {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  justify-content: center;
-}
-
-.theme-preview-card {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  padding: 10px;
-  border-radius: 10px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-}
-
-.theme-preview-poster {
-  width: 42px;
-  height: 58px;
-  border-radius: 8px;
-  background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 35%, #1e293b), #0f172a);
-}
-
-.theme-preview-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.theme-preview-copy strong {
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.theme-preview-btn {
-  align-self: flex-start;
-  border: 0;
-  border-radius: 999px;
-  padding: 7px 14px;
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-size: 11px;
-  font-weight: 800;
 }
 
 .accent-options {
@@ -4314,6 +4248,24 @@ img.cover-ready {
   font-weight: 700;
 }
 
+/*
+  "Restaurar" e uma acao, nao um modo de ordenacao: fica na mesma barra dos
+  modos (do lado do "star Nota") mas sem o preenchido de `.active`, que ali
+  indicaria "este e o modo atual". Sem este override ele herdaria o visual de
+  pilha e ficaria ambiguo entre ordem e comando.
+*/
+.sort-pill-restore {
+  border-color: color-mix(in srgb, var(--accent) 46%, transparent);
+  color: color-mix(in srgb, var(--accent) 74%, var(--text-primary));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-raised));
+}
+
+.sort-pill-restore:hover {
+  background: color-mix(in srgb, var(--accent) 20%, var(--surface-raised));
+  color: color-mix(in srgb, var(--accent) 92%, var(--text-primary));
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
 .browse-search-wrapper {
   position: relative;
   display: flex;
@@ -4377,6 +4329,18 @@ img.cover-ready {
   pointer-events: none;
 }
 
+/*
+  Mascara do coracao do placeholder.
+
+  SVG inline em vez de emoji ou glifo de fonte: o emoji "❤" muda de forma
+  entre Windows e Android, e um caractere unicodegen nao e garantido na fonte
+  do app. O path do Lucide (mesmo do `Heart` do overlay) e um unico vetor,
+  identico em qualquer maquina.
+*/
+:root {
+  --cover-heart-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4 1.5-1-1-2.24-1.5-4-1.5A5.5 5.5 0 0 0 3 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z'/%3E%3C/svg%3E");
+}
+
 .cover-ph,
 .cover-ph-sm {
   background: var(--card-surface);
@@ -4392,6 +4356,44 @@ img.cover-ready {
   height: 42px;
   border-radius: 8px;
   flex-shrink: 0;
+}
+
+/*
+  Placeholder de canal ao vivo sem logo.
+
+  Antes era um retangulo vazio, e o navegador desenhava o icone de imagem
+  quebrada por cima (o `<img>` com `src` vazio). O resultado era aquele cartao
+  de "procurando" no meio da capa.
+
+  Agora e um coracao em CSS puro — sem depender do JSX, porque o placeholder
+  aparece em duas escalas (grade e lista) e o unico lugar comum a elas e o
+  estilo. O traco e um SVG inline em `background-image`, que escala com o
+  tamanho do container.
+*/
+.cover-ph::after,
+.cover-ph-sm::after {
+  content: '';
+  display: block;
+  width: 38%;
+  max-width: 56px;
+  aspect-ratio: 1;
+  background-color: currentColor;
+  -webkit-mask: var(--cover-heart-mask) center / contain no-repeat;
+  mask: var(--cover-heart-mask) center / contain no-repeat;
+  opacity: 0.32;
+  margin: 0 auto;
+}
+
+.cover-ph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.cover-ph-sm::after {
+  width: 46%;
+  max-width: 20px;
 }
 
 .cover-sm {
@@ -4603,7 +4605,38 @@ img.cover-ready {
   cursor: pointer;
   font-weight: 600;
   font-size: 13px;
+  /*
+   * Coluna, e nao linha: a segunda linha (o nome da categoria) tem de ficar
+   * DEBAixo do rotulo, e nao continuar na mesma linha. Sem isto os dois textos
+   * pareciam o mesmo botao.
+   */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  text-align: center;
   transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+/**
+ * A segunda linha: o nome da categoria.
+ *
+ * Sem isto ela herdava peso e cor do rotulo, e os dois pareciam o mesmo botao —
+ * que e o que a pessoa viu. Aqui fica menor, mais apagada, e corta com
+ * reticencias quando o nome e longo, igual ao app movel.
+ */
+.live-options-split button small {
+  display: block;
+  max-width: 100%;
+  font-size: 11px;
+  line-height: 1.25;
+  font-weight: 600;
+  color: var(--text-muted);
+  opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .live-options > button:hover,
@@ -4729,6 +4762,13 @@ img.cover-ready {
   overflow: hidden;
   cursor: pointer;
   background: var(--bg-rail);
+  /*
+   * O container precisa do mesmo raio do card (14px do card - 1px da borda).
+   * Sem isto o anel de "selecionado" e a pultura saem com canto RETO por cima de
+   * um card arredondado — e na grade dava para ver um traco torto cortando o
+   * canto do poster.
+   */
+  border-radius: 13px 13px 0 0;
 }
 
 .poster-media img {
@@ -5058,14 +5098,40 @@ img.cover-ready {
 }
 
 .content-option-pill.danger {
-  color: #fb7185;
-  background: rgba(239, 68, 68, 0.08);
-  border-color: rgba(239, 68, 68, 0.22);
+  /* Tokens: ver o bloco TOM DE PERIGO no `:root`. */
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 
 .content-option-pill.danger:hover {
-  background: rgba(239, 68, 68, 0.16);
-  color: var(--text-body);
+  background: var(--danger-bg-hover);
+  color: var(--danger);
+}
+
+/**
+ * "Ocultar filme" e "Ocultar categoria".
+ *
+ * Este par usava a MESMA regra de `.live-options-split button` — superficie
+ * neutra, sem vermelho. O `.danger` do outro botao ("Remover de Continuar
+ * Assistindo") nao alcancava estes, porque sao `.live-options-split button`, nao
+ * `.content-option-pill`. Era por isso que os tres pareciam botoes diferentes,
+ * sendo que dois deles sao a mesma acao destrutiva.
+ */
+.live-options-split button.danger {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.live-options-split button.danger:hover {
+  background: var(--danger-bg-hover);
+}
+
+.live-options-split button.danger small {
+  /* A segunda linha continua secundaria, mas na familia do perigo. */
+  color: var(--danger);
+  opacity: 0.62;
 }
 
 .live-options > button,
@@ -5080,7 +5146,38 @@ img.cover-ready {
   cursor: pointer;
   font-weight: 600;
   font-size: 13px;
+  /*
+   * Coluna, e nao linha: a segunda linha (o nome da categoria) tem de ficar
+   * DEBAixo do rotulo, e nao continuar na mesma linha. Sem isto os dois textos
+   * pareciam o mesmo botao.
+   */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  text-align: center;
   transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+/**
+ * A segunda linha: o nome da categoria.
+ *
+ * Sem isto ela herdava peso e cor do rotulo, e os dois pareciam o mesmo botao —
+ * que e o que a pessoa viu. Aqui fica menor, mais apagada, e corta com
+ * reticencias quando o nome e longo, igual ao app movel.
+ */
+.live-options-split button small {
+  display: block;
+  max-width: 100%;
+  font-size: 11px;
+  line-height: 1.25;
+  font-weight: 600;
+  color: var(--text-muted);
+  opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .live-options > button:hover,
@@ -5312,8 +5409,16 @@ body.player-active .topbar {
 }
 
 .poster-card-active .poster-media {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  /*
+   * `outline` aqui era o defeito: ele e desenhado com CANTO RETO, ignora o
+   * `border-radius`, e o `outline-offset: 2px` jogava o traco para FORA do
+   * elemento — onde o `overflow: hidden` do `.poster-card` cortava. O resultado
+   * na grade era um anel incompleto, que e o que parecia "falhado".
+   *
+   * `box-shadow` acompanha o raio e fica DENTRO do card, entao nao ha corte.
+   */
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 .poster-card-active .poster-title {
@@ -5484,16 +5589,86 @@ body.electron-fullscreen .detail-tint-body .movie-embedded-panel .player-wrap.pl
   font-weight: 600;
 }
 
+/* `inline-flex` + `gap`: o icone `Star` e um SVG inline-block e o numero e texto.
+   Sem flex o navegador mete um espaco de fonte entre os dois e a estrela fica
+   desalinhada da linha do texto. */
 .movie-meta-val {
   color: var(--text-body);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .movie-actions-row {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+/**
+ * Primario, no padrao do app movel: fundo claro, texto escuro, canto de 14px
+ * e o icone a esquerda do texto.
+ *
+ * O antes era `inline-flex` com `border-radius: 24px` e fundo rosa, na mesma
+ * linha dos outros dois botoes. Nao e ruim, mas nao parecia com o movel — que e
+ * o que a pessoa pediu para copiar.
+ */
+.movie-play-btn-strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px 30px;
+  border-radius: 14px;
+  /*
+   * A cor NAO pode ser fixa aqui. O app escreve `data-theme` no <html>
+   * (App.tsx) e quem muda a aparência sao os tokens — existem seis temas, todos
+   * com `--text-primary` claro sobre `--bg-base` escuro.
+   *
+   * Entao o primario e uma INVERSAO dos tokens: fundo na cor do texto, tinta na
+   * cor do fundo. Isso da o botao claro do app movel sem escrever nenhuma cor,
+   * e se um tema claro entrar o botao se inverte sozinho — com um hex fixo ele
+   * ficaria branco sobre fundo branco.
+   */
+  background: var(--text-primary);
+  color: var(--bg-base);
+  border: none;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.15s, background 0.15s;
+}
+
+.movie-play-btn-strong:hover {
+  /* Escurece na direcao do fundo do tema, em vez de ir para um cinza fixo. */
+  background: color-mix(in srgb, var(--text-primary) 84%, var(--bg-base));
+  transform: translateY(-1px);
+}
+
+.movie-play-btn-strong:active {
+  transform: translateY(0);
+}
+
+/**
+ * O par de secundarios, abaixo do primario.
+ *
+ * `flex: 0 0 auto` nos filhos e o que garante que NAO estiquem: na captura do
+ * celular eles parecem meia-largura porque a tela e estreita e eles ocupam a
+ * linha toda; em desktop a mesma regra espremeria o texto numa caixa enorme.
+ * Aqui cada botao fica no tamanho do conteudo.
+ */
+.movie-actions-pair {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  margin-top: 16px;
+  gap: 10px;
+}
+
+.movie-actions-pair > .series-fav-btn,
+.movie-actions-pair > .movie-action-pill {
+  flex: 0 0 auto;
 }
 
 .movie-play-btn {
@@ -6021,6 +6196,39 @@ body.electron-fullscreen .detail-tint-body .movie-embedded-panel .player-wrap.pl
   min-height: 0;
   overflow: hidden;
   background: #000;
+}
+
+/*
+  BARRA DE CIMA: voltar + titulo, acima do video.
+
+  A area do video recua `PLAYER_TOPBAR_PX` para baixo, e o espaco liberado fica
+  com a barra. O recuo e no proprio `player-wrap` porque E o elemento que o
+  `watchVideoBounds` mede e envia pro `setBounds` — o HWND do mpv segue o
+  `getBoundingClientRect`, entao nao ha nada a coordenar no main.
+
+  ISSO E NECESSARIO, E SO ISTO. A janela do overlay durante a reproducao tem so
+  a barra de baixo (148px, `overlayBarRect`). Uma janela SEPARADA no topo
+  quebrou a apresentacao do swapchain D3D11 do mpv — video parado com audio
+  seguindo, e laco no ao vivo. Encolhendo a area do video, a barra de cima fica
+  numa regiao onde NAO existe HWND do mpv por baixo, que e o que a medicao de
+  overlay-bounds.cjs exige.
+
+  `min-height` no wrap para o video nao virar fatia em telas baixas: o topo e o
+  que cede primeiro.
+*/
+.player-wrap {
+  padding-top: var(--player-topbar-px, 0px);
+  box-sizing: border-box;
+}
+
+
+/* Fora do player a barra nao existe: 0px de altura, sem elemento visivel. */
+:root {
+  --player-topbar-px: 0px;
+}
+
+.player-wrap.has-topbar {
+  --player-topbar-px: 96px;
 }
 
 .player-wrap:fullscreen {
@@ -7315,9 +7523,58 @@ body.electron-fullscreen .player-wrap {
   pointer-events: auto;
 }
 
+/*
+  AUTO-HIDE DOS CONTROLES — o que impede o botao de voltar de sumir.
+
+  Antes, o `hidden` era `opacity: 0` no PROPRIO `.player-controls`. Isso
+  desmonta a sub-arvore inteira: o botao de voltar, que vive em
+  `.player-topbar > .player-top-left`, era desenhado com o resto e sumia junto
+  3,5 s depois do ultimo movimento do mouse. A saida do player nao pode
+  depender de o usuario estar mexendo o mouse.
+
+  Agora a opacidade mora nos FILHOS, nunca no pai. Duas consequencias:
+
+    1. `.player-controls.hidden` mantem `opacity: 1`, entao qualquer coisa que
+       nao for explicitamente listada abaixo continua visivel. O
+       `player-back-always` e a unica excecao de proposito.
+    2. `pointer-events: none` no pai NAO impede um filho com
+       `pointer-events: auto` de receber mouse. Isso e comportamento padrao de
+       CSS (o pai so bloqueia o que ele mesmo cobre). Entao o botao volta a ter
+       clique e `:hover` com os controles apagados, sem precisar de z-index nem
+       de dock externo.
+
+  `.player-topbar` fica fora do apagamento por ser o container do botao: quem
+  recebe `opacity: 0` sao os irmaos dele dentro da barra.
+*/
 .player-controls.hidden {
+  opacity: 1;
+  pointer-events: none;
+}
+
+.player-controls > *,
+.player-controls .player-topbar > *,
+.player-controls .player-top-left > * {
+  transition: opacity 300ms ease;
+}
+
+.player-controls.hidden > *:not(.player-topbar),
+.player-controls.hidden .player-topbar > .player-top-actions,
+.player-controls.hidden .player-top-left > *:not(.player-back-always) {
   opacity: 0;
   pointer-events: none;
+}
+
+/*
+  Botao de voltar — unico controle sempre visivel.
+
+  `position: relative` + `z-index: 1` para ficar acima dos irmaos apagados
+  (que continuam ocupando espaco, de proposito: sem salto de layout quando os
+  controles voltam).
+*/
+.player-back-always {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
 }
 
 .player-gradient {
@@ -7330,6 +7587,20 @@ body.electron-fullscreen .player-wrap {
 .player-gradient-top { top: 0; height: 34%; background: linear-gradient(to bottom, #000b, transparent); }
 .player-gradient-bottom { bottom: 0; height: 42%; background: linear-gradient(to top, #000d, transparent); }
 
+/* Botao de voltar do overlay, no canto ESQUERDO da janela.
+ *
+ * Fica SEMPRE visivel, ao contrario do .po-dock (que depende de
+ * dockVisible). A razao e saida: em tela cheia o dock some sozinho e o ESC e
+ * invisivel para quem esta no controle. Sem este botao o overlay so tem uma
+ * saida, e ela exige teclado.
+ *
+ * Topo esquerdo, do mesmo lado do dock (que tem os controles de pause e volume):
+ * e onde o olho ja vai no video, e e o lado oposto do canal, entao nao briga
+ * com o nome do canal.
+ *
+ * O z-index: 3 fica acima do .po-loading (2) para o botao existir tambem
+ * durante o ooting, que e exatamente quando a pessoa precisa sair.
+ */
 .player-topbar {
   position: absolute;
   top: 20px;
@@ -7343,6 +7614,46 @@ body.electron-fullscreen .player-wrap {
 }
 
 .player-top-actions { display: flex; align-items: center; gap: 8px; z-index: 30; }
+
+/*
+  Botao de voltar da barra de cima.
+
+  `background: transparent` + `hover` com tinta: no player o fundo e o proprio
+  video, entao um retangulo solido ficaria como um bloco cinza sobre a imagem.
+  A referencia mostra o botao com fundo cinza porque o fundo dela e preto
+  solido; aqui o hover ja revela o alvo.
+
+  `backdrop-filter` da um vidro em vez de chapado, e some sozinho quando o
+  cursor sai.
+*/
+.player-back-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: color-mix(in srgb, #0f172a 42%, transparent);
+  color: #f8fafc;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.player-back-btn:hover {
+  background: color-mix(in srgb, #0f172a 72%, transparent);
+}
+
+.player-back-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.player-back-btn svg {
+  pointer-events: none;
+}
 
 .player-bottom-container {
   position: absolute;
@@ -7826,6 +8137,140 @@ body.electron-fullscreen .player-wrap {
   margin-left: auto;
   background: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/*
+ * NOVIDADES
+ *
+ * A referência que motivou a tela mostrava uma caixa de busca e um botão de
+ * limpar cache na mesma página. Os dois foram de fora: o histórico tem duas
+ * entradas, e "limpar cache" não é novidade nenhuma. O que fica é a hierarquia
+ * que importa — versão, uma linha do que mudou, e o detalhe atrás do clique.
+ */
+.novidades-topo {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.novidades-titulo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.novidades-versao-atual {
+  font-size: 12px;
+  color: var(--muted, #8b93a7);
+}
+
+.novidades-lista {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+/*
+ * As ÁREAS são as linhas, e o detalhe vive dentro delas.
+ *
+ * A versão 1.0.3 desta lista abre e mostra três linhas de quatro palavras. O texto
+ * que havia aqui antes ocupava meia tela para dizer o mesmo que os títulos —
+ * era isso que o dono reclamou. Detalhe só depois do clique.
+ */
+.novidades-corpo {
+  margin-top: 8px;
+  display: grid;
+  gap: 2px;
+}
+
+.novidades-grupo-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 7px 8px;
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.novidades-grupo-head:hover {
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  color: var(--accent);
+}
+
+.novidades-grupo.is-open .novidades-grupo-head {
+  color: var(--accent);
+}
+
+.novidades-grupo-itens {
+  margin: 2px 0 8px;
+  padding-left: 29px;
+  display: grid;
+  gap: 6px;
+}
+
+.novidades-grupo-itens li {
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.novidades-item {
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.08));
+  border-radius: 12px;
+  padding: 12px 14px;
+  transition: border-color 0.15s ease;
+}
+
+.novidades-item.is-open {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.novidades-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.novidades-item-head:hover {
+  color: var(--accent);
+}
+
+.novidades-item-versao {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.novidades-tag {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.novidades-item-data {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted, #8b93a7);
 }
 
 /*
@@ -9259,11 +9704,31 @@ body.electron-fullscreen .player-wrap {
   border-radius: 16px;
 }
 
+/* SEM `:fullscreen` aqui de proposito.
+ *
+ * Este bloco antes forjava `100vw x 100vh` no elemento do DOM enquanto ele
+ * estava em fullscreen NATIVO do navegador. O mpv e uma HWND separada, e o app
+ * controla o fullscreen por `winFs`/`electron-fullscreen` — entao o
+ * `:fullscreen` do CSS criava um SEGUNDO sistema de tela cheia, fighting com o
+ * primeiro.
+ *
+ * O custo nao era estetico. Medido: o `getBoundingClientRect` do `player-wrap`
+ * passava a reportar o retangulo de tela cheia (972x837 num cliente de 1384),
+ * esse numero ia pro `setBounds`, e o mpv era posicionado com ele. Ao sair da
+ * tela cheia, o `:fullscreen` desaplicava — mas o `ResizeObserver` nao
+ * re-disparava, porque o elemento ja estava no tamanho do painel para o observer
+ * (que so observa MUDANCA de tamanho). O retangulo de tela cheia ficava preso no
+ * main, e o video cobria a janela inteira.
+ *
+ * `max-width/max-height` aqui tambem sao a unica coisa que segurava o elemento;
+ * sem este bloco o `width:100%/height:100%` de cima ja resolve o caso normal.
+ */
 .live-preview-panel .player-wrap.player-embedded:fullscreen {
+  /* Fullscreen nativo fica por conta do app (winFs / electron-fullscreen).
+     O `:fullscreen` do CSS aqui MEDE em coordenadas de tela cheia e quebra o
+     `setBounds` do mpv. Ver o comentario acima. */
   width: 100%;
   height: 100%;
-  max-width: calc(100vw / var(--zoom, 1));
-  max-height: calc(100vh / var(--zoom, 1));
   border-radius: 0;
 }
 
@@ -10240,10 +10705,116 @@ html {
   inset: 0;
   width: 100%;
   height: 100%;
-  pointer-events: auto;
+  /*
+    `pointer-events: none` NO ROOT, e `auto` so nos widgets.
+
+    A janela do overlay e o video INTEIRO agora (ver `overlayBarRect`), entao com
+    `auto` aqui o overlay interceptava o mouse sobre o video inteiro. O preco nao
+    foi so clicar: cada `mousemove` reacendia os controles e zerava o timer de
+    auto-hide, que nunca vencia. Os botoes simplesmente nao sumiam.
+
+    E o auto-hide tem um caminho melhor, e ele ja existia: `App.tsx` faz
+    `onMouseMove` no `.player-wrap` e empurra `show-controls` por IPC. Esse
+    caminho continua valendo porque o HWND do mpv tem input desligado
+    (`EnableWindow(mpvHwnd, false)`) e o clique atravessa ate a janela principal.
+    O overlay so precisa ESCUTAR, e nao interceptar.
+  */
+  pointer-events: none;
   background: transparent;
   overflow: hidden;
   -webkit-app-region: no-drag;
+}
+
+/* Botao de voltar do overlay, no topo ESQUERDO.
+ *
+ * Fica SEMPRE visivel, ao contrario do `.po-dock` (que depende de `dockVisible`).
+ * A razao e saida: em tela cheia o dock some sozinho e o ESC e invisivel para
+ * quem esta no controle. Sem este botao o overlay so tem uma saida, e ela exige
+ * teclado.
+ *
+ * POR QUE O OVERLAY E NAO A JANELA PRINCIPAL. O HWND do mpv e uma janela NATIVA
+ * reparentada dentro da janela principal. Tudo que esta no DOM da janela
+ * principal fica ATRAS do video - um botao de sair la dentro e invisivel
+ * exatamente quando a pessoa precisa dele. O overlay e a unica janela acima.
+ *
+ * POR QUE A FAIXA DE 56px. O overlay nao cobre o video inteiro de proposito: o
+ * comentario de `overlayShellRect` mede o preco de cobrir (congela o swapchain
+ * D3D11 do mpv). Entao a janela do overlay cresce so uma faixa no topo - ver
+ * `OVERLAY_TOP_STRIP` em `electron/players/overlay-bounds.cjs`. O `.po-dock`
+ * compensa com `bottom` igual a essa faixa e continua no mesmo lugar da tela.
+ *
+ * `z-index: 3` fica acima do `.po-loading` (2) para o botao existir tambem
+ * durante o `booting`, que e exatamente quando a pessoa precisa sair.
+ *
+ * Esquerda, e nao direita: e o lado oposto do drawer de canais, que ocupa a
+ * direita. Em tela cheia o drawer fecha e o canto esquerdo e o unico que nao
+ * disputa espaco com nada.
+ */
+
+/*
+  Botao de voltar: `.po-btn` (a MESMA classe dos outros) mais o posicionamento.
+
+  A classe e a mesma de proposito. Com uma classe propria, o botao ficava com
+  borda e fundo diferentes de tudo ao lado - a pessoa pediu "a mesma cor que o
+  resto". Aqui so o que o lugar exige: canto, posicao e `pointer-events`.
+
+  `top: 8px; left: 8px` porque e o unico canto que nao disputa espaco com o
+  drawer de canais, que ocupa a direita.
+*/
+.po-back {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 3;
+  pointer-events: auto;
+  /*
+    Some JUNTO com os controles, e nao antes nem depois.
+
+    O comentario antigo dizia "sempre visivel, porque em tela cheia o dock some e
+    o ESC e invisivel". Isso nao segurou: o botao ficava ali em cima para sempre,
+    em cima do video, e era a unica coisa parada na tela.
+
+    `dockVisible` e o mesmo estado que apaga o dock, entao os dois somem juntos e
+    o video volta a ser so video. Se a saida precisa estar sempre a mao, o
+    caminho e o botao da barra do sistema, que existe para isso.
+  */
+  opacity: 1;
+  transition: opacity 0.28s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.po-back.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.po-back:hover {
+  background: rgba(30, 36, 48, 0.92);
+}
+
+.po-back:active {
+  transform: scale(0.94);
+}
+
+/*
+  Cursor escondido, so em tela cheia e so com os controles fora.
+
+  A classe vai no `<html>`, NAO no `.po-root`: o root tem `pointer-events: none`
+  (sem isso a janela do overlay engole o clique e ele nunca chega no catalogo), e
+  um elemento que nao e alvo do hit-test tem o `cursor` nunca consultado. A raiz
+  do documento cobre as duas janelas envolvidas.
+
+  `:hover` continua no `.po-root` porque os widgets dele tem `pointer-events:
+  auto` e sao alvos de verdade — o `:hover` deles funciona, e o cursor some
+  quando o ponteiro entra neles.
+*/
+html.is-cursor-none,
+html.is-cursor-none body {
+  cursor: none;
+}
+
+html.is-cursor-none .po-btn:hover,
+html.is-cursor-none .po-drawer-item:hover {
+  cursor: none;
 }
 
 .po-root.is-cursor-none {
@@ -10258,25 +10829,28 @@ html {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: 14px;
   z-index: 2;
+  /*  véu escuro cobrindo o vídeo */
+  background: rgba(0, 0, 0, 0.6);
 }
 
 .po-loading-spinner {
-  width: 40px;
-  height: 40px;
+  width: 56px;
+  height: 56px;
   border-radius: 50%;
-  border: 3px solid rgba(148, 163, 184, 0.35);
+  border: 4px solid rgba(148, 163, 184, 0.35);
   border-top-color: #ef4444;
-  animation: spin 0.75s linear infinite;
+  /* Igual o Spin.png dele: rotação 2s linear infinita */
+  animation: spin 2s linear infinite;
 }
 
 .po-loading-label {
   margin: 0;
   max-width: 80%;
   text-align: center;
-  font-size: 14px;
-  color: var(--text-body);
+  font-size: 16px;
+  color: #f1f5f9;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -10295,47 +10869,60 @@ html.player-overlay-mode #root {
   -webkit-app-region: no-drag;
 }
 
-.po-center {
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 40px;
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
+/*
+  `.po-center` e `.po-skip-label` foram removidos junto com o elemento.
 
-.po-center.is-visible {
-  opacity: 1;
-}
+  O trio central `-10 / pause / +10` era `position: absolute` dentro da JANELA do
+  overlay, e essa janela tem SO 104px de altura durante a reproducao
+  (`overlayBarRect`). Nao existe altura para ele ocupar: qualquer `top`/`bottom`
+ INSET so empurra os botoes dentro dos 104px, entao o trio ficava grudado no
+  rodape, colado na barra, parecendo botao quebrado.
 
-.po-center .po-btn {
-  pointer-events: auto;
-  width: 56px;
-  height: 56px;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.55);
-  font-size: 15px;
-  font-weight: 700;
-}
+  Os tres botoes continuam existindo, agora dentro do `po-toolbar`, na mesma
+  familia do pause e do som — que e a unica que funciona nesta janela.
 
-.po-skip-label {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
+  `--po-top-inset` / `--po-bottom-inset` sairam junto: so o `po-center` os usava.
+*/
 
 .po-dock {
   position: absolute;
   left: 0;
   right: 0;
+  /*
+    `bottom: 0` porque a janela do overlay agora e o VIDEO INTEIRO
+    (`overlayBarRect`), nao so a barra de baixo. O dock mora na base dela, que e
+    a base do video - a posicao de sempre.
+
+    A primeira versao ancorou a janela no TOPO do video para caber o botao de
+    voltar, e o dock subiu junto: ele esta ancorado no fundo da janela, entao
+    qualquer janela que nao chegue a base do video arrasta o dock com ela.
+  */
   bottom: 0;
   z-index: 2;
-  padding: 28px 16px 14px;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.75) 0%, rgba(0, 0, 0, 0.35) 55%, transparent 100%);
+  padding: 6px 14px 10px;
+  /*
+    Dock TRANSPARENTE. Sem fundo.
+
+    Este passou por tres estados e os tres apareceram na tela:
+
+      1. `linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 100%)` — o
+         video aparecia atraves, e o usuario mandou tirar a "transparencia".
+      2. `#0a0d13` solido — eu troquei o gradiente por um bloco escuro achando que
+         era o que ele queria. Era o oposto: a barra virou aquele retangulo cinza
+         desenhado a lapis vermelho. O comment original dizia "fundo solido e o
+         resultado correto" e eu acreditei no comment em vez do pedido.
+      3. Agora: sem fundo. A janela do overlay ja e TRANSPARENTE de verdade
+         (`html.player-overlay-mode #root { background: transparent !important }`),
+         entao sem fundo no dock o video aparece por baixo da barra inteira.
+
+    O texto continua legivel porque o video escurece sozinho embaixo, e o titulo
+    tem `text-shadow`. Se em algum cenario o texto perder contraste, o ajuste e
+    um `text-shadow` mais forte — nao um fundo solido.
+
+    O `padding-top` foi de 28px para 6px junto: os 28px eram a rampa que sumia o
+    preto no video, e sem gradiente eles viravam tarja vazia acima do titulo.
+  */
+  background: transparent;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.3s ease;
@@ -10350,7 +10937,12 @@ html.player-overlay-mode #root {
 }
 
 .po-title {
-  margin: 0 0 8px;
+  /*
+    Sem fundo no dock, o titulo passa a ficar sobre o video. O `text-shadow` e o
+    que segura a legibilidade — sem ele, o branco some em cena clara.
+  */
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 10px rgba(0, 0, 0, 0.6);
+  margin: 0 0 4px;
   text-align: center;
   font-size: 15px;
   font-weight: 500;
@@ -10364,12 +10956,14 @@ html.player-overlay-mode #root {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 5px;
 }
 
 .po-time {
   width: 64px;
   flex-shrink: 0;
+  /* Sem fundo no dock, o tempo fica sobre o video: precisa de sombra. */
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   color: var(--text-muted);
@@ -10379,10 +10973,29 @@ html.player-overlay-mode #root {
   text-align: right;
 }
 
+/*
+  Trilho do seek — TRANSPARENTE.
+
+  Este trilho passou por tres fundos e os tres apareceram na tela: `rgba(0,0,0,
+  0.28)` quando o dock era transparente, e `rgba(255,255,255,0.16)` quando o dock
+  ficou opaco. O segundo e o que o usuario mandou tirar: 16% de branco sobre o
+  dock solido desenha uma barra cinza clara atravessando a tela, do lado do
+  slider de volume, que ja era vermelho.
+
+  Agora o fundo e transparente e o trilho e desenhado pelo proprio `.po-seek`,
+  que ja pinta a parte percorrida em vermelho e a restante em branco a 22%. O
+  `po-seek-wrap` fica so como a caixa de medicao e o alvo de clique — sem
+  desenhar nada.
+*/
 .po-seek-wrap {
   position: relative;
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 2px;
+  background: transparent;
 }
 
 .po-scrub-tip {
@@ -10408,20 +11021,89 @@ html.player-overlay-mode #root {
   accent-color: #ef4444;
 }
 
-.po-volume {
-  width: 120px;
-  min-width: 72px;
-  flex-shrink: 0;
+/*
+  Trilho do seek desenhado a mao, sem `-webkit-appearance: none`.
+
+  O `accent-color` pinta o trilho nativo do Chrome em duas cores, e nao deixa a
+  parte ja percorrida mostrar o progresso de forma previsivel sobre um fundo
+  translucido. Aqui o trilho e um gradiente que o React atualiza por variavel —
+  `--seek-pct`, alimentada em `po-seek-row` — e o trilho vazio fica visivel
+  dentro da faixa escura.
+*/
+.po-seek {
   -webkit-appearance: none;
   appearance: none;
   height: 6px;
   border-radius: 999px;
+  /*
+    O trilho NAO percorrido era `rgba(255,255,255,0.28)` — 28% de branco sobre o
+    dock solido, que desenha exatamente a barra cinza que o usuario mandou tirar
+    duas vezes. A primeira vez eu troquei o fundo do `po-seek-wrap` (o continer,
+    16%), e a barra continuou: quem pinta o cinza e ESTE gradiente.
+
+    Agora a parte nao percorrida e transparente e o unico desenho e o vermelho do
+    progresso, mais o polegar. Quem precisa de trilho clario em cima de imagem
+    clara e o caso do polegar, que ja tem `border: 2px solid #fff`.
+  */
+  background: linear-gradient(
+    to right,
+    #ef4444 0%,
+    #ef4444 var(--seek-pct, 0%),
+    transparent var(--seek-pct, 0%),
+    transparent 100%
+  );
+  outline: none;
+}
+
+.po-seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ef4444;
+  border: 2px solid #fff;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+.po-seek::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ef4444;
+  border: 2px solid #fff;
+  cursor: pointer;
+}
+
+.po-volume {
+  width: 120px;
+  /*
+   * `min-width: 0` + `flex-shrink: 1` sao o que deixa a fileira caber numa janela
+   * estreita sem quebrar. Com `flex-shrink: 0` o slider mantinha 120px e era o
+   * elemento que empurrava o resto para fora da janela.
+   */
+  min-width: 0;
+  flex-shrink: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  /*
+    Mesma regra do `.po-seek`: a parte nao percorrida era
+    `rgba(255,255,255,0.22)` — 22% de branco sobre o dock solido, que e a barra
+    cinza que sobrou depois do seek ficar transparente. Este era o ultimo lugar
+    com branco de fundo na barra.
+
+    Agora e transparente: o unico desenho e o vermelho do volume e o polegar,
+    que tem `border: 2px solid #fff`.
+  */
   background: linear-gradient(
     to right,
     #ef4444 0%,
     #ef4444 var(--vol-pct, 100%),
-    rgba(255, 255, 255, 0.22) var(--vol-pct, 100%),
-    rgba(255, 255, 255, 0.22) 100%
+    transparent var(--vol-pct, 100%),
+    transparent 100%
   );
   outline: none;
 }
@@ -10458,19 +11140,34 @@ html.player-overlay-mode #root {
   font-weight: 700;
   letter-spacing: 0.12em;
   color: #f87171;
-  margin-bottom: 10px;
+  /* mesma razao do `.po-title`: legibilidade sobre o video, sem fundo solido. */
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 10px rgba(0, 0, 0, 0.6);
+  margin-bottom: 6px;
 }
 
 .po-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  /*
+   * SEM `flex-wrap`. Com wrap, a fileira de botoes quebrava em duas no modo
+   * janela (494px de largura) e o dock passava a pedir 92px de toolbar. A janela
+   * do overlay era menor que isso, o `overflow: hidden` cortava o fim da lista,
+   * e sobrava so o ultimo botao — o de tela cheia.
+   *
+   * Agora e uma fileira so. O slider de volume encolhe (`min-width: 0`) para
+   * dar lugar aos botoes, e nenhum botao quebra: `flex-shrink: 0`.
+   */
+  flex-wrap: nowrap;
   align-items: center;
   gap: 4px;
 }
 
 .po-toolbar-spacer {
+  /*
+   * `min-width: 0` em vez de 8px: num player estreito o espaco entre os grupos
+   * cede primeiro. Com 8px fixos ele empurrava o ultimo grupo para fora.
+   */
   flex: 1;
-  min-width: 8px;
+  min-width: 0;
 }
 
 .po-btn {
@@ -10483,7 +11180,19 @@ html.player-overlay-mode #root {
   min-width: 44px;
   min-height: 44px;
   padding: 10px;
-  background: rgba(24, 24, 27, 0.85);
+  /*
+    Botao TRANSPARENTE.
+
+    Era `rgba(24, 24, 27, 0.85)` — um cinza quase opaco. Sobre o dock solido ele
+    desenhava seis quadrados cinza em fileira, que era a "barra meio cinza" que o
+    usuario mandou tirar: o vidro de 85% nao deixava passar o video, entao o
+    resultado era um bloco cinza, nao um botao.
+
+    Agora o fundo e transparente de verdade e o icone branco e que faz o desenho.
+    O hover continua clareando (`rgba(255,255,255,0.16)`), entao o botao nao
+    perde o alvo — ele acende quando o cursor chega.
+  */
+  background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   pointer-events: auto;
@@ -10491,8 +11200,33 @@ html.player-overlay-mode #root {
   transition: background 0.15s ease;
 }
 
-.po-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+/*
+  Hover do botao.
+
+  `:hover` sozinho nao dispara nesta janela: o overlay e uma BrowserWindow
+  separada com `focusable: false`, e enquanto `setIgnoreMouseEvents(true)` esta
+  ligado so os filhos com `pointer-events: auto` recebem o evento. O cursor
+  chega, o `:hover` paints — mas em Windows a transicao de uma janela
+  nao-focavel para dentro dela e tao rapida que o estado ":hover" nao chega a
+  ser pintado antes do `mouseleave`.
+
+  `:focus-visible` cobre o mesmo caminho por teclado e mouse: o botao fica
+  focavel pelo Tab, e o anel aparece. Combinado com o `hover`, o alvo tem
+  resposta visivel nas duas situacoes.
+*/
+.po-btn:hover,
+.po-btn:focus-visible {
+  /* 0.16 era quase invisivel quando o fundo do botao era transparente. */
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.po-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.po-btn:active {
+  background: rgba(255, 255, 255, 0.32);
 }
 
 .po-btn.ghost {
@@ -11704,5 +12438,340 @@ button.hidden-item-chip:focus-visible {
     animation-duration: 0.75s !important;
     animation-iteration-count: infinite !important;
     animation-timing-function: linear !important;
+  }
+}
+
+
+/* ==================================================================
+   RESTAURAR OCULTOS — folha de escolha.
+   ================================================================== */
+
+/* Fundo: escurece o app sem virar opaco, para a pessoa continuar
+   entendendo onde esta. */
+.restaurar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+/*
+ * Teto de 82% da viewport.
+ *
+ * Sem isto o rodape — que e FIXO — sai da tela no fim da lista, e e justamente
+ * no fim da lista que a pessoa precisa confirmar. display: flex em coluna com
+ * o corpo flexivel e o que mantem cabecalho e rodape parados e so o meio rola.
+ */
+.restaurar-sheet {
+  width: 100%;
+  max-width: 480px;
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--card-surface);
+  border: 1px solid var(--border-subtle);
+  border-bottom: none;
+  border-radius: 18px 18px 0 0;
+  padding: 18px 16px 14px;
+  box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.55);
+  animation: slideUp 0.28s ease-out;
+}
+
+.restaurar-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.restaurar-header h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.restaurar-header p {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.restaurar-fechar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.restaurar-fechar:hover {
+  background: var(--surface-raised-hover);
+}
+
+/* O MEIO: a unica parte que rola. */
+.restaurar-corpo {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 14px -4px 0;
+  padding: 0 4px;
+}
+
+.restaurar-secao + .restaurar-secao {
+  margin-top: 18px;
+}
+
+.restaurar-secao h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.restaurar-linha {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.restaurar-linha:hover {
+  background: var(--surface-raised-hover);
+}
+
+.restaurar-linha.is-marcado {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/*
+ * O CHECKBOX.
+ *
+ * A peca que faz a linha ser reconhecida como marcavel: quadrado vazio com borda
+ * quando desmarcado, acento com "OK" quando marcado. Estado so na cor do fundo,
+ * ou um glifo que so "aparece", faz a linha parecer texto.
+ *
+ * O "OK" e texto miudo e em peso alto: dentro de 22px um check fino se le como
+ * ruido, e o que precisa e dizer "marcado" sem acercarse.
+ */
+.restaurar-check {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid var(--text-faint);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent-ink);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.restaurar-linha.is-marcado .restaurar-check {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.restaurar-texto {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.restaurar-titulo {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A categoria de origem do titulo. Um nome solto sem contexto nao ajuda quando
+   ha vinte itens ocultos. */
+.restaurar-sub {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Rodape FIXO. */
+.restaurar-rodape {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.restaurar-marcar {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+
+.restaurar-marcar:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.restaurar-confirmar {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 18px;
+  font-size: 13.5px;
+  font-weight: 700;
+  cursor: pointer;
+  /* Inversao pelos tokens, como o primario da ficha: o botao acompanha o tema. */
+  background: var(--text-primary);
+  color: var(--bg-base);
+}
+
+.restaurar-confirmar:disabled {
+  /* Sem nada marcado o botao mostra SO "Restaurar", e desabilitado. Instrucao
+     dentro de um botao desabilitado le como uma terceira acao — por isso ela
+     foi para o subtitulo do cabecalho. */
+  opacity: 0.35;
+  cursor: default;
+}
+/* ==================================================================
+   OCULTAR / RESTAURAR — acoes da barra do browse
+   ================================================================== */
+
+/*
+ * Container: fica depois das pilhas (filme/serie) ou da busca (ao vivo).
+ *
+ * SEM `margin-left: auto`: ele empurrava o grupo para a ponta oposta da barra, e
+ * o botao "Restaurar" ficava a centenas de pixels do "★ Nota". A barra se le da
+ * esquerda para a direita, e o par de acoes pertence ao lado das pilhas, nao no
+ * outro extremo.
+ *
+ * `flex: 0 0 auto` mantem o grupo no tamanho do conteudo: os botoes nao esticam
+ * nem encolhem para preencher a sobra.
+ */
+.browse-hide-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* NEM UM NEM OUTRO estica no desktop. A largura e a do conteudo. */
+.browse-hide-btn,
+.browse-restore-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.browse-hide-btn:hover,
+.browse-restore-btn:hover {
+  background: var(--surface-raised-hover);
+  border-color: var(--text-ghost);
+}
+
+/*
+ * O botao de DUAS LINHAS.
+ *
+ * `flex-direction: column` + `align-items: flex-start` e o que faz a
+ * primeira linha ser o rotulo e a segunda o nome — em vez de o nome ir para o
+ * lado e esticar a largura. `max-width` trava o meio-termo: nome curto deixa
+ * o botao justo, nome longo encurta com reticencias.
+ */
+.browse-hide-btn {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  max-width: 190px;
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.browse-hide-btn-rotulo {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+/* A segunda linha: o NOME da categoria, em fonte pequena, com reticencias.
+   Sem `min-width: 0` o flex item nao encolhe e o texto vaza em vez de
+   encurtar. */
+.browse-hide-btn-nome {
+  min-width: 0;
+  max-width: 100%;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browse-restore-btn {
+  padding: 7px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Em tela estreita os dois podem descer para a linha de baixo sem esticar:
+   `flex-wrap` quebra, e a largura segue sendo a do conteudo. */
+@media (max-width: 900px) {
+  .browse-hide-actions {
+    flex-wrap: wrap;
+  }
+
+  .browse-hide-btn {
+    max-width: 100%;
   }
 }
