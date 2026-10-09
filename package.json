@@ -1,7 +1,7 @@
 {
   "name": "stplay",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Player IPTV desktop",
   "author": "Felipe",
   "repository": {
@@ -53,7 +53,7 @@
   "build": {
     "appId": "com.sturplay.desktop",
     "productName": "ST PLAY",
-    "copyright": "Copyright Ã‚Â© Felipe",
+    "copyright": "Copyright © Felipe",
     "publish": {
       "provider": "github",
       "owner": "StuartLipe",
@@ -123,8 +123,8 @@
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ST PLAY 1.0.2",
-      "uninstallDisplayName": "ST PLAY 1.0.2",
+      "shortcutName": "ST PLAY 1.0.3",
+      "uninstallDisplayName": "ST PLAY 1.0.3",
       "artifactName": "ST-PLAY-Setup-${version}.exe"
     },
     "portable": {
@@ -140,3 +140,4 @@
     "koffi@3.1.6": true
   }
 }
+

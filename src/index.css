@@ -4180,6 +4180,27 @@ img.cover-ready {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Bloco contentor da pílula de Restaurar ancorada abaixo. */
+  position: relative;
+}
+
+/*
+ * Restaurar no detalhe da série.
+ *
+ * A pílula é a mesma do grid (`sort-pill-restore`), mas aqui ela precisa de
+ * posição: no grid ela flui no meio da barra; no painel de detalhe não há barra,
+ * então ela é ancorada no canto superior direito.
+ *
+ * O `z-index` é alto o suficiente para passar por cima do cabeçalho da
+ * `detail-tint-view` — que tem fundo próprio e passaria por cima de um botao
+ * posicionado apos ela no DOM.
+ */
+.channels-detail-restore {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 6;
+  flex: none;
 }
 
 .channels-detail-pane .detail-tint-view,
@@ -4892,6 +4913,21 @@ img.cover-ready {
   text-shadow: none;
 }
 
+/*
+ * Botão "continuar de onde parou" do card de Favoritos.
+ *
+ * Reusa a casca circular do `.poster-fav-btn` e só troca a cor: é a única ação
+ * do card que INICIA playback, então precisa ler diferente de favoritar e de
+ * apagar. A cor vem do token de destaque do tema, que o dono já escolhe.
+ */
+.poster-resume-btn {
+  color: var(--tone-lift);
+}
+
+.poster-resume-btn:hover {
+  color: var(--text-primary);
+}
+
 .poster-fav-btn:hover {
   background: var(--poster-scrim-hover);
   transform: scale(1.15);
@@ -4958,6 +4994,32 @@ img.cover-ready {
   transform: scale(1.15);
   border-color: #ef4444;
   box-shadow: 0 0 10px rgba(239, 68, 68, 0.6);
+}
+
+/*
+ * Second step of the two-step remove: first click swaps trash for check.
+ *
+ * Fica VERMELHO igual ao trash enquanto armado — a cor é o aviso de "esse botão
+ * agora vai apagar", e um verde de confirmação leria como "pronto". Vira o
+ * branco do resto quando desarma, no mesmo lugar em que o `hover` já vivia.
+ */
+.poster-trash-btn.is-confirming,
+.poster-trash-btn.is-confirming:hover {
+  background: #ef4444;
+  color: #ffffff;
+  border-color: #ef4444;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.6);
+  animation: poster-trash-arm 0.9s ease-in-out infinite;
+}
+
+@keyframes poster-trash-arm {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.15);
+  }
 }
 
 .poster-info {
@@ -8294,7 +8356,21 @@ body.electron-fullscreen .player-wrap {
   position: fixed;
   top: 18px;
   right: 18px;
-  z-index: 120;
+  /*
+   * Z-INDEX ABAIXO DE TODO MODAL — E NAO ACIMA.
+   *
+   * O cartaz ficava em 120, acima de `.modal-backdrop` (10),
+   * `.history-modal-backdrop` (80) e `.parental-backdrop` (90). Os dois sao
+   * irmaos no DOM com o `UpdateToast`, entao o cartaz flutuava POR CIMA do
+   * backdrop do PIN parental, ocupava o canto superior direito e interceptava
+   * clique (`pointer-events` default) sobre um gate que existe justamente para
+   * bloquear.
+   *
+   * O cartaz e informativo e pode esperar: um modal aberto tem prioridade. O
+   * unico requisito e ele continuar acima do conteudo normal do app, e o shell
+   * nao passa de 10 — 5 deixa o cartaz visivel e abaixo de qualquer backdrop.
+   */
+  z-index: 5;
   max-width: 340px;
   background: var(--surface-raised-hover);
   backdrop-filter: blur(16px);
@@ -9963,30 +10039,122 @@ body.electron-fullscreen .player-wrap {
   gap: 8px;
 }
 
-.live-epg-now {
+/*
+ * A FAIXA DEBAixo DO VIDEO - CARDS IGUAIS AOS DO GUIA.
+ *
+ * Estas regras existiam escritas e sem uso (`.live-epg-now`, `.live-epg-label`,
+ * `.live-epg-title`, `.live-epg-desc`) de um layout que nunca foi ligado. Duas
+ * versoes passaram por aqui antes dos cards: um bloco "No ar agora" separado, que
+ * deixava o primeiro horario sozinho na coluna da esquerda, e uma lista vertical
+ * com hora e titulo lado a lado, que alinhava mas nao se parecia com nada que o
+ * dono ja conhecesse. Todas as tres formas estao registradas aqui para a proxima
+ * pessoa nao tentar a quarta.
+ *
+ * A aparencia e a de `.epg-block` do guia (titulo em cima, horario embaixo, borda
+ * fina, cantos redondos) mas nao a MESMA classe: `.epg-block` recebe `left` e
+ * `width` em pixels posicionados, que aqui sao irrelevantes e brigariam com o
+ * flex. Mesma cara, outro nome.
+ *
+ * O video cede altura sozinho: `.live-preview-player` ja e flex column e
+ * `.player-wrap.player-embedded` ja e `flex: 1`. Aqui so se marca `flex-shrink: 0`
+ * na faixa; sem isso ela estica, o video ganha `min-height: 0` e sobra uma fresta
+ * preta embaixo do player em vez de programa.
+ */
+.live-preview-epg-box {
+  flex-shrink: 0;
+  margin: 0 10px 10px;
+  padding: 0;
+  max-width: 100%;
+}
+
+.live-epg-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 4px;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+
+.live-epg-cards::-webkit-scrollbar {
+  height: 6px;
+}
+
+.live-epg-cards::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 40%, transparent);
+  border-radius: 999px;
+}
+
+/*
+ * `flex: 0 0 auto` impede o cartao de esticar para preencher a linha: sem ele o
+ * flex distribute o espaco e um so programa vira um bloco de 900px. `min-width` e
+ * `max-width` dao a faixa cartao de tamanho de leitura e limitam o titulo a duas
+ * linhas — nome de programa de canal de noticia e longo, e o cartao nao comporta
+ * 30 palavras.
+ */
+.live-epg-card {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+  min-width: 118px;
+  max-width: 172px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card-surface) 70%, transparent);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
 }
 
-.live-epg-label {
-  font-size: 11px;
-  font-weight: 800;
-  color: color-mix(in srgb, var(--accent) 82%, var(--text-primary));
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-}
-
-.live-epg-title {
-  font-size: 14px;
-  font-weight: 700;
+.live-epg-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
   color: var(--text-primary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-.live-epg-desc {
-  font-size: 12px;
+.live-epg-card-time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
-  line-height: 1.4;
+}
+
+/* O programa no ar: mesma forma dos outros, distinguido so pela cor. */
+.live-epg-card.is-now {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.live-epg-card.is-now .live-epg-card-title {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/*
+ * A hora e uma COLUNA de largura fixa, e nao so um texto. E o que faz os titulos
+ * alinearem sozinhos numa lista de nomes de comprimento diferentes — sem isso o
+ * olho nao achava o programa pelo titulo, e era exatamente o que ficou dificil de
+ * entender na primeira versao. `tabular-nums` mantem a coluna reta: a fonte padrao
+ * tem algarismo de largura variavel e a coluna tremia a cada programa.
+ */
+/* O tempo correndo da espera: menor que o rotulo, e mais apagado. */
+.po-loading-elapsed {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--text-muted, #8b93a7) 80%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sem EPG o app nao mostra faixa vazia; o guia continua dizendo "Sem programação". */
+.live-preview-player > .live-preview-epg-box:empty {
+  display: none;
 }
 
 .live-preview-recents {
@@ -12448,8 +12616,21 @@ button.hidden-item-chip:focus-visible {
 
 /* Fundo: escurece o app sem virar opaco, para a pessoa continuar
    entendendo onde esta. */
+/*
+ * Cobre SO a coluna de canais, nao a janela.
+ *
+ * `absolute`, nao `fixed`: o ancestrao e `<section className="channels">`, que ja
+ * tem `contain: layout paint` (acima) e por isso serve de bloco contentor e de
+ * recorte. A folha nasce dentro da coluna e morre nela.
+ *
+ * Era `fixed; inset: 0` antes, o que centralizava a folha no eixo da JANELA — e a
+ * janela inclui o player. O player e janela NATIVA (o mpv e adotado como filho da
+ * janela do Electron), e janela nativa desenha por cima de qualquer z-index do
+ * DOM. A folha sumia atras dele, com o botao de confirmar na regiao que nao
+ * desenhava. Ver o comentario no ponto onde a folha e montada, em `App.tsx`.
+ */
 .restaurar-backdrop {
-  position: fixed;
+  position: absolute;
   inset: 0;
   z-index: 90;
   display: flex;

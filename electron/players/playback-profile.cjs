@@ -22,6 +22,7 @@ const {
   formatBytes,
   descreverVodBuffer,
 } = require('./vod-buffer-limits.cjs')
+const { liveMaxBytes, descreverLiveBuffer } = require('./live-buffer-limits.cjs')
 
 /**
  * Quanto buffer o live precisa — medido, nao escolhido no feeling.
@@ -79,8 +80,13 @@ function profileFor(live, softZap) {
       ['cache-pause-wait', LIVE_CACHE_PAUSE_WAIT],
       ['cache-secs', LIVE_CACHE_SECS],
       ['demuxer-readahead-secs', LIVE_READAHEAD_SECS],
-      ['demuxer-max-bytes', LIVE_MAX_BYTES],
+      ['demuxer-max-bytes', formatBytes(liveMaxBytes())],
       ['network-timeout', networkTimeoutSecs(true)],
+      // A/V sync: stream tem drift de timestamp e sample rate inconsistente
+      // autosync=30 corrige drift esticando/encolhendo audio até 30%
+      // audio-buffer=0.3 estabilidade sem latência alta
+      ['autosync', 30],
+      ['audio-buffer', 0.3],
     ]
   }
   // VOD: sem cache-pause no inicio — comeca assim que houver quadro.
@@ -143,4 +149,5 @@ module.exports = {
   LIVE_READAHEAD_SECS,
   LIVE_MAX_BYTES,
   descreverVodBuffer,
+  descreverLiveBuffer,
 }

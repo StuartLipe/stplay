@@ -95,11 +95,26 @@ if (!repo) falha('package.json sem campo `repository` — o script precisa dele 
 const setup = join(root, 'release', `ST-PLAY-Setup-${versao}.exe`)
 const portatil = join(root, 'release', `ST-PLAY-${versao}.exe`)
 const latestYml = join(root, 'release', 'latest.yml')
+/*
+ * O `.blockmap` E O DOWNLOAD DIFERENCIAL — E ELE NAO SUBIA.
+ *
+ * O `electron-builder` gera `ST-PLAY-Setup-<versao>.exe.blockmap` ao lado do
+ * instalador, e o `electron-updater` le esse arquivo para calcular o download
+ * incremental: em vez dos 137 MB inteiros, baixa so os bytes que mudaram entre a
+ * versao instalada e a nova. Sem o arquivo na release, o atualizador cai no
+ * fallback de baixar o instalador completo — todo update custa 137 MB na rede de
+ * quem atualiza, sem nenhum aviso de que algo faltou.
+ *
+ * A causa foi a lista de upload ser montada a mao com tres entradas, e ninguem
+ * notar que o quarto artefato que o build produz nao estava nela.
+ */
+const blockmap = join(root, 'release', `ST-PLAY-Setup-${versao}.exe.blockmap`)
 
 for (const [rotulo, file] of [
   ['instalador', setup],
   ['portatil', portatil],
   ['latest.yml', latestYml],
+  ['blockmap', blockmap],
 ]) {
   if (!existsSync(file)) falha(`falta o artefato ${rotulo}: release/${basename(file)}`)
 }
@@ -132,6 +147,8 @@ log(`  instalador  ST-PLAY-Setup-${versao}.exe`)
 log(`              ${tamanho(setup)}  ${sha256(setup)}`)
 log(`  portatil    ST-PLAY-${versao}.exe`)
 log(`              ${tamanho(portatil)}  ${sha256(portatil)}`)
+log(`  blockmap    ${basename(blockmap)}`)
+log(`              ${tamanho(blockmap)}  (download diferencial; sem ele o update baixa os ${tamanho(setup)} inteiros)`)
 log('')
 log(`  manifesto   latest.yml -> ${pedido.trim()}  ok, o arquivo existe`)
 log('              versao do manifesto confere com o package.json')
@@ -189,7 +206,7 @@ if (existsSync(arquivoNotas)) {
 /* -------------------------------------------------------- 5. publicar */
 
 const tag = `v${versao}`
-const arquivos = [setup, portatil, latestYml]
+const arquivos = [setup, portatil, latestYml, blockmap]
 const notasTmp = join(root, 'release', `.notas-${versao}.md`)
 writeFileSync(notasTmp, notas, 'utf8')
 

@@ -391,15 +391,17 @@ function startFfmpegStream(targetUrl, startSec, res, fresh, opts = {}) {
   })
   ffmpeg.on('error', onClose)
   ffmpeg.on('close', (code) => {
+    // SEMPRE fecha a resposta: code 0 = fim de arquivo normal (filme acabou),
+    // senão mpv fica em buffering eterno esperando mais dados que nunca virão.
+    try {
+      if (!res.writableEnded) res.end()
+    } catch {
+      // ignore
+    }
     if (code !== 0 && code !== null) {
       try {
         const safe = String(targetUrl).replace(/(\/live\/)[^/]+\/[^/]+(\/.*)?/i, '$1*/*$2').slice(0, 120)
         console.error('[ffmpeg-proxy] exit', { code, target: safe, stderr: String(stderr || '').slice(-1200) })
-      } catch {
-        // ignore
-      }
-      try {
-        if (!res.writableEnded) res.end()
       } catch {
         // ignore
       }

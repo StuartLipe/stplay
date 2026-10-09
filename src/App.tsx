@@ -2058,6 +2058,7 @@ export default function App() {
                 continueWatching={activeContinueWatching}
                 onOpen={openContent}
                 onToggleFavorite={toggleFav}
+                onRemoveContinue={removeContinueWatching}
               />
             )}
 
@@ -7095,14 +7096,6 @@ function Browse({
     <div
       className={`browse ${kind === 'live' ? 'browse-live' : ''}${detailPane ? ' browse-with-details browse-detail-focus' : ''}`}
     >
-      {folhaRestaurar && (
-        <RestaurarOcultosSheet
-          ocultos={ocultosDoContexto}
-          catalogo={channels}
-          onClose={() => setFolhaRestaurar(false)}
-          onRestaurar={restaurarSelecionados}
-        />
-      )}
       <aside
         ref={groupsRef}
         className="groups"
@@ -7141,6 +7134,30 @@ function Browse({
         )}
       </aside>
       <section className="channels">
+        {/*
+          A FOLHA DE RESTAURAR FICA DENTRO DA COLUNA DE CANAIS, e nao na raiz do
+          `.browse`.
+
+          Ela abria em `position: fixed` sobre a janela inteira, centralizada no
+          eixo da JANELA — e a janela inclui o player. O player e uma janela
+          nativa (o mpv e adotado como filho da janela do Electron), e janela
+          nativa fica ACIMA de qualquer camada do DOM, nao importa o z-index que
+          o CSS tenha. Resultado medido: a folha aparecia atras do player, com o
+          rodape de confirmar justamente na regiao que nao desenhava.
+
+          Dentro de `<section className="channels">` a folha vira `absolute` e
+          respeita a coluna — `contain: layout paint` (index.css) ja faz dela o
+          bloco contentor e o recorte. Agora ela cobre os canais, que e onde os
+          itens ocultos estavam, e nunca toca no player.
+        */}
+        {folhaRestaurar && (
+          <RestaurarOcultosSheet
+            ocultos={ocultosDoContexto}
+            catalogo={channels}
+            onClose={() => setFolhaRestaurar(false)}
+            onRestaurar={restaurarSelecionados}
+          />
+        )}
         {showGrid ? (
           <>
         <div className="browse-filter-bar">
@@ -7680,7 +7697,39 @@ function Browse({
         )}
           </>
         ) : (
-          <div className="channels-detail-pane">{detailPane}</div>
+          <div className="channels-detail-pane">
+            {/*
+              RESTAURAR NO DETALHE DA SÉRIE.
+
+              Enquanto a série está aberta, `showGrid` vira falso e a
+              `browse-filter-bar` inteira sai da coluna — e o Restaurar vivia lá
+              dentro, no meio das pílulas de ordenação. Resultado: com a série
+              aberta não havia caminho nenhum para a lista de ocultos, enquanto o
+              grid de filmes e o ao vivo tinham o botão. O defeito não era de
+              z-index aqui, era de AUSÊNCIA do controle.
+
+              Ele reusa `sort-pill-restore` (mesma pílula do grid) e mora no canto
+              superior direito do painel, que é onde a `detail-tint-view` tem o
+              respiro. A folha continua sendo a mesma, e continua ancorada na
+              coluna de canais — só agora ela também é alcançável por aqui.
+            */}
+            {kind !== 'live' && (
+              <button
+                type="button"
+                className="sort-pill sort-pill-restore channels-detail-restore"
+                onClick={() => setFolhaRestaurar(true)}
+                title={
+                  deveMostrarRestaurar(ocultosDoContexto)
+                    ? 'Abrir a lista do que foi ocultado'
+                    : 'Nada oculto neste tipo de conteúdo'
+                }
+              >
+                <RotateCcw size={14} strokeWidth={2.2} />
+                Restaurar
+              </button>
+            )}
+            {detailPane}
+          </div>
         )}
       </section>
       {kind === 'live' && (
@@ -9255,12 +9304,14 @@ function FavoritesView({
   continueWatching,
   onOpen,
   onToggleFavorite,
+  onRemoveContinue,
 }: {
   favorites: string[]
   catalogs: Record<ContentKind, Channel[]>
   continueWatching: ContinueWatching[]
   onOpen: (channel: Channel, list: Channel[], startTime?: number) => void
   onToggleFavorite: (id: string) => void
+  onRemoveContinue?: (channelId: string, seriesId?: string) => void
 }) {
   const items = useMemo(() => {
     const byId = new Map<string, Channel>()
@@ -9273,13 +9324,32 @@ function FavoritesView({
   const kindLabel = (kind: ContentKind) =>
     kind === 'live' ? 'Ao vivo' : kind === 'movie' ? 'Filme' : 'Série'
 
+  /*
+   * ID do card aguardando o segundo toque no botão de lixeira.
+   *
+   * Um estado só para os dois casos que precisam: sumir sozinho (pra não deixar
+   * um botão "confirmar" armado pra sempre depois que o usuário mudou de ideia) e
+   * limpar quando a lista muda e o card não existe mais.
+   */
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!confirmRemoveId) return
+    const timer = setTimeout(() => setConfirmRemoveId(null), 4000)
+    return () => clearTimeout(timer)
+  }, [confirmRemoveId])
+  useEffect(() => {
+    setConfirmRemoveId((current) => (current && items.some((item) => item.id === current) ? current : null))
+  }, [items])
+
   return (
     <div className="favorites-view">
       <ShellBrand />
       <header className="favorites-head">
         <h1 className="favorites-title">Favoritos</h1>
         <p className="favorites-subtitle">
-          Cada canal, filme e série marcado com coração nas suas listas. Toque para abrir.
+          Cada canal, filme e série marcado com coração nas suas listas. Toque no card para abrir; no
+          canto, a volta para continuar de onde parou, a lixeira para tirar de Continuar Assistindo e o
+          coração para desfavoritar.
         </p>
       </header>
 
@@ -9301,6 +9371,9 @@ function FavoritesView({
                   (channel.streamId &&
                     (item.channel.streamId === channel.streamId || item.seriesId === channel.streamId)),
               )
+              // Mesma régua da barra de progresso abaixo: menos de 5s é noise de
+              // primeiro play, não "parou pra assistir".
+              const hasProgress = Boolean(prog && prog.currentTime > 5 && prog.duration > 0)
               return (
                 <div key={channel.id} className="poster-card">
                   <div
@@ -9322,17 +9395,83 @@ function FavoritesView({
                         {rating.toFixed(1)}
                       </div>
                     )}
-                    <button
-                      type="button"
-                      className={`poster-fav ${isFav ? 'active' : ''}`}
-                      title={isFav ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onToggleFavorite(channel.id)
-                      }}
-                    >
-                      <Heart size={15} fill={isFav ? 'currentColor' : 'none'} />
-                    </button>
+                    {/*
+                     * Ações do card.
+                     *
+                     * Antes o botão de coração usava `poster-fav`, que NÃO existe
+                     * no CSS — só existe `poster-fav-btn`. Sem estilo ele não virava
+                     * botão circular no canto, e na tela aparecia um card que só
+                     * abria os detalhes.
+                     *
+                     * Aqui reusa `.poster-top-actions`, que é o mesmo agrupamento do
+                     * grid de filmes/séries: sem `opacity` nem `:hover`, então as
+                     * opções ficam sempre visíveis — o card é navegado por clique,
+                     * e um botão que só aparece no hover não existe para quem usa
+                     * o controle.
+                     */}
+                    <div className="poster-top-actions">
+                      {hasProgress && prog && (
+                        <button
+                          type="button"
+                          className="poster-fav-btn poster-resume-btn"
+                          title={`Continuar de onde parou (${formatPlayerTime(prog.currentTime)})`}
+                          aria-label="Continuar de onde parou"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onOpen(channel, items, prog.currentTime)
+                          }}
+                        >
+                          <RotateCcw size={15} />
+                        </button>
+                      )}
+                      {prog && onRemoveContinue && (
+                        <button
+                          type="button"
+                          className={`poster-trash-btn${confirmRemoveId === channel.id ? ' is-confirming' : ''}`}
+                          title={
+                            confirmRemoveId === channel.id
+                              ? 'Confirmar remoção'
+                              : 'Remover de Continuar Assistindo'
+                          }
+                          aria-label="Remover de Continuar Assistindo"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            /*
+                             * Dois toques, porque aqui não existe o modal de
+                             * confirmação que o grid de filmes tem (ele vive dentro
+                             * do `Browse`, e esse estado não sai daqui). Perder a
+                             * posição salva de um título por um clique errado é
+                             * dado perdido de verdade — então o primeiro toque só
+                             * arma, e o segundo executa.
+                             */
+                            if (confirmRemoveId === channel.id) {
+                              onRemoveContinue(channel.id, channel.streamId || channel.seriesId)
+                              setConfirmRemoveId(null)
+                              return
+                            }
+                            setConfirmRemoveId(channel.id)
+                          }}
+                        >
+                          {confirmRemoveId === channel.id ? (
+                            <Check size={15} />
+                          ) : (
+                            <Trash2 size={15} />
+                          )}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className={`poster-fav-btn poster-heart-btn ${isFav ? 'active' : ''}`}
+                        title="Remover dos favoritos"
+                        aria-label="Remover dos favoritos"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onToggleFavorite(channel.id)
+                        }}
+                      >
+                        <Heart size={15} fill={isFav ? 'currentColor' : 'none'} />
+                      </button>
+                    </div>
                   </div>
                   <div className="favorites-card-meta">
                     <span className="favorites-kind">{kindLabel(channel.kind)}</span>
@@ -10513,9 +10652,10 @@ const manager = new PlayerManager({
         setManagedEngine(engine === 'stur' ? 'stur' : engine === 'mpeg' ? 'mpeg' : engine === 'internal' ? 'internal' : null)
       },
       onEvent: (event) => {
-        if (event.type === 'ready' || event.type === 'playing' || event.type === 'buffering') {
-          // Guarda no ref: evento de buffering repete e setState repetido
-          // realimentava o render (Maximum update depth). Só seta uma vez.
+        if (event.type === 'ready' || event.type === 'playing') {
+          // nativeSeen marca que o player nativo JÁ DEU first frame.
+          // buffering NÃO deve setar nativeSeen — senão o boot spinner some
+          // antes do primeiro quadro chegar (especialmente no mpeg VOD).
           if (!nativeSeenRef.current) {
             nativeSeenRef.current = true
             setNativeSeen(true)
@@ -10523,9 +10663,7 @@ const manager = new PlayerManager({
         }
         const bufferedNative =
           playbackEngine === 'stur' ||
-          playbackEngine === 'mpeg' ||
-          managedEngineRef.current === 'stur' ||
-          managedEngineRef.current === 'mpeg'
+          managedEngineRef.current === 'stur'
         if (event.type === 'ready') {
           setNativeEmbedded(true)
           // VOD STUR: mantém booting até playing (mostra % de buffer)
@@ -10544,11 +10682,21 @@ const manager = new PlayerManager({
             nativePlayedRef.current = true
             setNativeBooting(false)
             setNativeEmbedded(true)
-            setBuffering(false)
-            setBufferPercent(100)
+            // mpeg VOD: NÃO desliga buffering aqui — deixa o boot poll subir até 100%
+            // Live bufferedNative: overlay cuida, pode desligar
+            if (channel.kind === 'live') {
+              setBuffering(false)
+              setBufferPercent(100)
+            }
           } else {
+            // mpeg VOD: NÃO desliga buffering — deixa boot poll / cache-buffering-state subir até 100%
+            // Outros (internal, etc): desliga normal
+            if (playbackEngine === 'mpeg' && channel.kind !== 'live') {
+              // VOD mpeg: deixa boot poll subir até 100%
+            } else {
+              setBuffering(false)
+            }
             setNativeEmbedded(true)
-            setBuffering(false)
           }
           setPlaying(true)
           setPlaybackError(null)
@@ -10709,11 +10857,13 @@ const manager = new PlayerManager({
           aplicarFalha()
         }
         if (event.type === 'buffering') {
-          if (typeof event.percent === 'number') {
-            setBufferPercent((prev) => Math.max(prev, event.percent ?? 0))
-          }
           if (bufferedNative) {
             const pct = typeof event.percent === 'number' ? event.percent : 0
+            const isBuffering = event.value !== false
+            setBuffering(isBuffering)
+            if (typeof event.percent === 'number') {
+              setBufferPercent(Math.max(0, Math.min(100, Math.round(event.percent))))
+            }
             const stillBooting = pct < 100
             // Ao vivo: overlay cuida do loading — não reabrir booting no App
             // VOD: nunca reabrir spinner depois do 1º play (buffer mid-stream)
@@ -10723,7 +10873,19 @@ const manager = new PlayerManager({
               else setNativeBooting(false)
             }
           } else {
-            setBuffering(Boolean(event.value))
+            // Para mpeg/outros sem bufferedNative: mesma lógica do stur
+            const pct = typeof event.percent === 'number' ? event.percent : 0
+            const isBuffering = event.value !== false
+            setBuffering(isBuffering)
+            if (typeof event.percent === 'number') {
+              setBufferPercent(Math.max(0, Math.min(100, Math.round(event.percent))))
+            }
+            const stillBooting = pct < 100
+            if (channel.kind !== 'live' && !nativePlayedRef.current) {
+              setBuffering(stillBooting)
+              if (stillBooting) setNativeBooting(true)
+              else setNativeBooting(false)
+            }
           }
         }
         if (event.type === 'duration') setDuration(event.value)

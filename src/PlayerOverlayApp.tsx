@@ -146,6 +146,30 @@ export function PlayerOverlayApp() {
    * seria anunciar um progresso inexistente.
    */
   const [bootMotivo, setBootMotivo] = useState<string | null>(null)
+
+  /*
+   * QUANTO TEMPO JA PASSOU ESPERANDO.
+   *
+   * O dono mediu 76 canais abertos e 23 falhos no painel dele, e cada falha custa
+   * 15 s de watchdog mais 15 s de fallback `.ts`. São 30 s de tela sem nenhuma
+   * palavra, e a leitura foi "bugando e a tela preta". Ele pediu para manter o
+   * tempo de espera, então a espera continua: o que muda e o app passar a DIZER
+   * que está esperando.
+   *
+   * Contador de 1 s, e so enquanto o véu está no ar. Fora dele o timer fica
+   * ligado à toa, e o componente vive na janela do overlay a sessão inteira.
+   */
+  const [bootSegundos, setBootSegundos] = useState(0)
+  useEffect(() => {
+    if (!booting) {
+      setBootSegundos(0)
+      return
+    }
+    const inicio = Date.now()
+    setBootSegundos(0)
+    const t = window.setInterval(() => setBootSegundos(Math.floor((Date.now() - inicio) / 1000)), 1000)
+    return () => window.clearInterval(t)
+  }, [booting])
   const [fullscreen, setFullscreen] = useState(false)
   const [volume, setVolume] = useState(readVolume)
   const [muted, setMuted] = useState(false)
@@ -281,16 +305,33 @@ export function PlayerOverlayApp() {
             return next
           })
         }
-        if (!hasPlayedRef.current && typeof event.percent === 'number' && event.percent < 100) {
+        /*
+         * ANTES DO PRIMEIRO PLAY, o booting só LIGA e nunca DESLIGA aqui.
+         *
+         * Este é o-defeito-do-VOD, e são duas metades do mesmo furo:
+         *
+         *   LIGA. A condição antiga era `percent < 100`, então o `cache-buffering-state`
+         *   do mpv chegando a 100% (o cache enche) não ligava o booting — e como
+         *   o primeiro quadro ainda não tinha chegado, o spinner nunca aparecia.
+         *
+         *   DESLIGA. O `cache-buffering-state` chega a 100% ANTES do primeiro quadro
+         *   decodificar, e mandava `value: false` junto. O overlay obedecia e
+         *   escondia o véu, e nada o reabria até o `playing` — buraco preto no
+         *   meio do carregamento, que é o "a bola pisca e some, e a tela fica preta"
+         *   que o dono viu.
+         *
+         * Quem fecha o booting antes do primeiro play é o evento `playing`, e só
+         * ele: ele significa literalmente "o quadro está na tela". A % do mpv, não.
+         * Depois do primeiro play, os dois casos voltam a ter efeito (buffer
+         * recovering e o spinner some).
+         */
+        if (!hasPlayedRef.current) {
           setBooting(true)
-        }
-        if (
+        } else if (
           (typeof event.percent === 'number' && event.percent >= 100) ||
           event.value === false
         ) {
-          if (hasPlayedRef.current || (typeof event.percent === 'number' && event.percent >= 100)) {
-            setBooting(false)
-          }
+          setBooting(false)
         }
       }
       if (event.type === 'duration' && typeof event.value === 'number' && event.value > 0) {
@@ -764,7 +805,33 @@ export function PlayerOverlayApp() {
             */
             <p className="po-loading-label">Indisponível no servidor</p>
           ) : (
-            <p className="po-loading-label">Buffering {bootPct ?? 0}%</p>
+            <>
+              <p className="po-loading-label">
+                {bootPct === null ? 'Abrindo canal' : `Buffering ${bootPct}%`}
+              </p>
+              {/*
+                O TEMPO CORRENDO, E O QUE SEPARA "ESPERANDO" DE "QUEBRADO".
+
+                Medido no painel do dono: 76 canais abertos, 23 falharam. Os 23
+                custam 15 s de watchdog + 15 s de fallback `.ts` = 30 s de tela
+                sem dizer NADA. O dono leu isso como "bugando e a tela preta".
+
+                O dono decidiu manter os 15 s — canal lento lento ainda abre, e
+                encurtar seria trocar um defeito por outro. O que sobra e dizer
+                quanto tempo ja passou. Uma pessoa esperando 6 s sabe que espera;
+                uma pessoa vendo preto ha 6 s acha que o app quebrou.
+
+                Sem este contador, o "Buffering 0%" ficava congelado no comecinho
+                da tela por 30 segundos, que e pior que preto: parece travado.
+              */}
+              {bootPct !== null && bootSegundos > 0 && (
+                <p className="po-loading-elapsed">
+                  {bootSegundos < 10
+                    ? `esperando há ${bootSegundos}s`
+                    : `esperando há ${Math.round(bootSegundos / 10) * 10}s`}
+                </p>
+              )}
+            </>
           )}
         </div>
       )}

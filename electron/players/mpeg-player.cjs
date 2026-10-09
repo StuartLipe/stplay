@@ -385,7 +385,11 @@ function onFirstFrame() {
     showVideo(lastBounds)
     try {
       overlay.show(mainWindow, lastBounds, { engine: 'MPEG', title: pendingTitle })
-      overlay.sendUi({ action: 'playback-ready' })
+      // VOD: não manda playback-ready no primeiro quadro — deixa o boot poll
+      // subir até 100% e mandar hide-loading. Live manda playback-ready normal.
+      if (mpegLive) {
+        overlay.sendUi({ action: 'playback-ready' })
+      }
     } catch {
       // ignore
     }
@@ -460,11 +464,23 @@ function handleIpcMessage(msg) {
       if (fileLoaded && waitingFirstFrame) onFirstFrame()
     }
     if (msg.name === 'cache-buffering-state' && typeof msg.data === 'number') {
-      // Percentual 0-100: o overlay mostra o número
-      // subindo. Durante o boot mantém o véu até 100; fora dele só sinaliza.
+      /*
+       * Percentual 0-100, mas NUNCA abaixo do que o relógio já mostrou.
+       *
+       * Este era o segundo furo do VOD, e é o que produzia o "a bola pisca e some,
+       * e a tela fica preta" do dono. O mpv empurra `cache-buffering-state = 100`
+       * quando o cache enche — e isso acontece ANTES do primeiro quadro ser
+       * decodificado. O `pct < 100` mandava `value: false`, o overlay recebia,
+       * e a linha `event.value === false` escondia o booting. Como o quadro ainda
+       * não tinha chegado, ninguém reabria o véu: buraco preto até o `playing`.
+       *
+       * A correção é não deixar o dado do mpv REBAIXAR o progresso, e não deixar
+       * ele esconder o véu antes do primeiro play. Quem fecha o booting, antes do
+       * primeiro quadro, é o evento `playing` — e só ele.
+       */
       const pct = Math.max(0, Math.min(100, Math.round(msg.data)))
       if (waitingFirstFrame) {
-        emit({ type: 'buffering', value: pct < 100, percent: pct })
+        emit({ type: 'buffering', value: true, percent: Math.max(pct, bootPctFloor) })
       } else {
         emit({ type: 'buffering', value: pct > 0 && pct < 100, percent: pct })
       }
@@ -500,34 +516,31 @@ function handleIpcMessage(msg) {
   }
 }
 
-function getProperty(name) {
-  return new Promise((resolve) => {
-    if (!ipcSocket || ipcSocket.destroyed) {
-      resolve(null)
-      return
-    }
-    const id = ++requestId
-    const timer = setTimeout(() => {
-      pendingRequests.delete(id)
-      resolve(null)
-    }, 1200)
-    pendingRequests.set(id, (msg) => {
-      clearTimeout(timer)
-      resolve(msg.data ?? null)
-    })
-    try {
-      ipcSocket.write(JSON.stringify({ command: ['get_property', name], request_id: id }) + '\n')
-    } catch {
-      clearTimeout(timer)
-      pendingRequests.delete(id)
-      resolve(null)
-    }
-  })
-}
+/*
+ * NAO EXISTE MAIS `getProperty` AQUI.
+ *
+ * Ela enfileirava um `get_property` no socket do mpv e resolvia em 1,2 s, e o
+ * poll de boot chamava a cada 400 ms — a fila nunca esvaziava, toda requisição
+ * expirava e `demuxer-cache-time` voltava `null` para sempre. Foi isso que deixou
+ * a porcentagem travada em 1 no carregamento inteiro, no ao vivo e no filme.
+ *
+ * O percentual agora vem do relógio (`startBootPoll`), e o único dado real que
+ * entra é o `cache-buffering-state`, que o mpv EMPURRA sozinho — sem requisição,
+ * sem fila, sem timeout. Se um dia precisar de outra propriedade, use o mesmo
+ * caminho: `observe_property`, nunca `get_property` em ciclo curto.
+ */
 
-/** Percentual 0-100: mede o cache a cada 400ms
- * enquanto o 1º frame não chega. Sem isso o número ficava parado. */
+/**
+ * Percentual 0-100 enquanto o 1º frame não chega.
+ *
+ * `bootPctFloor` é o PISO que o `cache-buffering-state` observado pelo mpv não
+ * pode furar. Ele sobe com a curva do relógio e nunca regride; ver o comentário
+ * de `startBootPoll` e o do handler de `cache-buffering-state` para os dois
+ * defeitos que ele segura (barra voltando, e bootstrap sumindo cedo demais).
+ */
 let bootPollTimer = null
+/** Maior percentual já mostrado na carga atual. Zera a cada `startBootPoll`. */
+let bootPctFloor = 0
 
 function stopBootPoll() {
   if (bootPollTimer) {
@@ -536,28 +549,66 @@ function stopBootPoll() {
   }
 }
 
+/**
+ * Progresso por TEMPO, não por `get_property`.
+ *
+ * MEDIDO no painel do dono (16:54, filme 1575712 pelo mpeg): 32 tiques seguidos,
+ * todos com `demuxer-cache-time` = `null`, e `pct` travado em 1 o carregamento
+ * inteiro. O spinner aparecia, mostrava "1%" e ficava lá — ou pior, o `playing`
+ * chegava e limpava, e sobrava tela preta sem explicação.
+ *
+ * A causa é a mesma que o `stur` já documentou em `stur-player.cjs`: este poll
+ * enfileira a cada 400 ms contra um `get_property` que só responde em ~1,2 s.
+ * Toda requisição ainda está pendente quando a próxima chega, a fila cresce, e o
+ * timeout de 1,2 s expira uma a uma — `null` para sempre.
+ *
+ * Por isso o número vem do RELÓGIO, e só o `cache-buffering-state` observado pelo
+ * mpv (que chega empurrado, sem polling) pode corrigir a curva para cima. É a
+ * mesma curva do `stur`: 0→80% nos primeiros 8 s, 80→95% até 20 s, e 95% depois.
+ * Chega a 100% só com dado real (`onFirstFrame`), nunca no relógio — inventar
+ * 100% no tempo seria o mesmo defeito que o `1%` constante, invertido.
+ */
 function startBootPoll() {
   stopBootPoll()
-  const target = mpegLive ? 2 : 5
-  let shown = 0
-  bootPollTimer = setInterval(async () => {
+  const startedAt = Date.now()
+  /*
+   * O percentual é ACUMULATIVO, e o motivo é o mesmo do `stur`
+   * (`reportBufferPercent`: `Math.max(cachePercent, effectivePct)`).
+   *
+   * Sem o `highest`, dois caminhos fazem a barra andar para trás no VOD:
+   *
+   *   1. O `cache-buffering-state` observado pelo mpv chega com um valor menor
+   *      que a curva do relógio (o cache pode transbordar e `demuxer-cache-time`
+   *      cair). O overlay guarda `prev` e ignora a regressão — mas o próximo
+   *      tique do relógio manda a curva inteira de novo, e aí a barra desce.
+   *   2. Dois `start()` na mesma sessão (zape rápido) compartilham `shown`, e o
+   *      segundo começa com o valor do primeiro — o número "anda para trás" entre
+   *      um canal e outro.
+   *
+   * O `highest` é zerado em `startBootPoll`, então cada carga recomeça do seu
+   * próprio zero. O que nunca regride é o progresso DENTRO de uma carga, que é o
+   * que o olho lê como "carregando".
+   */
+  let highest = 0
+  bootPctFloor = 0
+  bootPollTimer = setInterval(() => {
     if (!running || !waitingFirstFrame) {
       stopBootPoll()
       return
     }
-    try {
-      const secs = await getProperty('demuxer-cache-time')
-      if (!running || !waitingFirstFrame) return
-      let pct = 1
-      if (typeof secs === 'number' && secs > 0) {
-        pct = Math.max(1, Math.min(99, Math.round((secs / target) * 100)))
-      }
-      if (pct < shown) pct = shown
-      shown = pct
-      emit({ type: 'buffering', value: true, percent: pct })
-    } catch {
-      // próxima volta tenta de novo
-    }
+    const elapsedMs = Date.now() - startedAt
+    let pct
+    if (elapsedMs < 8000) pct = Math.round((elapsedMs / 8000) * 80)
+    else if (elapsedMs < 20000) pct = 80 + Math.round(((elapsedMs - 8000) / 12000) * 15)
+    else pct = 95
+    highest = Math.max(highest, pct, 1)
+    /*
+     * O piso e o `cache-buffering-state` (dado real) ou a curva do relogio, o que
+     * for MAIOR. `cache-buffering-state = 100` antes do primeiro quadro nao pode
+     * derrubar a barra nem esconder o veu — ver o handler da propriedade.
+     */
+    bootPctFloor = Math.max(bootPctFloor, highest)
+    emit({ type: 'buffering', value: true, percent: Math.min(95, bootPctFloor) })
   }, 400)
 }
 

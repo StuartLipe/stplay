@@ -112,6 +112,7 @@ export function RestaurarOcultosSheet({ ocultos, catalogo, onClose, onRestaurar 
     const sub = alvo.tipo === 'categoria' ? '' : (alvo.origem ?? '')
     return (
       <button
+        key={alvo.chave}
         type="button"
         ref={primeiro ? primeiroMarcavelRef : undefined}
         className={`restaurar-linha${marcado ? ' is-marcado' : ''}`}

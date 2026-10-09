@@ -32,6 +32,33 @@ const {
   vodReadaheadSecs,
   descreverVodBuffer,
 } = require('./vod-buffer-limits.cjs')
+/*
+ * `descreverLiveBuffer` vem do modulo de LIVE, nao do de VOD. Estava
+ * destructurado junto com `descreverVodBuffer`, e o require pegava o modulo
+ * errado — a funcao chegava `undefined`, o log do teto de live caia no ramo de
+ * "invalido", e o portao de 8MiB rodava sem ninguem conseguir confirmar pelo log
+ * que tinha entrado. O perfil pegava o valor certo porque `playback-profile.cjs`
+ * importa do modulo certo; so o log mentia.
+ */
+const { descreverLiveBuffer } = require('./live-buffer-limits.cjs')
+const {
+  LIVE_EDGE_POLL_MS,
+  LIVE_MAX_DELAY_PADRAO,
+  RECARGA_DE_ULTIMO_RECURSO_SECS,
+  liveMaxDelaySecs,
+  deveRecarregar,
+  recarregaPorAtraso,
+  avancoParaManterBorda,
+  bordaContinuaAtiva,
+  portoesEmConflito,
+  descreverLiveEdge,
+} = require('./live-edge-keeper.cjs')
+const {
+  DEGRAUS: DEGRAUS_READAHEAD,
+  criarGovernador,
+  registrarUnderrun,
+  proximaAcao,
+} = require('./live-underrun-governor.cjs')
 const hwndHelper = require('./hwnd-helper.cjs')
 const log = require('./player-log.cjs')
 const { isPlayableUrl } = require('./play-url.cjs')
@@ -350,8 +377,8 @@ let starting = false
 /** Após 1º frame: evita relayout/buffer espúrio (ao vivo e VOD). */
 let playbackStable = false
 let overlayPresented = false
-/** VOD: espera mínima de buffer (segundos) — curto p/ start rápido; mid-play mantém cache. */
-const VOD_CACHE_PAUSE_WAIT = 2
+/** VOD: espera mínima de buffer (segundos) - curto p/ start rápido; mid-play mantém cache. */
+const VOD_CACHE_PAUSE_WAIT = 30
 
 /** @type {Map<number, (msg: { data?: unknown }) => void>} */
 const pendingRequests = new Map()
@@ -520,6 +547,58 @@ function bumpLoadGeneration() {
 
 /** reload ao vivo: não esconder vídeo/overlay entre zaps rápidos. */
 let nextLoadSoft = false
+
+/*
+ * ZAPE ASSENTA, E O PERFIL DE LIVE VOLTA.
+ *
+ * MEDIDO em 04/10, no canal do dono, com ele zapando e depois parado num canal:
+ *
+ *   perfil aplicado { live: true, softZap: true, fresh: [], stale: 2 }
+ *   cache-pause efetivo { cachePause: false, cachePauseInitial: true }
+ *   ...
+ *   cacheSecs 46,6 -> 56,3 -> 61,3 -> 66,3 -> 71,3 -> ... -> 887,6
+ *
+ * Ou seja: o `cache-pause` FICA desligado enquanto o canal toca. Nao e o perfil
+ * de live que esta errado — e que o perfil de zape nunca e desfeito.
+ *
+ * `cache-pause=false` e o que torna a TROCA instantanea, e por isso que o zape o
+ * usa. O que nao existe em lugar nenhum e o caminho de volta: nada reaplica o
+ * perfil de live no canal em que a pessoa ficou. Entao ela assiste um canal
+ * comum com o comportamento de zape — `cache-pause` desligado, o demuxer nunca
+ * para de ler, e o buffer crescendo na taxa do relogio (+1,0 s por s medido),
+ * ate bater no teto de bytes. Da a vinheta de 887 s = 14,8 minutos.
+ *
+ * Por que so aparece as vezes: depende de ter havido zape antes de assentar. Canal
+ * aberto direto pelo catalogo entra com o perfil de live e nao acumula.
+ *
+ * A correcao e devolver o perfil de live DEPOIS que a troca se assenta, e nao
+ * durante — durante, ela precisa ser instantanea. `armLiveSettle` faz isso no
+ * primeiro quadro, com o atraso de sobra para o zape nao pagar pela espera.
+ */
+let zapeProfileAtivo = false
+let liveSettleTimer = null
+
+/** Janela entre o zape ter dado quadro e o perfil de live voltar. */
+const LIVE_SETTLE_MS = 8000
+
+function clearLiveSettle() {
+  if (!liveSettleTimer) return
+  clearTimeout(liveSettleTimer)
+  liveSettleTimer = null
+}
+
+function armLiveSettle(gen = loadGeneration) {
+  clearLiveSettle()
+  if (!liveMode || !zapeProfileAtivo) return
+  liveSettleTimer = setTimeout(() => {
+    liveSettleTimer = null
+    // Saiu do canal durante a espera: o perfil de outro zape manda agora.
+    if (gen !== loadGeneration || !liveMode || !running) return
+    log.info('stur', 'zape assentou; devolvendo o perfil de live', { esperaMs: LIVE_SETTLE_MS })
+    zapeProfileAtivo = false
+    void applyPlaybackProfile(true, { softZap: false })
+  }, LIVE_SETTLE_MS)
+}
 /** Zap 1 tela: ignora end-file error do canal antigo (não dispara fallback/failed). */
 let releasingLiveSlot = false
 
@@ -922,7 +1001,36 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
       await releaseP
       return null
     }
-    playUrl = await sturProxy.wrapUrl(url, startSec)
+    try {
+      playUrl = await sturProxy.wrapUrl(url, startSec)
+    } catch (error) {
+      /*
+       * ESTE RAMO ERA O UNICO SEM `try` — e ele era o que mais podia derrubar.
+       *
+       * `wrapUrl` chama `ensureStarted()`, que REJEITA quando o servidor HTTP
+       * local não sobe: `httpServer.once('error', reject)` e o
+       * `reject(new Error('STUR proxy não iniciou'))` em `stur-ffmpeg-proxy.cjs`.
+       * Porta ocupada, bind negado, antivírus segurando o socket — qualquer uma
+       * dessas virava rejeição.
+       *
+       * A consequência era pior que uma falha: o throw saía de `loadStream` →
+       * `openUrl` → de `start()`, e a rejeição acontecia ANTES do `killMpv()`
+       * que vem logo depois de `await openUrl(...)`. Sobravam `mpv.exe` vivo com
+       * `--keep-open=yes`, socket IPC aberto, `running`/`surfaceActive` true,
+       * overlay no lugar — e **nenhum watchdog**, porque `armLoadWatchdog` só
+       * roda depois. O renderer recebia rejeição em vez de `{ok:false}`, não
+       * tratava, e a tela ficava em "Carregando" para sempre com mpv rodando.
+       *
+       * Os quatro irmãos já tinham `try` e log. Este ficou de fora. Agora tem os
+       * dois, e a falha sai pelo mesmo caminho de sempre: `return null` depois de
+       * `await releaseP`, que o chamador trata como "nao abriu" e emite `failed`.
+       */
+      log.warn('stur', 'proxy ffmpeg nao subiu', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      await releaseP
+      return null
+    }
     if (gen !== loadGeneration) {
       await releaseP
       return null
@@ -1000,6 +1108,9 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
   firstFrameBase = null
   timePosAdvanceCount = 0
   if (!softLiveZap) clearLiveShowTimer()
+  // Zape novo cancela o assentamento do zape anterior: o canal de destino ainda
+  // esta em transito, e reaplicar live aqui tiraria a rapididao da troca.
+  clearLiveSettle()
   await applyPlaybackProfile(liveMode, { softZap: softLiveZap })
   const deferSeek = !liveMode && startSec > 0 && mode !== 'ffmpeg'
   if (deferSeek) {
@@ -1215,10 +1326,10 @@ function armLoadWatchdog(gen = loadGeneration) {
 }
 
 function percentFromCacheTime(secs) {
-  if (secs <= 0) return 0
+  if (!secs || secs <= 0) return 0
   const wait = liveMode ? 1 : VOD_CACHE_PAUSE_WAIT
   const pct = Math.round((secs / wait) * 100)
-  return Math.max(1, Math.min(99, pct))
+  return Math.max(0, Math.min(99, pct))
 }
 
 /**
@@ -1256,9 +1367,12 @@ function estimatedBufferPercent() {
 async function applyPlaybackProfile(live, opts = {}) {
   liveMode = live === true
   logVodBufferUmaVez()
+  logLiveBufferUmaVez()
   // Ver `playback-profile.cjs`: a tabela do perfil e o calculo do diff estao la
   // porque sao puros e testaveis. Aqui so orquestra o envio.
-  const profile = profileFor(live, opts.softZap === true)
+  const softZap = opts.softZap === true
+  zapeProfileAtivo = live === true && softZap
+  const profile = profileFor(live, softZap)
   const { fresh, stale } = diffProfile(profile, appliedProfile)
   if (stale.length > 0) profileMemoSkipped += stale.length
 
@@ -1302,6 +1416,36 @@ async function applyPlaybackProfile(live, opts = {}) {
  * rodou?" sem abrir o codigo.
  */
 let vodBufferLogged = false
+/**
+ * O TETO DE LIVE TAMBÉM PRECISA APARECER NO LOG.
+ *
+ * Medi uma sessao inteira procurando o efeito de `STPLAY_LIVE_MAX_BYTES=8MiB` e
+ * nao tinha como provar que o portao tinha entrado: o unico log de tetos era o do
+ * VOD, e o perfil impresso vinha de uma sessao ANTIGA que ainda usava 96MiB. Faltava
+ * a linha que diz "qual teto de live rodou agora".
+ *
+ * `logVodBufferUmaVez` e `logLiveBufferUmaVez` sao separados de proposito: sao
+ * portoes diferentes, com padroes diferentes, e um unico log "tetos de buffer"
+ * seria ambíguo justo na medicao que precisa desambiguar.
+ */
+let liveBufferLogged = false
+function logLiveBufferUmaVez() {
+  if (liveBufferLogged) return
+  liveBufferLogged = true
+  try {
+    const d = descreverLiveBuffer()
+    log.info('stur', 'teto de buffer do LIVE', {
+      maxBytes: d.maxBytes,
+      padrao: d.padrao,
+      fonte: d.fonte,
+    })
+  } catch (error) {
+    log.warn('stur', 'teto de buffer do LIVE invalido; usando o padrao', {
+      erro: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 function logVodBufferUmaVez() {
   if (vodBufferLogged) return
   vodBufferLogged = true
@@ -1476,8 +1620,19 @@ function getProperty(name) {
  * Sobrou o relógio. Ele não mente sobre o que já carregou, e a curva em
  * `estimatedBufferPercent` é calibrada contra `VOD_LOAD_TIMEOUT_MS` (28s).
  */
-/** Último `demuxer-cache-time` do trace de gargalho (STPLAY_GASP_TRACE). */
+/** Último `demuxer-cache-time` do trace de gargalho. */
 let lastTraceCache = -1
+/**
+ * Amostras SEGUIDAS sem o cache crescer. E o "run" do trace.
+ *
+ * Sem este contador, ligar o gargalho no app empacotado escreveria uma linha a
+ * cada evento de `demuxer-cache-time` de um canal saudavel — centenas por minuto,
+ * e o `player.log` viraria ruido em vez de diagnostico. Com ele, o log escreve so
+ * quando o gargalho esta correndo, que e a unica vez que a linha vale alguma coisa.
+ */
+let consecutiveGaspSamples = 0
+/** Amostras paradas seguidas para considerar gargalho de verdade (250 ms cada = 1,5 s). */
+const GASP_LOG_MIN_RUN = 6
 
 function startBufferPoll() {
   stopBufferPoll()
@@ -1527,6 +1682,307 @@ function startBufferPoll() {
     })()
   }, 5000)
   void pollPause
+}
+
+/*
+ * GUARDIÃO DA BORDA: LÊ O ATRASO E RECARREGA QUANDO PASSA DO LIMITE.
+ *
+ * Isto roda SEMPRE, inclusive no app empacotado. O poll de `cache-pause` acima só
+ * liga com `STPLAY_PROFILE_DEBUG`, porque ele existe para responder perguntas de
+ * diagnóstico — não pode ser a base de uma decisão que afeta o que a pessoa vê.
+ *
+ * Por que recarregar e não ajustar parâmetro: as duas alternativas já foram
+ * testadas e caíram (ver `live-edge-keeper.cjs`). O `reload()` é o mesmo caminho
+ * que o zape usa, e zapezar zera o atraso de forma medida.
+ *
+ * Por que `get_property` a 10 s e não a 1 s: a leitura leva ~1,2 s de timeout, e
+ * enfileirar isso rápido é o mesmo bug que o poll de boot descreve. O guardião não
+ * precisa de precisão de milissegundo — ele age sobre minutos.
+ */
+let liveEdgeTimer = null
+let liveEdgeUltimoReloadMs = 0
+let liveEdgeTocandoDesdeMs = 0
+/**
+ * O atraso já foi registrado uma vez nesta sessão?
+ *
+ * Recarga por atraso foi removida — o caminho agora só avisa. O aviso é único por
+ * sessão porque o atraso não é um evento, é uma tendência: ele cresce continuamente
+ * e avisar a cada tique seria uma linha a cada 10 s para sempre, que é ruído.
+ */
+let liveEdgeAtrasoAvisado = false
+let liveEdgeLogged = false
+
+function logLiveEdgeUmaVez() {
+  if (liveEdgeLogged) return
+  liveEdgeLogged = true
+  try {
+    const d = descreverLiveEdge()
+    log.info('stur', 'guardiao da borda', {
+      maxDelaySecs: d.maxDelaySecs,
+      pollMs: d.pollMs,
+      cooldownMs: d.cooldownMs,
+      fonte: d.fonte,
+    })
+  } catch (error) {
+    log.warn('stur', 'guardiao da borda invalido; usando o padrao', {
+      erro: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/**
+ * O GOVERNADOR DE UNDERRUN NO MOTOR.
+ *
+ * `registrarUnderrunNoGovernador` só anota a BORDA do `paused-for-cache`. Quem
+ * decide é `startUnderrunGovernor`, que roda a cada 10 s — a mesma cadência do
+ * guardião da borda, e pelo mesmo motivo: `get_property` leva ~1,2 s, e o colchao
+ * de buffer não muda na escala de segundos.
+ *
+ * O que ele envia, e por que estes dois e não `cache-pause-wait`:
+ *
+ *   `demuxer-readahead-secs`  quanto o demuxer pode ler à frente. Subir isto é
+ *                             construir o colchao que evita o próximo underrun.
+ *   `cache-secs`             o limiar em que o `cache-pause` segura o stream.
+ *
+ * `cache-pause-wait` fica de fora de propósito: o `playback-profile.cjs` registra
+ * que aumentar o wait é o que produz PAUSA VISÍVEL (wait=10 deu 13 pausas). Gargalho
+ * não se resolve segurando mais tempo a cada falta de byte — resolve-se tendo byte
+ * de sobra para nunca faltar.
+ *
+ * O soft zape NÃO é afetado: ele roda com `cache-pause=false` e perdoa
+ * deliberadamente o readahead para a troca sair na hora. O governador só age em live
+ * já tocando, que é onde o gargalho acontece.
+ */
+function registrarUnderrunNoGovernador() {
+  registrarUnderrun(underrun, Date.now())
+}
+
+function startUnderrunGovernor(gen = loadGeneration) {
+  stopUnderrunGovernor()
+  underrunTimer = setInterval(() => {
+    if (gen !== loadGeneration || !running || !liveMode) {
+      stopUnderrunGovernor()
+      return
+    }
+    const acao = proximaAcao(underrun, Date.now())
+    if (!acao) return
+    void (async () => {
+      const r1 = await sendIpc(['set_property', 'demuxer-readahead-secs', acao.readaheadSecs])
+      const r2 = await sendIpc(['set_property', 'cache-secs', acao.cacheSecs])
+      if (!r1?.ok || !r2?.ok) {
+        log.warn('stur', 'governador nao conseguiu subir o readahead', {
+          readahead: acao.readaheadSecs,
+          readaheadOk: Boolean(r1?.ok),
+          cacheSecsOk: Boolean(r2?.ok),
+        })
+        return
+      }
+      log.warn('stur', 'origem nao alimentou; colchao maior', {
+        motivo: acao.motivo,
+        readaheadSecs: acao.readaheadSecs,
+        cacheSecs: acao.cacheSecs,
+        degrau: acao.degrau,
+        underrunsNaJanela: acao.naJanela,
+        url: sourceUrl ? sourceUrl.slice(0, 100) : null,
+      })
+    })()
+  }, 10_000)
+  void gen
+}
+
+function stopUnderrunGovernor() {
+  if (!underrunTimer) return
+  clearInterval(underrunTimer)
+  underrunTimer = null
+}
+
+/** Zera o colchao acumulado: nova carga recomeça na entrada rápida. */
+function resetUnderrunGovernor() {
+  stopUnderrunGovernor()
+  underrun = criarGovernador()
+  wasPausedForCache = false
+}
+
+function stopLiveEdgeKeeper() {
+  if (!liveEdgeTimer) return
+  clearInterval(liveEdgeTimer)
+  liveEdgeTimer = null
+}
+
+function startLiveEdgeKeeper() {
+  stopLiveEdgeKeeper()
+  liveEdgeTocandoDesdeMs = Date.now()
+  /*
+   * A conferência do seek é zerada AQUI, e não só quando o canal recarrega.
+   *
+   * Ela guarda o cache que o seek tentou|Consertar. Se ela sobreviver à troca de
+   * canal, o próximo tique compara o cache do canal NOVO contra o número do
+   * canal VELHO, e um canal novo que abre com 50 s de buffer — mais perto do alvo
+   * que o canal antigo estava — parece ter "funcionado". O log diria que a borda
+   * foi recuperada sem que nenhum seek tivesse sido dado naquele canal.
+   *
+   * O cooldown do reload, ao contrário, NÃO é zerado aqui: ele é do motor, não do
+   * canal. Ver o comentário abaixo.
+   */
+  /*
+   * `liveEdgeUltimoReloadMs` NAO E ZERADO AQUI, e esse detalhe custou 19 recargas
+   * em uma sessao de zape.
+   *
+   * O cooldown existe para o guardiao nao disparar em loop numa origem lenta. Com
+   * o contador reiniciado a cada canal, o zape anulava o cooldown inteiro: o
+   * guardiao subia com o contador em 0, o canal novo abria com ~50 s de buffer,
+   * cruzava os 90 s em uns 40 s e recarregava. O dono viu exatamente isso como
+   * "troco de canais e fica bugando".
+   *
+   * O contador vive no modulo, nao na carga. Trocar de canal nao cancela a espera
+   * — ela e do MOTOR, nao do canal.
+   */
+  logLiveEdgeUmaVez()
+  const gen = loadGeneration
+  liveEdgeTimer = setInterval(() => {
+    if (gen !== loadGeneration) {
+      stopLiveEdgeKeeper()
+      return
+    }
+    if (!liveMode || !running) return
+    /*
+     * BORDA CONTÍNUA TEM PRIORIDADE SOBRE A RECARGA — E TROCA DE CONCEITO.
+     *
+     * Com o portão ligado, o guardião não pergunta mais "o atraso passou de 90 s?".
+     * Ele pergunta "o atraso está acima do que eu quero manter?" e, quando está, dá
+     * um seek para trás do alvo. O buffer não é destruído: o playback avança para
+     * onde o material já está.
+     *
+     * Por que isso importa e o recarregar não resolvia: a origem entrega acima do
+     * tempo real, então o buffer cresce SEM LIMITE, e o reload só joga fora o que já
+     * foi baixado para recomeçar a mesma corrida. Medido com o teto em 1 MiB:
+     *
+     *   1 MiB  →  cache 93,1 s  →  guardião recarregou
+     *   4 MiB  →  cache 138,9 s →  guardião recarregou 1 vez em 5+
+     *
+     * Ou seja: o teto em BYTES não controla a duração. Existe um chão perto de 90 s
+     * que ele não alcança, então reduzir o teto não elimina a recarga — só a adia.
+     *
+     * A recarga continua no código como rede de segurança, mas só entra se o cache
+     * passar do limite de último recurso com o teto ATIVO. Com o portão desligado,
+     * o comportamento é exatamente o de hoje.
+     */
+    if (bordaContinuaAtiva()) {
+      if (portoesEmConflito()) {
+        log.warn('stur', 'os dois portoes de borda estao ligados; o antigo foi ignorado', {
+          antigo: 'STPLAY_LIVE_EDGE_SEEK',
+          novo: 'STPLAY_LIVE_EDGE_KEEP',
+        })
+      }
+      void (async () => {
+        const cacheSecs = await getProperty('demuxer-cache-time')
+        if (gen !== loadGeneration) return
+        if (typeof cacheSecs !== 'number') return
+        if (cacheSecs > RECARGA_DE_ULTIMO_RECURSO_SECS) {
+          /*
+           * AQUI TAMBÉM NÃO RECARREGA MAIS. Era o último reload por atraso que
+           * restava no app, e ele só era alcançável com `STPLAY_LIVE_EDGE_KEEP=1`
+           * ligado — portão desligado por padrão. Ainda assim ele sai, por dois
+           * motivos:
+           *
+           *   1. O dono pediu "sem limite". Um reload escondido atrás de um portão
+           *      experimental continua sendo um reload por atraso, e a próxima pessoa
+           *      a ligar o portão para medir voltaria a ver congelamento sem saber de
+           *      onde veio.
+           *   2. Era um reload sem teste. A borda contínua nunca foi vista rodando
+           *      com o lastro acima de 300 s — não há medição de que ele faça algo
+           *      além de congelar a tela.
+           *
+           * O log continua, porque é a única forma de saber que a borda não está
+           * conteve. Só não interrompe.
+           */
+          log.warn('stur', 'borda continua nao conteve; o canal segue tocando', {
+            cacheSecs: Number(cacheSecs.toFixed(1)),
+            limite: RECARGA_DE_ULTIMO_RECURSO_SECS,
+            observacao: 'reload por atraso removido tambem no portao da borda continua',
+          })
+          return
+        }
+        const r = avancoParaManterBorda(cacheSecs)
+        if (!r) return
+        const ok = await sendIpc(['seek', r.avanco, 'relative'])
+        if (ok?.ok === false) return
+        log.warn('stur', 'atraso aparado; seguindo a borda', {
+          cacheAntes: Number(cacheSecs.toFixed(1)),
+          avancoSegs: r.avanco,
+          atrasoAgora: Number(r.atrasoRestante.toFixed(1)),
+          motivo: r.motivo,
+        })
+      })()
+      return
+    }
+
+    /*
+     * O tique do poll: uma leitura, uma decisão, nenhuma intervenção.
+     *
+     * Antes disto ficava a conferência do seek de borda, que rodava no mesmo tique e
+     * existia só para decidir se o reload de atraso entraria. Não há mais seek de
+     * borda para conferir — o caminho saiu inteiro — então a leitura aqui é a única
+     * coisa que o tique faz.
+     */
+    void (async () => {
+      const cacheSecs = await getProperty('demuxer-cache-time')
+      if (gen !== loadGeneration) return
+      let limite = LIVE_MAX_DELAY_PADRAO
+      try {
+        limite = liveMaxDelaySecs()
+      } catch {
+        // `liveMaxDelaySecs` lanca em env invalido; o padrao e o estado conhecido.
+      }
+      const recarregar = deveRecarregar({
+        live: liveMode,
+        running,
+        esperandoPrimeiroQuadro: waitingFirstFrame,
+        /*
+         * `userPausedLive` e o flag real de pausa do usuario no live.
+         * `pausedForCache` NAO entra: ele marca a pausa por cache, que e justamente
+         * o sintoma de buffer baixo — tratá-la como "a pessoa pausou" desligaria o
+         * guardião exatamente quando o canal precisa dele.
+         */
+        pausado: userPausedLive,
+        cacheSecs,
+        limite,
+        ultimoReloadMs: liveEdgeUltimoReloadMs,
+        agoraMs: Date.now(),
+        tocandoDesdeMs: liveEdgeTocandoDesdeMs,
+      })
+      /*
+       * O ATRASO É SÓ REGISTRADO. O CAMINHO DE INTERVIR ACABOU AQUI.
+       *
+       * `deveRecarregar` ainda responde "o atraso passou do limite" — é a régua de
+       * quando vale a pena escrever no log. E `recarregaPorAtraso` responde à única
+       * pergunta que interessa agora: "isso recarrega?". A resposta é `false`, e a
+       * resposta está escrita numa função só, no guardião, porque o padrão de código
+       * deste app é tratar atraso como coisa para corrigir — e corrigir aqui custou
+       * um congelamento de tela por semana durante meses.
+       */
+      if (!recarregar) return
+      if (!recarregaPorAtraso(cacheSecs, { running, esperandoPrimeiroQuadro: waitingFirstFrame })) {
+        /*
+         * Chegou no limite: registra uma vez e SAI. Sem seek, sem reload, sem marcar
+         * cooldown — marcar cooldown sem recarregar envenenaria o sensor de demuxer
+         * morto, que é quem precisa agir em segundos.
+         */
+        if (!liveEdgeAtrasoAvisado) {
+          liveEdgeAtrasoAvisado = true
+          log.warn('stur', 'atraso no live acumulado; o canal segue tocando', {
+            cacheSecs: typeof cacheSecs === 'number' ? Number(cacheSecs.toFixed(1)) : cacheSecs,
+            limite,
+            observacao:
+              'registro unico por sessao. Recarga por atraso foi removida: nao e defeito.',
+            demuxerParado: lastCacheTimeAt > 0 ? `${Date.now() - lastCacheTimeAt}ms` : 'desconhecido',
+          })
+        }
+        return
+      }
+
+    })()
+  }, LIVE_EDGE_POLL_MS)
 }
 
 function windowHwnd(win) {
@@ -1919,11 +2375,43 @@ function killMpv(opts = {}) {
   cachePercent = 0
   knownDuration = 0
   propertiesObserved = false
-  ensurePromise = null
+  /*
+   * `ensurePromise` NAO E ZERADO AQUI — E ESSA REMOCAO E O QUE IMPEDIA DOIS MOTORES.
+   *
+   * `ensurePromise` e a exclusao mutua de `ensureMpv()`: enquanto o
+   * `spawnMpvCore` esta no ar, quem chega depois recebe a mesma promessa em vez de
+   * criar um segundo spawn. O comentario da defesa em `spawnMpvCore` ("cinco
+   * cliques em Tentar novamente -> cinco processos ao mesmo tempo") descreve
+   * exatamente essa garantia.
+   *
+   * Zera-la dentro de `killMpv()` quebrava a garantia **durante** o spawn: o
+   * `spawnMpvCore` leva ate ~10 s (`connectIpc` 50x200 ms e `adoptMpv` 100x100 ms),
+   * e o caminho que chega no `killMpv` e justamente o caminho que o host provoca
+   * — `hideSurfaces` chama `stur.stop()` porque `isBusy()` esta true. Entao:
+   *
+   *   1. `start()` entra, `ensurePromise` = promise A, `running = true`
+   *   2. o renderer manda `player:hide`, o host chama `stop()` -> `killMpv()`
+   *   3. `ensurePromise = null` aqui, **com o spawn A ainda rodando**
+   *   4. o proximo `start()` ve `ensurePromise` nulo e cria o spawn B
+   *
+   * A e B escrevem nos MESMOS globais de modulo (`mpvProc`, `ipcSocket`,
+   * `mpvHwnd`, `ipcGeneration`, `appliedProfile`). O `connectIpc` do A carimba o
+   * `pid` do B, o `end-file` do processo A e descartado por `stale` porque
+   * compara com o `mpvProc.pid` do B — e sobra um `mpv.exe` vivo sem nenhuma
+   * referencia no modulo, que ninguem mais consegue matar.
+   *
+   * Quem limpa e o `.finally()` de `ensureMpv`, que so roda quando o spawn
+   * realmente assentou. Este `killMpv` pode, no maximo, esperar mais tempo por
+   * uma promessa que ja estava em voo — que e a semantica correta. Se o spawn
+   * travar, `ensureMpv` devolve a mesma promessa: e melhor devolver a mesma
+   * promessa do que abrir um segundo motor na mesma janela.
+   */
   currentLoadMode = 'direct'
   fallbackBusy = false
   stopBufferPoll()
   stopDurationPoll()
+  stopLiveEdgeKeeper()
+  stopUnderrunGovernor()
   pendingVodSeekSec = 0
   clearLoadWatchdog()
   clearLiveShowTimer()
@@ -2041,16 +2529,44 @@ function connectIpcOnce() {
         for (const line of lines) {
           const trimmed = line.trim()
           if (!trimmed) continue
+          let parsed
           try {
-            const parsed = JSON.parse(trimmed)
-            // Carimba a generation de quem enviou. O `handleIpcMessage`
-            // descarta o que nao for da carga viva.
-            if (parsed && typeof parsed === 'object') {
-              parsed._stplayGeneration = ipcGeneration
-            }
-            handleIpcMessage(parsed)
+            parsed = JSON.parse(trimmed)
           } catch {
-            // ignore
+            // Linha que nao e JSON do mpv. Descartada de proposito.
+            continue
+          }
+          // Carimba a generation de quem enviou. O `handleIpcMessage`
+          // descarta o que nao for da carga viva.
+          if (parsed && typeof parsed === 'object') {
+            parsed._stplayGeneration = ipcGeneration
+          }
+          /*
+           * O HANDLER FICA FORA DO `try` DO `JSON.parse` — E ISTO E O CORRETO.
+           *
+           * O `try` foi escrito para o parse, mas o `handleIpcMessage` (450
+           * linhas, do `file-loaded` ao `end-file`) estava dentro dele. Qualquer
+           * throw la dentro — `winApi.IsWindowVisible` em HWND morto, `overlay.*`
+           * com a janela destruida, `log.*` com payload inesperada — sumia em
+           * silêncio, sem uma linha no `player.log`.
+           *
+           * O pior caso medido: o throw no meio do ramo `file-loaded`, depois de
+           * `waitingFirstFrame = true` e antes de `armLoadWatchdog`. O motor
+           * ficava esperando primeiro quadro **sem nenhum timeout** — e o
+           * `raiseTimer` nunca falha, so reconcilia geometria. O usuario via o
+           * percentual de buffer subindo para 95% (que e relogio, nao medicao) e
+           * a tela nao saia mais dali.
+           *
+           * Parse falhando e handler falhando sao coisas diferentes: uma e lixo de
+           * protocolo, a outra e defeito nosso. Nao podem virar o mesmo silencio.
+           */
+          try {
+            handleIpcMessage(parsed)
+          } catch (error) {
+            log.warn('stur', 'handler de ipc lancou; evento descartado', {
+              evento: parsed && typeof parsed === 'object' ? parsed.event : null,
+              error: error instanceof Error ? error.message : String(error),
+            })
           }
         }
       })
@@ -2158,6 +2674,15 @@ function syncOverlayLayout() {
 }
 
 let pausedForCache = false
+/** Borda do ultimo `paused-for-cache`, para contarunderrun uma vez por evento. */
+let wasPausedForCache = false
+/**
+ * Governador de underrun: quantas vezes a origem segurou o stream, e o readahead
+ * necessario para ela deixar de segurar. Roda SEMPRE, inclusive no app empacotado —
+ * e o unico caminho que conserta "gargalhando" sem saber qual servidor e o da vez.
+ */
+let underrun = criarGovernador()
+let underrunTimer = null
 /** Último time-pos visto (detecção de stall no ao vivo). */
 let lastLiveTimePos = -1
 /** Último `time-pos` que realmente contou como avanço (ver LIVE_TIME_POS_MIN_STEP). */
@@ -2581,6 +3106,23 @@ function onFirstFrame() {
   if (liveMode) livePlaybackReady = true
   clearLiveShowTimer()
   stopBufferPoll()
+  /*
+   * O guardião da borda so vale depois do primeiro quadro. Antes disso o
+   * `demuxer-cache-time` esta crescendo porque o canal AINDA vai ler tudo — e
+   * medir ali recarregaria antes de tocar (ver `deveRecarregar`). Aqui é o ponto
+   * em que o canal passou a tocar de verdade.
+   */
+  if (liveMode) {
+    startLiveEdgeKeeper()
+    /*
+     * O governador entra no mesmo ponto pelo mesmo motivo: antes do primeiro
+     * quadro o demuxer está enchendo do zero e qualquer contagem de underrun ali
+     * seria mentira. E `resetUnderrunGovernor` devolve o colchao ao degrau baixo a
+     * cada carga — o degrau só vale enquanto aquele canal mostra que precisa dele.
+     */
+    resetUnderrunGovernor()
+    startUnderrunGovernor(loadGeneration)
+  }
   clearLoadWatchdog()
   reportBufferPercent(100, { forceActive: false })
   // O relógio de stall precisa começar aqui. `noteLiveTimePos` só atualiza
@@ -2596,6 +3138,9 @@ function onFirstFrame() {
   // Julga a saúde do canal que acabou de subir. É aqui que se descobre que o
   // `file-loaded` veio de um manifesto de 1 segmento com 2s de buffer.
   if (liveMode) noteLiveLoadHealth()
+  // O primeiro quadro e a prova de que a troca passou. Oito segundos depois, se a
+  // pessoa nao zapou de novo, o canal earns o perfil de live de volta.
+  if (liveMode) armLiveSettle()
   if (liveMode && !userPausedLive) void sendIpc(['set_property', 'pause', false])
   if (!liveMode) {
     // VOD: cache-pause no meio do filme pausava pra encher buffer — desliga após 1º frame
@@ -2801,6 +3346,58 @@ function handleIpcMessage(msg) {
     if (msg.name === 'paused-for-cache' && typeof msg.data === 'boolean') {
       pausedForCache = msg.data
       if (liveMode && livePlaybackReady) {
+        /*
+         * UNDERRUN EM LIVE, E O GOVERNOR ESCUTA.
+         *
+         * Este e o unico ponto do app que significa "a origem nao me alimentou":
+         * o mpv segurou o stream porque o cache secou. E o sintoma que o dono
+         * descreveu — "depois de 1 min assistindo das umas travadas, tipo
+         * gargalando, e o canal continua rodando" — e exatamente isso. Nao e
+         * travamento: e o mpv pausando e reanimando, entao nenhum detector de
+         * stall dispara e o canal parece saudavel.
+         *
+         * `pausedForCache` aqui e booleano puro do mpv, sem relogio e sem
+         * dependencia — e por isso que vale como entrada. O TEXTO (`paused` /
+         * `playing`) nao serve: em live o texto sozinho nao diz se a pausa veio
+         * de falta de byte ou de cacho vazio.
+         *
+         * So conta a BORDA (false -> true). Uma pausa longa gera um evento, nao
+         * varios: contar enquanto `true` transformaria um unico evento em dozens
+         * e o degrau subiria sem motivo.
+         */
+        if (msg.data && !wasPausedForCache) registrarUnderrunNoGovernador()
+        wasPausedForCache = msg.data
+        /*
+         * CADA PAUSA EM LIVE, COM O NIVEL DE CACHE NO INSTANTE.
+         *
+         * Esta e a linha que responde ao "gargalhando", e ela nao pode depender de
+         * um contador de amostras. Medido: o limiar de 6 amostras (1,5 s parado) nao
+         * disparou NENHUMA vez no canal que estava gargalhando, e o `mpv` estava com
+         * 2,5% de CPU em 43 s — ou seja, o decoder quase parado sem que o contador
+         * registrasse nada.
+         *
+         * O motivo: o gargalho nao e cache PARADO, e cache SECO. O `cache-pause`
+         * segura o stream por um instante, o demuxer enche dois segmentos, reanima,
+         * seca de novo — e cada um dos ciclos dura menos de 1,5 s. Contador de
+         * amostras nao ve pausas curtas; a BORDA ve.
+         *
+         * Por que isso nao vira Hundreds de linhas por minuto: uma linha por BORDA
+         * de pausa, e um canal saudavel nao tem borda nenhuma. Se o log mostrar 40
+         * linhas num minuto, sao 40 travadas — que e exatamente o que a pessoa viu
+         * e nao era visivel em lugar nenhum antes.
+         *
+         * O `cacheSecs` ao lado e a amplitude: ele mostra aonde o cache estava
+         * quando secou, e e isso que diz se o limiar esta alto demais para a origem.
+         */
+        if (msg.data) {
+          log.warn('stur', 'live pausou por falta de byte', {
+            cacheSecs: lastCacheTime,
+            colchao: DEGRAUS_READAHEAD[underrun.degrau],
+            cacheSecsAlvo: underrun.degrau > 0 ? DEGRAUS_READAHEAD[underrun.degrau] : null,
+            tempoPos: lastLiveTimePos,
+            url: sourceUrl ? sourceUrl.slice(0, 90) : null,
+          })
+        }
         emit({ type: 'buffering', value: msg.data, percent: cachePercent })
         if (!msg.data) pausedForCacheSince = 0
         return
@@ -2837,6 +3434,20 @@ function handleIpcMessage(msg) {
     if (msg.name === 'demuxer-cache-time' && typeof msg.data === 'number') {
       cacheTickSinceLoad = true
       noteLiveCacheTime(msg.data)
+      /*
+       * CONTAGEM DE GARGALHO CORRIDO — e o que decide se este trace escreve.
+       *
+       * "Nao cresceu" e o gargalho: o demuxer deveria ter enchido e nao encheu, ou
+       * esvaziou. Uma amostra isolada e ruido de relogio; `GASP_LOG_MIN_RUN`
+       * amostras seguidas e o sintoma que a pessoa sente. O contador sobe quando o
+       * cache NAO avanca e zera assim que ele volta a crescer — um canal saudavel
+       * fica em zero e nao escreve nada.
+       */
+      if (lastTraceCache >= 0 && msg.data - lastTraceCache <= 0.01) {
+        consecutiveGaspSamples += 1
+      } else {
+        consecutiveGaspSamples = 0
+      }
 
       /*
        * TRACE DE GARGALHO (STPLAY_GASP_TRACE=1).
@@ -2856,13 +3467,26 @@ function handleIpcMessage(msg) {
        * maior e cache-pause mais tolerante; demuxer morto pede processo novo.
        * Sem este numero eu teria que escolher uma das duas no escuro.
        */
-      if (process.env.STPLAY_GASP_TRACE === '1') {
+      if (process.env.STPLAY_GASP_TRACE === '1' || consecutiveGaspSamples >= GASP_LOG_MIN_RUN) {
         const delta = lastTraceCache >= 0 ? msg.data - lastTraceCache : 0
         lastTraceCache = msg.data
         log.warn('gasp', 'cache', {
           cache: Number(msg.data.toFixed(2)),
           delta: Number(delta.toFixed(3)),
           verdict: delta < -0.5 ? 'consome-mais-do-que-chega' : Math.abs(delta) < 0.01 ? 'parado' : 'enchendo',
+          /*
+           * `run` e quantas amostras seguidas o cache NAO cresceu. E o numero que
+           * separa "jitter de rede" de "gargalho de verdade": uma amostra parada e
+           * ruido, seis seguidas (1,5 s) e o gargalho que o dono sentiu.
+           *
+           * E por isso que este log pode ser ligado sem o porao: ele so escreve
+           * quando ha gargalho correndo. Sem o run minimo, um trace ligado no app
+           * instalado escreveria uma linha a cada evento de cache do canal que
+           * estivesse saudavel — hundreds de linhas por minuto, e o
+           * `player.log` viraria ruido em vez de diagnostico.
+           */
+          run: consecutiveGaspSamples,
+          degrauColchao: DEGRAUS_READAHEAD[underrun.degrau],
           pausedForCache,
           pause: pausedForCache ? 1 : 0,
           playing: !pausedForCache,
