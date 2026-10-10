@@ -42,7 +42,19 @@ export type PlayerCommand =
   | { op: 'pause' }
   | { op: 'play' }
   | { op: 'toggle' }
-  | { op: 'seek'; seconds: number }
+  /**
+   * `relative: true` = "anda X SEGUNDOS a partir de onde o video esta".
+   *
+   * Nao e detalhe. O caminho antigo mandava `absolute` com um instante calculado
+   * no renderer (`currentTime + 10`), e esse `currentTime` chega por `timeupdate`
+   * — uma leitura atrasada em relacao ao mpv. Atraso de meio segundo numa seta
+   * para frente vira seek para TRAS, e no mpv seek para tras descarta o buffer e
+   * volta a rede: e exatamente a travada de "o filme nao carregou".
+   *
+   * Relativo nao tem esse problema por construcao: o motor aplica a partir da
+   * posicao real dele, que e a unica que importa.
+   */
+  | { op: 'seek'; seconds: number; relative?: boolean }
   | { op: 'volume'; value: number }
   | { op: 'mute'; value: boolean }
   | { op: 'aspect'; mode: VideoFit }

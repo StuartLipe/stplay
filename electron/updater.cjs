@@ -374,8 +374,20 @@ function instalar() {
      * `autoInstallOnAppQuit` segue `false`: quem fecha o app sem querer a
      * atualizacao NAO deve instalar sozinho. O silencio aqui e so para quem
      * clicou em "Reiniciar agora", que ja decidiu.
+     *
+     * O SEGUNDO argumento e o que reabre o app depois da instalacao, e era
+     * `false`. O instalador silencioso termina e sai: o app nao voltava, e o
+     * usuario ficava com o icone atualizado na area de trabalho e nenhuma
+     * janela aberta. Nao havia checkbox para marcar, porque o instalador
+     * silencioso nao mostra nada — o `oneClick: true` que existe hoje em
+     * `package.json` nao tem "executar ao terminar" para clicar.
+     *
+     * `true` aqui e o `--force-run-after-install`: o instalador sobe o app no
+     * fim, sem perguntar. O `before-quit` ja foi liberado acima, entao o
+     * processo antigo sai inteiro antes do instalador assumir.
      */
-    setImmediate(() => up.quitAndInstall(true, false))
+    plog.info('updater', 'quitAndInstall silencioso com reabertura automatica')
+    setImmediate(() => up.quitAndInstall(true, true))
     return { ok: true }
   } catch (error) {
     instalando = false

@@ -100,7 +100,12 @@ function bridge(engine: PlayerEngine): PlayerBackend {
               : cmd.op === 'aspect'
                 ? cmd.mode
                 : undefined
-      await api()?.command?.(op, value)
+      // O `relative` do seek vai como terceiro argumento: e a INTENCAO do
+      // gesto, nao parte do valor. Ver `player-host.cjs` — sem ele, um salto
+      // de 10s vira seek absoluto com o tempo do renderer, que atrasa em
+      // relacao ao mpv e pode virar seek para TRAS.
+      const mode = cmd.op === 'seek' && cmd.relative ? 'relative' : undefined
+      await api()?.command?.(op, value, mode)
     },
     onEvent(cb) {
       listeners.add(cb)

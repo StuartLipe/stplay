@@ -249,8 +249,14 @@ async function aplicarAspecto(modo) {
   if (!aspectoValido(modo)) return { ok: false }
   currentAspect = modo
   try {
-    await sendIpc(['set_property', 'keepaspect', modo === 'wide' ? 'no' : 'yes'])
-    await sendIpc(['set_property', 'panscan', ASPECTO_PANSCAN[modo]])
+    // Um write so, nao dois `set_property` em sequencia. Cada um custa uma
+    // ida-e-volta pelo named pipe com timeout de 8s; empilhados, o pior caso
+    // dobra. `sendIpcBatch` mantem o `request_id` de cada um, entao a
+    // correlacao das respostas continua correta.
+    await sendIpcBatch([
+      ['set_property', 'keepaspect', modo === 'wide' ? 'no' : 'yes'],
+      ['set_property', 'panscan', ASPECTO_PANSCAN[modo]],
+    ])
     log.info('stur', 'aspecto', {
       modo,
       keepaspect: modo === 'wide' ? 'no' : 'yes',
@@ -1154,7 +1160,23 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
     await sendIpc(['set_property', 'start', 'none'])
   }
   await applyReferrer(playUrl)
-    await aplicarAspecto(currentAspect)
+  /*
+   * O ajuste da imagem NAO entra aqui, e essa e a parte importante.
+   *
+   * Ele esteve neste lugar, com `await`, antes do `loadfile`. Cada `set_property`
+   * custa uma ida-e-volta pelo named pipe com timeout de 8s — dois, sequenciais,
+   * sao ate 16s de tempo morto antes do arquivo comecar a carregar. O `loadfile`
+   * so e enviado depois disso, e o `armLoadWatchdog` ja esta contando: no pior
+   * caso o watchdog estoura e o app mostra "o servidor nao respondeu" com o
+   * servidor respondendo perfeitamente. Foi o que aconteceu com um VOD.
+   *
+   * `mpeg-player.cjs` ja dizia o contrario, no comentario dele: "depois do
+   * loadfile, nao antes — `panscan` e `keepaspect` sao ajustados pelo VO assim que
+   * existe um display, e antes disso o mpv aceita o comando mas nao tem o que
+   * aplicar". A regra estava escrita e nao foi seguida no outro motor.
+   *
+   * Quem abre e o `loadfile ok`, mais abaixo, e sem `await`.
+   */
   // Em live, esta e a URL que o mpv esta realmente recebendo — inclusive quando
   // a preflight desviou para o .ts. Registrar aqui e o unico ponto confiavel.
   if (liveMode) livePlayUrl = playUrl
@@ -1204,6 +1226,15 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
     return null
   }
   log.info('stur', 'loadfile ok', { mode, live: liveMode, url: playUrl.slice(0, 120) })
+  /*
+   * O `loadfile` JA foi. O arquivo esta indo para o servidor e o relogio do
+   * watchdog voltou a ser o do video, nao o do ajuste de imagem.
+   *
+   * Sem `await` de proposito: se o mpv enrolar para responder estas duas
+   * propriedades, o custo e nosso e de ninguem mais. O lote vai num write so
+   * (duas linhas no mesmo pipe) e o `aplicarAspecto` ja engole o erro.
+   */
+  void aplicarAspecto(currentAspect)
   return playUrl
 }
 
@@ -4078,6 +4109,20 @@ function buildMpvArgs(url, wid = 0) {
     // flash de tarja; na propriedade porque `aplicarAspecto` roda depois do
     // loadfile e cobre o reload.
     `--keepaspect=${currentAspect === 'wide' ? 'no' : 'yes'}`,
+    /*
+     * `hr-seek=yes`: busca por keyframe em vez de quadro exato.
+     *
+     * O padrao do mpv decodifica ate o quadro pedido. Num VOD pela rede, isso
+     * significa reler do keyframe e decodificar o caminho inteiro a cada salto
+     * e a cada arrasto da barra — o filme congela na mao do usuario. Por
+     * keyframe, o salto resolve em um pulo dentro do arquivo.
+     *
+     * O preco: o ponto de chegada e o keyframe mais proximo, nao o segundo
+     * exato. Com keyframe a cada poucos segundos isso e invisivel num salto
+     * de 10s. Fica atras de `STPLAY_HR_SEEK=0` porque, se um dia o salto
+     * precisar ser exato, e so trocar a variavel — sem mexer em codigo.
+     */
+    ...(process.env.STPLAY_HR_SEEK === '0' ? [] : ['--hr-seek=yes']),
     '--no-border',
     '--osc=no',
     '--osd-level=0',
@@ -4892,7 +4937,7 @@ function stop(opts = {}) {
   return { ok: true, killed }
 }
 
-async function command(op, value) {
+async function command(op, value, mode) {
   if (!ipcSocket || ipcSocket.destroyed) return { ok: false }
   try {
     if (op === 'pause') {
@@ -4907,7 +4952,17 @@ async function command(op, value) {
       if (liveMode) userPausedLive = !userPausedLive
       else userPausedVod = !userPausedVod
       await sendIpc(['cycle', 'pause'])
-    } else if (op === 'seek' && typeof value === 'number') await sendIpc(['seek', value, 'absolute'])
+    } else if (op === 'seek' && typeof value === 'number') {
+      // `relative` e o que separa "anda 10s" de "va para 1:20:00".
+      //
+      // No caminho relativo o mpv aplica a partir da posicao REAL dele. No
+      // absoluto, o destino vinha calculado no renderer com um `currentTime`
+      // que chega por `timeupdate` e ja atrasa em relacao ao video — e um atraso
+      // de meio segundo numa seta para frente produz um destino ATRAS do ponto
+      // onde o video esta. Seek para tras no mpv joga fora o buffer e volta a
+      // ler da rede: e a travada que parece "nao carregou".
+      await sendIpc(['seek', value, mode === 'relative' ? 'relative' : 'absolute'])
+    }
     else if (op === 'volume' && typeof value === 'number') {
       await sendIpc(['set_property', 'volume', Math.round(Math.max(0, Math.min(100, value * 100)))])
     } else if (op === 'aspect') {

@@ -124,7 +124,15 @@ declare global {
         hideSync?: () => { ok: boolean }
         restoreShell?: () => { ok: boolean }
         stop: () => Promise<{ ok: boolean }>
-        command: (op: string, value?: number | boolean | 'fit' | 'fill' | 'wide') => Promise<{ ok: boolean }>
+        /**
+         * `mode` leva a INTENCAO do seek (`'relative'`), nao parte do valor.
+         * Sem ele o motor nao sabe se `value` e um destino ou um deslocamento.
+         */
+        command: (
+          op: string,
+          value?: number | boolean | 'fit' | 'fill' | 'wide',
+          mode?: string,
+        ) => Promise<{ ok: boolean }>
         setBounds: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>
         syncOverlay: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>
         setOverlayMeta?: (meta: Record<string, unknown>) => Promise<{ ok: boolean }>

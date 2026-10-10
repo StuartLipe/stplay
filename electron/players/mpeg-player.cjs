@@ -801,7 +801,11 @@ async function loadDirect(url, startSec, gen) {
   // Depois do loadfile, nao antes: `panscan` e `keepaspect` sao ajustados pelo
   // VO assim que existe um display, e antes disso o mpv aceita o comando mas
   // nao tem o que aplicar.
-  await aplicarAspecto(currentAspect)
+  //
+  // Sem `await` pelo mesmo motivo do stur: este `loadDirect` e aguardado pelo
+  // `start`, e segurar o start em duas idas-e-voltas de 8s atrasa o "pronto"
+  // da UI por tempo que nao e do usuario. O lote vai num write so.
+  void aplicarAspecto(currentAspect)
   // Sem file-loaded em 20s: conta como tentativa queimada, retry.
   setTimeout(() => {
     if (gen !== loadGeneration || !running) return
@@ -870,6 +874,11 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
     '--force-window=yes',
     '--geometry=320x180+20000+20000',
     `--keepaspect=${currentAspect === 'wide' ? 'no' : 'yes'}`,
+    // Busca por keyframe em vez de quadro exato. O padrao do mpv decodifica ate
+    // o quadro pedido, e num VOD pela rede isso e reler do keyframe a cada salto
+    // e a cada arrasto — o filme congela na mao do usuario.
+    // `STPLAY_HR_SEEK=0` volta ao comportamento exato.
+    ...(process.env.STPLAY_HR_SEEK === '0' ? [] : ['--hr-seek=yes']),
     '--no-border',
     '--osc=no',
     '--osd-level=0',
@@ -1045,6 +1054,11 @@ async function aplicarAspecto(modo) {
   if (!aspectoValido(modo)) return { ok: false }
   currentAspect = modo
   try {
+    // Dois `sendIpc`, e nao um lote: `sendIpcBatch` so existe no `stur`. Aqui
+    // cada um custa uma ida-e-volta com timeout de 8s, e isso NAO segura nada
+    // — quem chama e `void`, logo depois do `loadfile`. Empilhar num write so
+    // seria otimizacao sem ganho, e referencia a uma funcao que nao existe aqui
+    // seria engolida pelo `catch` e deixaria o MPEG sem ajuste, em silencio.
     await sendIpc(['set_property', 'keepaspect', modo === 'wide' ? 'no' : 'yes'])
     await sendIpc(['set_property', 'panscan', ASPECTO_PANSCAN[modo]])
     log.info('mpeg', 'aspecto', {
@@ -1058,13 +1072,18 @@ async function aplicarAspecto(modo) {
   }
 }
 
-async function command(op, value) {
+async function command(op, value, mode) {
   if (!ipcSocket || ipcSocket.destroyed) return { ok: false }
   try {
     if (op === 'pause') await sendIpc(['set_property', 'pause', true])
     else if (op === 'play') await sendIpc(['set_property', 'pause', false])
     else if (op === 'toggle' || op === 'toggle-pause') await sendIpc(['cycle', 'pause'])
-    else if (op === 'seek' && typeof value === 'number') await sendIpc(['seek', value, 'absolute'])
+    else if (op === 'seek' && typeof value === 'number') {
+      // Mesma razao do stur: `relative` aplica a partir da posicao real do mpv.
+      // Seek absoluto com destino atrasado do renderer vira seek para tras, e
+      // seek para tras descarta o buffer.
+      await sendIpc(['seek', value, mode === 'relative' ? 'relative' : 'absolute'])
+    }
     else if (op === 'volume' && typeof value === 'number') {
       await sendIpc(['set_property', 'volume', Math.round(Math.max(0, Math.min(100, value * 100)))])
     } else if (op === 'mute' && typeof value === 'boolean') {

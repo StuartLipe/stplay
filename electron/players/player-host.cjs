@@ -451,12 +451,20 @@ function emit(win, payload) {
   win.webContents.send('player:event', payload)
 }
 
-async function command(op, value) {
-  if (activeEngine === 'libmpv') return libmpv.command(op, value)
-  if (activeEngine === 'mpv') return mpvExe.command(op, value)
-  if (activeEngine === 'mpv-one') return mpvOne.command(op, value)
-  if (activeEngine === 'stur') return stur.command(op, value)
-  if (activeEngine === 'mpeg') return mpeg.command(op, value)
+/*
+ * `mode` carrega a INTENCAO do seek, nao o valor.
+ *
+ * O renderer manda `relative` quando o gesto e um salto ("anda 10s daqui"), e o
+ * motor aplica a partir da posicao real dele. Sem isso, o salto virava seek
+ * absoluto para um instante calculado no renderer — que chega atrasado em
+ * relacao ao mpv. Seek para tras no mpv descarta o buffer e volta a rede.
+ */
+async function command(op, value, mode) {
+  if (activeEngine === 'libmpv') return libmpv.command(op, value, mode)
+  if (activeEngine === 'mpv') return mpvExe.command(op, value, mode)
+  if (activeEngine === 'mpv-one') return mpvOne.command(op, value, mode)
+  if (activeEngine === 'stur') return stur.command(op, value, mode)
+  if (activeEngine === 'mpeg') return mpeg.command(op, value, mode)
   return { ok: false }
 }
 
@@ -618,7 +626,7 @@ function registerPlayerIpc() {
 
   ipcMain.handle('player:stop', async () => runHostOp(() => stopAll()))
 
-  ipcMain.handle('player:command', async (_event, op, value) => command(op, value))
+  ipcMain.handle('player:command', async (_event, op, value, mode) => command(op, value, mode))
 
   ipcMain.handle('player:set-bounds', async (_event, rect) => setBounds(rect))
 

@@ -10569,7 +10569,18 @@ function Player({
   const skipTime = (delta: number) => {
     if (useNativePlayer) {
       const next = Math.max(0, Math.min(duration || 999999, currentTime + delta))
-      void managerRef.current?.command({ op: 'seek', seconds: next })
+      // `relative: true` — o gesto e "anda delta daqui", e o motor aplica a
+      // partir da posicao REAL dele.
+      //
+      // Antes ia `absolute` com `next`. O `currentTime` do renderer chega por
+      // `timeupdate` e ja atrasa em relacao ao mpv; um atraso de meio segundo
+      // numa seta para frente produz um destino ATRAS de onde o video esta.
+      // Seek para tras no mpv descarta o buffer e volta a ler da rede — a
+      // travada que parece "o filme nao carregou".
+      //
+      // O `next` continua alimentando a UI, que precisa mostrar o novo tempo na
+      // hora. So o comando mudou de significado.
+      void managerRef.current?.command({ op: 'seek', seconds: delta, relative: true })
       setCurrentTime(next)
       bumpOverlay()
       return

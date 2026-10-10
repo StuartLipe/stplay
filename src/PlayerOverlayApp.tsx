@@ -555,7 +555,19 @@ export function PlayerOverlayApp() {
    * precisa disso apesar de os controles estarem escondidos.
    */
   const overlayHitTest = dockVisible || fullscreen
-  const hideCursor = fullscreen && !uiVisible && playing
+  /*
+  O cursor segue a INTERFACE, e nao a tela cheia.
+
+  Era `fullscreen && !uiVisible && playing`: so sumia em tela cheia, e em modo
+  janela o cursor ficava parado no video com a barra ja apagada — o ponteiro
+  brilhando em cima da imagem, apontando para controles que nao existem mais.
+
+  `!uiVisible` ja e exatamente "a barra sumiu": os controles estao escondidos, o
+  video toca, nao ha lista aberta e nao esta carregando. Nao ha nada para o
+  cursor apontar. O `&& playing` continua, porque pausado a pessoa vai clicar em
+  botao e sumir o cursor debaixo da mao dela impede.
+ */
+const hideCursor = !uiVisible && playing
   const showMutedIcon = muted
 
   /*
