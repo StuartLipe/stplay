@@ -729,13 +729,62 @@ function registerPlayerIpc() {
       }
     }
     if (win && !win.isDestroyed()) {
-      win.webContents.send('player:ui-fullscreen')
+      /*
+        O MAIN inverte, e nao o renderer.
+
+        Medido pelo dono, no log com `STPLAY_FS_DEBUG`, cinco cliques seguidos no
+        botao de tela cheia:
+
+          ui-fullscreen pedido { janelaRealFullscreen: true }
+          apply pedido { pedido: true, estadoReal: true }   <- PEDIU PARA ENTRAR
+
+        A janela ja estava em tela cheia e o renderer pediu para ENTRAR. Cada
+        `setFullScreen(true)` redundante reexecuta a transicao: a janela quica, o
+        `isFullScreen()` pisca, o renderer recebe o pisca e continua defasado - e o
+        clique seguinte pede para entrar de novo. O sintoma na tela e "clicou em
+        tela cheia e ela pisca".
+
+        Por que o renderer erra: ele decide com `winFsRef.current`, um espelho do
+        IPC `window:fullscreen-changed`. E esse espacao OSCILA junto com a janela.
+        O `toggleFullscreen` do renderer foi escrito justamente para nao depender
+        de estado do render - mas a verdade de que ele precisa (`windowFullscreen`)
+        continua vindo de la, e la chega atrasada.
+
+        Quem nao adivinha e o main: `win.isFullScreen()` e a leitura ao vivo. O F11
+        ja fazia assim (`applyWindowFullscreen(win, !win.isFullScreen())`) e nunca
+        travou. O botao do overlay agora usa o mesmo caminho.
+
+        O renderer nao e avisado de proposito: se ele tambem invertesse, seriam duas
+        inversoes no mesmo toque e o saldo seria zero. Ele continua recebendo o
+        resultado pelo `window:fullscreen-changed`, que e o que alimenta o rotulo
+        do botao e o `body.player-active`.
+      */
+      applyWindowFullscreen(win, !win.isFullScreen())
     }
     return { ok: true }
   })
 
   ipcMain.handle('overlay:ui-key', (_event, payload) => {
     const win = getMainWindow()
+    /*
+      F11 vindo do overlay: inverte aqui, como o botao de tela cheia.
+
+      E o mesmo defeito do botao, pelo mesmo caminho: o renderer recebe a tecla,
+      chama `toggleFullscreen()`, e o `toggleFullscreen` decide com `winFsRef` -
+      um espelho que OSCILA junto com a janela. Medido no log do dono: a janela em
+      tela cheia e o renderer pedindo para ENTRAR, cinco vezes seguidas.
+
+      O F11 da janela principal ja nao passa por aqui - ele e resolvido no
+      `before-input-event`, que le `win.isFullScreen()` ao vivo. O do overlay
+      chegava por aqui e caia no renderer. Agora os dois usam a mesma verdade.
+    */
+    const key = payload && typeof payload.key === 'string' ? payload.key : ''
+    if (key === 'F11') {
+      if (win && !win.isDestroyed()) {
+        applyWindowFullscreen(win, !win.isFullScreen())
+      }
+      return { ok: true }
+    }
     if (win && !win.isDestroyed()) {
       win.webContents.send('player:ui-key', payload || {})
     }
@@ -799,6 +848,24 @@ function applyWindowFullscreen(win, enabled) {
     entre um video e outro, e um F11 com o catalogo aberto era lido como video.
   */
   fullscreenOrigin = next ? (playbackActive ? 'player' : 'app') : null
+  if (process.env.STPLAY_FS_DEBUG) {
+    // QUEM esta pedindo a troca, e com que verdade.
+    //
+    // O log de `aplicarEstadoReal` so mostrava a janela OSCILANDO sem dizer quem
+    // a estava derrubando. Este e o outro lado: se `pedido` divergir do estado
+    // real, ha alguem chamando com valor velho - e o `setFullScreen` com valor
+    // repetido e, no Windows, capaz de derrubar a janela de tela cheia.
+    try {
+      log.info('fs', 'apply pedido', {
+        pedido: next,
+        estadoReal: !win.isDestroyed() ? win.isFullScreen() : null,
+        playbackActive,
+        engine: activeEngine,
+      })
+    } catch {
+      // ignore
+    }
+  }
   try {
     if (next) {
       win.setFullScreen(true)
@@ -819,6 +886,43 @@ function applyWindowFullscreen(win, enabled) {
         apos a saida a mantem visivel em modo janela.
       */
       if (!win.isVisible()) win.show()
+      /*
+        RE-MEDIR DEPOIS DA SAIDA.
+
+        O `refreshNativeFullscreenLayout` de cima so corre enquanto a janela ESTA
+        em tela cheia - ele e quem posiciona a superficie no tamanho cheio. Na
+        saida ele nao serve, e ninguem posicionava de volta: a janela voltava ao
+        modo janela e a superficie do mpv ficava GIGANTE, do tamanho da tela
+        cheia, cobrindo o catalogo e recebendo clique ate fora do app. Medido
+        pelo dono: "fica em tela cheia soq em modo janela quando volta do full" e
+        "clico embaixo sem ser no app e mesmo assim ele pausa".
+
+        Quem sabe o retangulo novo e o RENDERER - o `getBoundingClientRect` do
+        wrapper do player, que so existe la. O main nao tem esse numero.
+
+        A ponde ja existia: `player:window-moved` faz o `playerManager` chamar
+        `reconciliar()`, que re-mede o retangulo e reenvia por `setBounds`. E o
+        mesmo caminho usado quando a janela troca de monitor. Reaproveito, no
+        mesmo atraso do foco: 220 ms, para a janela ja ter assentado.
+      */
+      setTimeout(() => {
+        if (win.isDestroyed() || !win.isVisible()) return
+        try {
+          win.moveTop()
+        } catch {
+          // ignore
+        }
+        try {
+          win.focus()
+        } catch {
+          // ignore
+        }
+        try {
+          win.webContents.send('player:window-moved')
+        } catch {
+          // ignore
+        }
+      }, 220)
     }
   } catch {
     // ignore
@@ -849,12 +953,28 @@ function applyWindowFullscreen(win, enabled) {
 
 function refreshNativeFullscreenLayout(win) {
   if (!win || win.isDestroyed() || !activeEngine) return
-  if (!win.isFullScreen()) return
+  if (!win.isFullScreen()) {
+    if (process.env.STPLAY_FS_DEBUG) {
+      try {
+        log.info('fs', 'bail: janela ainda nao esta em tela cheia', { engine: activeEngine })
+      } catch { /* ignore */ }
+    }
+    return
+  }
   if (activeEngine !== 'stur' && activeEngine !== 'mpeg' && activeEngine !== 'mpv-one' && activeEngine !== 'mpv' && activeEngine !== 'libmpv') {
     return
   }
   try {
     const cb = win.getContentBounds()
+    if (process.env.STPLAY_FS_DEBUG) {
+      try {
+        log.info('fs', 'reposicionando', {
+          engine: activeEngine,
+          cbX: cb.x, cbY: cb.y, cbW: cb.width, cbH: cb.height,
+          limiteAntes: lastBounds ? { w: lastBounds.width, h: lastBounds.height } : null,
+        })
+      } catch { /* ignore */ }
+    }
     const full = {
       x: 0,
       y: 0,
@@ -908,16 +1028,160 @@ function bindFullscreenHooks(win) {
    * unica saida passa a ser o ESC - que segue outro caminho.
    */
   let ultimoEnviado = null
-
-  const enviar = (fs) => {
-    if (ultimoEnviado === fs) return
-    ultimoEnviado = fs
+  /*
+   * O mesmo valor, empurrado para o OVERLAY.
+   *
+   * O overlay decide o que o ESC faz por um campo `fullscreen`, e esse campo
+   * chegava do RENDERER (`setOverlayMeta({ fullscreen: isFs })`, com
+   * `isFs = domFs || winFs`). O `winFs` do renderer OSCILA junto com a janela, e
+   * o log do dono mostrou a consequencia:
+   *
+   *   overlay action { type: 'back',
+   *                    overlayAchaFullscreen: false,
+   *                    janelaRealFullscreen: false }
+   *
+   * O overlay achava que NAO estava em tela cheia, entao o ESC caiu no ramo
+   * `back` - que PARA O VIDEO em vez de sair da tela cheia. Era o sintoma
+   * "aperto esq e o video some junto".
+   *
+   * O comentario em `overlay-window.cjs` ja advertia: "se esse campo divergir do
+   * estado real, o ESC para o VIDEO". E divergia, porque quem mandava era quem
+   * nao tinha a verdade.
+   *
+   * Agora o main - que le `win.isFullScreen()` ao vivo - e o dono do campo. Ele
+   * empurra no mesmo lugar em que avisa o renderer, na transicao que sobreviveu
+   * ao gate de estabilidade. O renderer continua podendo mandar o campo dele
+   * para outras coisas, mas a VERDADE de tela cheia vem sempre por cima.
+   */
+  let ultimoHintOverlay = null
+  const hintParaOverlay = (fs) => {
+    if (ultimoHintOverlay === fs) return
+    ultimoHintOverlay = fs
     try {
-      win.webContents.send('window:fullscreen-changed', { fullscreen: fs })
+      overlay.setMeta({ fullscreen: fs })
     } catch {
       // ignore
     }
   }
+  /*
+   * Releitura adiada da transicao de tela cheia.
+   *
+   * MEDIDO num Electron 39 isolado (janela sem moldura, 900x600 -> F11):
+   *
+   *   evento: ENTER      isFullScreen=false  contentBounds=100,80 900x600
+   *   evento: resize     isFullScreen=true   contentBounds=0,0 1920x1080
+   *
+   * O `enter-full-screen` dispara NO COMECO da animacao, e nesse instante a
+   * janela ainda nao mudou: `isFullScreen()` devolve `false` e
+   * `getContentBounds()` devolve o retangulo JANELADO. O `leave-full-screen` e o
+   * mesmo defeito ao contrario — devolve `true` e o retangulo cheio.
+   *
+   * O evento mente nos dois sentidos, e o codigo que le ele na hora erra. Foi
+   * assim que a saida ficou bugada (renderer preso em `winFs: true`) e, quando a
+   * simetria foi "consertada", a entrada ficou: `refresh` no ENTER via
+   * `isFullScreen() === false` e portanto
+   *
+   *   1. `enviar(false)` — o renderer recebe "nao estou em tela cheia" e nao
+   *      liga `body.player-active`. A lista de canais fica visivel por cima do
+   *      video, que e o sintoma do dono.
+   *   2. `win.setAlwaysOnTop(false)` — derruba o always-on-top NA ENTRADA.
+   *   3. `refreshNativeFullscreenLayout(win)` sai no primeiro guarda, porque
+   *      `win.isFullScreen()` ainda e falso. O mpv fica com o retangulo velho,
+   *      do tamanho do card, no meio da tela.
+   *
+   * A correcao e uma so, e vale para os dois eventos: nao decidir no evento.
+   * Marca uma releitura para quando a animacao assentar, e quem manda e a
+   * leitura real de depois. O debounce agrupa a enxurrada de `resize` que a
+   * propria transicao gera.
+   */
+  let reconciliarTransicao = null
+
+  /*
+   * `refresh` so AGREGA. Ele nao decide mais nada.
+   *
+   * O `enter-full-screen`, o `leave-full-screen` e cada `resize` que a transicao
+   * gera chegam aqui, e cada um merece a mesma resposta: esperar 90 ms e ler a
+   * verdade. Antes cada um resolvia sozinho, e por isso cada um errava sozinho.
+   */
+  const refresh = () => {
+    if (win.isDestroyed()) return
+    if (reconciliarTransicao) clearTimeout(reconciliarTransicao)
+    reconciliarTransicao = setTimeout(() => {
+      reconciliarTransicao = null
+      if (win.isDestroyed()) return
+      aplicarEstadoReal()
+    }, 90)
+  }
+
+  /*
+   * Leitura ESTAVEL antes de emitir.
+   *
+   * `win.isFullScreen()` OSCILA durante a transicao no Windows, e o log do dono
+   * provou com tres `true` seguidos - tres emissoes de `true` seguidas so
+   * acontecem se `enviar(false)` rodou entre elas:
+   *
+   *   janela fullscreen { fullscreen: true }
+   *   janela fullscreen { fullscreen: true }
+   *   janela fullscreen { fullscreen: true }
+   *
+   * Uma leitura nao basta. Emitir no primeiro `false` que passa manda o renderer
+   * para "nao estou em tela cheia", e no app isso apaga `body.player-active` e
+   * some com o catalogo por alguns quadros - o "so pisca" que o dono relatou.
+   *
+   * A regra e: uma mudanca so existe se sobreviver a uma releitura. Duas
+   * leituras iguais com 70 ms entre elas, no maximo oito tentativas - se a
+   * oscilacao durar mais que isso, a ultima leitura vale, porque ficar
+   * re-lendo para sempre e pior que uma emissao atrasada.
+   */
+  let ultimoLido = null
+  let leiturasEstaveis = 0
+
+  const avaliar = (tentativasRestantes) => {
+    if (win.isDestroyed()) return
+    try {
+      const fs = win.isFullScreen()
+      if (fs === ultimoLido) {
+        leiturasEstaveis += 1
+      } else {
+        ultimoLido = fs
+        leiturasEstaveis = 1
+      }
+
+      if (leiturasEstaveis >= 2 || tentativasRestantes <= 0) {
+        leiturasEstaveis = 0
+        /*
+          So age quando o valor MUDA.
+
+          `aplicarEstadoReal` e chamado do debounce de 90 ms e das confirmacoes de
+          250/700 ms. A reonda de `refreshNativeFullscreenLayout` continua correndo
+          sempre: ele e barato e e o que garante o mpv no lugar, mesmo que o
+          estado nao tenha mudado desde a ultima vez.
+        */
+        if (ultimoEnviado !== fs) {
+          // DIAGNOSTICO: toda mudanca de tela cheia da JANELA, com o valor real.
+          // Sem isto nao da para dizer se o overlay foi avisado ou se so a janela
+          // mudou.
+          if (process.env.STPLAY_FS_DEBUG) {
+            try {
+              log.info('fs', 'janela fullscreen', { fullscreen: fs })
+            } catch {
+              // ignore
+            }
+          }
+          enviar(fs)
+          hintParaOverlay(fs)
+        }
+        refreshNativeFullscreenLayout(win)
+        return
+      }
+      setTimeout(() => avaliar(tentativasRestantes - 1), 70)
+    } catch {
+      // ignore
+    }
+  }
+
+  const aplicarEstadoReal = () => avaliar(8)
+  win.__sturReconciliarFullscreen = aplicarEstadoReal
 
   /*
    * Re-lee o estado real e corrige o renderer se ele divergiu.
@@ -931,46 +1195,23 @@ function bindFullscreenHooks(win) {
    * transicao normal, 700 ms pega a janela que estava no meio de um arrraste
    * quando a saida foi pedida.
    */
-  const reconciliarFullscreen = () => {
-    if (win.isDestroyed()) return
-    try {
-      enviar(win.isFullScreen())
-    } catch {
-      // ignore
-    }
+  /*
+   * Confirmacoes do `applyWindowFullscreen`, em 250 ms e 700 ms.
+   *
+   * Cada uma pega um prazo diferente: 250 ms a transicao normal, 700 ms a janela
+   * que estava no meio de um arraste quando a ordem chegou. As duas chamam
+   * `aplicarEstadoReal`, que le a verdade e nao o evento.
+   */
+  win.__sturConfirmarFullscreenDepois = (ms) => {
+    setTimeout(() => {
+      if (!win.isDestroyed()) aplicarEstadoReal()
+    }, ms)
   }
-  win.__sturReconciliarFullscreen = reconciliarFullscreen
 
-  const refresh = () => {
-    if (win.isDestroyed()) return
-    const fs = win.isFullScreen()
-    // DIAGNOSTICO: toda mudanca de tela cheia da JANELA, com o valor real. Sem
-    // isto nao da para dizer se o overlay foi avisado ou se so a janela mudou.
-    //
-    // Este e o mais ruidoso dos tres: `refresh` tambem roda no `resize`, entao
-    // em tela cheia ele dispara a cada pixel de arrasto da janela. O
-    // `ultimoEnviado` corta o repetido: so avisa o que o renderer nao sabe.
-    if (process.env.STPLAY_FS_DEBUG && ultimoEnviado !== fs) {
-      try {
-        log.info('fs', 'janela fullscreen', { fullscreen: fs })
-      } catch {
-        // ignore
-      }
-    }
-    enviar(fs)
-    if (!fs) {
-      try {
-        win.setAlwaysOnTop(false)
-      } catch {
-        // ignore
-      }
-    }
-    refreshNativeFullscreenLayout(win)
-  }
   win.on('enter-full-screen', refresh)
   win.on('leave-full-screen', refresh)
   win.on('resize', () => {
-    if (win.isFullScreen() && activeEngine) refresh()
+    refresh()
   })
   /*
    * MOVER a janela, sem redimensionar.

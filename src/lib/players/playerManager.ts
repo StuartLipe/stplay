@@ -389,7 +389,31 @@ export class PlayerManager {
       return false
     }
 
-    if (backend.embedded && (engine === 'libmpv' || engine === 'mpv' || engine === 'mpv-one' || engine === 'stur')) this.bindBounds(true)
+    /*
+      TODO motor embutido observa o retangulo - inclusive o mpeg.
+
+      A lista nao tinha `mpeg`, e a consequencia foi medida pelo dono: entrar em
+      tela cheia pelo mpeg e voltar deixava a superficie do video GIGANTE, do
+      tamanho da tela cheia, cobrindo o catalogo e recebendo clique ate fora do
+      app. "Mesma coisa ainda" - em dois motores, so o stur voltava certo.
+
+      O log com `STPLAY_BOUNDS_DEBUG` mostrou o buraco preto: na volta do
+      fullscreen o stur recebia `w: 939, h: 837` (o tamanho de janela) e o mpeg
+      NAO RECEBIA NADA - todos os `setBounds` dele eram `1920x1080` com
+      `fullscreen: true`. Ele ficava preso no ultimo retangulo, que era o cheio.
+
+      Por que o mpeg nao recebia: sem `bindBounds`, ninguem inscreve o
+      `ResizeObserver` que publica o retangulo quando a janela muda de tamanho. E
+      o unico outro caminho - o `fullscreenchange` do DOM - nao dispara, porque
+      este app usa tela cheia de JANELA (`win.setFullScreen`), que nao passa pelo
+      DOM. O stur escapava so porque estava na lista.
+
+      A lista agora e por exclusao: o que NAO e embutido fica fora, e entrarem
+      motores novos nao correm o risco de cair no mesmo buraco.
+    */
+    const embutido =
+      engine === 'libmpv' || engine === 'mpv' || engine === 'mpv-one' || engine === 'stur' || engine === 'mpeg'
+    if (backend.embedded && embutido) this.bindBounds(true)
 
     if (resolved) {
       playerLog('info', 'manager', 'success (early)', { engine })

@@ -47,6 +47,33 @@ const winApi =
   process.platform === 'win32'
     ? (() => {
         const user32 = koffi.load('user32.dll')
+        /*
+         * Registro IDEMPOTENTE das structs.
+         *
+         * `stur-player.cjs` declara os MESMOS nomes, e os dois motores sao
+         * carregados pelo mesmo `player-host.cjs`, no mesmo processo. O koffi
+         * guarda o registro por nome no processo: a segunda declaracao levanta
+         * "Duplicate type name". Verificado:
+         *
+         *   koffi.struct('stplay_RECT', {...})  -> 1a ok
+         *   koffi.struct('stplay_RECT', {...})  -> Duplicate type name
+         *
+         * O esquema dos dois e identico (4x int32), entao reutilizar o registro
+         * que o stur deixou e correto. Se um dia os esquemas divergirem, o
+         * koffi nao avisa - ele simplesmente usa o primeiro. O dia que isso
+         * acontecer, o sintoma vai ser retangulo com numero absurdo em
+         * `janelaReal`, e a cura e extrair a declaracao para um modulo so.
+         */
+        for (const [nome, campos] of [
+          ['stplay_RECT', { left: 'int32', top: 'int32', right: 'int32', bottom: 'int32' }],
+          ['stplay_POINT', { x: 'int32', y: 'int32' }],
+        ]) {
+          try {
+            koffi.struct(nome, campos)
+          } catch {
+            // ja registrada pelo stur neste processo: reaproveita.
+          }
+        }
         return {
           FindWindowExW: user32.func('intptr __stdcall FindWindowExW(intptr, intptr, str16, str16)'),
           GetWindowThreadProcessId: user32.func('uint32 __stdcall GetWindowThreadProcessId(intptr, _Out_ uint32*)'),
@@ -59,6 +86,8 @@ const winApi =
           MoveWindow: user32.func('bool __stdcall MoveWindow(intptr, int, int, int, int, bool)'),
           ShowWindow: user32.func('bool __stdcall ShowWindow(intptr, int)'),
           SetWindowPos: user32.func('bool __stdcall SetWindowPos(intptr, intptr, int, int, int, int, uint32)'),
+          GetWindowRect: user32.func('bool __stdcall GetWindowRect(intptr, _Out_ stplay_RECT*)'),
+          ClientToScreen: user32.func('bool __stdcall ClientToScreen(intptr, _Inout_ stplay_POINT*)'),
         }
       })()
     : null
@@ -238,8 +267,56 @@ function hideVideo() {
   lastPlacedKey = ''
 }
 
+/**
+ * Retangulo REAL da HWND, em coordenadas de tela.
+ *
+ * E a unica leitura que nao passa pelo que o app ACHOU que pediu: `lastBounds`
+ * e o que veio do renderer, e ele pode estar certo enquanto a janela esta em
+ * outro lugar. Portado do `stur-player.cjs`, que ja tinha este defeito medido e
+ * documentado; ver o comentario longo em `showVideo` abaixo.
+ */
+function janelaReal(hwnd) {
+  if (!winApi || !hwnd) return null
+  try {
+    const r = {}
+    if (!winApi.GetWindowRect(hwnd, r)) return null
+    return { x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top }
+  } catch {
+    return null
+  }
+}
+
+/** Origem do cliente do pai, em coordenadas de tela. */
+function clienteNaTela(hwnd) {
+  if (!winApi || !hwnd) return null
+  try {
+    const p = { x: 0, y: 0 }
+    if (!winApi.ClientToScreen(hwnd, p)) return null
+    return { x: p.x, y: p.y }
+  } catch {
+    return null
+  }
+}
+
+/** O mpv perdeu o pai? Acontece quando a janela troca de estado de tela. */
+function isMpvDetached() {
+  if (!mpvHwnd || !winApi || !parentHwnd) return false
+  return Number(winApi.GetParent(mpvHwnd)) !== parentHwnd
+}
+
 function showVideo(bounds) {
   if (!surfaceActive || !mpvHwnd || !winApi || !bounds || bounds.width < 16) return
+  /*
+    Os DOIS flags tem de ser lidos ANTES do `ensureEmbedded`.
+
+    `ensureEmbedded` reancora o pai quando necessario, e depois disso
+    `isMpvDetached()` passa a falso. Se o flag fosse lido depois, o caso
+    "estava desancorado e o ensure consertou" seria perdido - que e justamente
+    o caso que precisa do re-elevate. O `stur-player.cjs` le os dois aqui, pelo
+    mesmo motivo.
+  */
+  const wasHidden = videoHidden
+  const wasDetached = isMpvDetached()
   if (!ensureEmbedded(true)) return
   const s = scaleFactor()
   const x = Math.round(bounds.x * s)
@@ -247,22 +324,73 @@ function showVideo(bounds) {
   const w = Math.max(16, Math.round(bounds.width * s))
   const h = Math.max(16, Math.round(bounds.height * s))
   const placeKey = `${x},${y},${w},${h}`
-  if (!videoHidden && lastPlacedKey === placeKey) {
-    winApi.EnableWindow(mpvHwnd, false)
-    try {
-      overlay.syncBounds(bounds)
-      overlay.bringToFront()
-    } catch {
-      // ignore
+  /*
+   * O DEDUP COMPARAVA COM A PERGUNTA, NAO COM A JANELA.
+   *
+   * `lastPlacedKey` guardava o que o app JA PEDIU. O Windows, durante a
+   * transicao de tela cheia, reposiciona as janelas filhas sozinho - e o cache
+   * continuava dizendo que a HWND do mpv estava no lugar certo. Todo retangulo
+   * correto seguinte era descartado como duplicado, e o video ficava onde o
+   * Windows deixou.
+   *
+   * MEDIDO no sintoma do dono: entrar em tela cheia deixava o video do tamanho
+   * do card, no meio da tela, com o catalogo na esquerda. O log de bounds
+   * mostrava o retangulo certo o tempo todo. A HWND era que nao tinha saido do
+   * lugar - e o dedup nunca a pesquiava.
+   *
+   * O `stur` teve este mesmo defeito, com a mesma assinatura, e carrega a
+   * correcao desde entao (ver o comentario equivalente em `stur-player.cjs`).
+   * O mpeg nunca recebeu: e por isso o bug so aparecia aqui.
+   *
+   * Agora o dedup so vale quando a janela REAL ja esta no lugar. Custa um
+   * `GetWindowRect` e um `ClientToScreen` por chamada, e `showVideo` roda no
+   * maximo a 30 Hz por 1,2 s depois de um gatilho.
+   */
+  if (!videoHidden && !wasDetached && lastPlacedKey === placeKey) {
+    const real = janelaReal(mpvHwnd)
+    const origem = clienteNaTela(parentHwnd)
+    const jaNoLugar =
+      real &&
+      origem &&
+      real.x === origem.x + x &&
+      real.y === origem.y + y &&
+      real.width === w &&
+      real.height === h
+    if (jaNoLugar) {
+      winApi.EnableWindow(mpvHwnd, false)
+      try {
+        overlay.syncBounds(bounds)
+        overlay.bringToFront()
+      } catch {
+        // ignore
+      }
+      return
     }
-    return
   }
   lastPlacedKey = placeKey
   winApi.EnableWindow(mpvHwnd, false)
   winApi.MoveWindow(mpvHwnd, x, y, w, h, true)
-  winApi.SetWindowPos(mpvHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
-  winApi.ShowWindow(mpvHwnd, SW_SHOWNA)
-  videoHidden = false
+  /*
+    RE-ELEVAR SO QUANDO PRECISA - copiado do stur.
+
+    Antes o mpeg fazia `SetWindowPos(HWND_TOP)` + `ShowWindow` EM TODA chamada
+    que passava do dedup. Durante a transicao de tela cheia o Windows esta
+    movendo a janela filha sozinho, e forçar ela para o topo da ordem z a cada
+    tique briga com o SO: cada yank gera novos eventos, que chamam `showVideo`
+    de novo, que yanka de novo. O sintoma era a tela piscando no clique de tela
+    cheia.
+
+    O `stur` so re-eleva quando a janela estava escondida ou desancorada -
+    `wasHidden || wasDetached`. Nos dois casos o `ensureEmbedded` pode ter
+    reancorado o pai, e a janela precisa voltar a aparecer. Nos outros casos o
+    `MoveWindow` acima ja posicionou, e o `SetWindowPos` com `SWP_NOSIZE` nao
+    acrescenta nada: so mexe na ordem z.
+  */
+  if (wasHidden || wasDetached || videoHidden) {
+    winApi.SetWindowPos(mpvHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+    winApi.ShowWindow(mpvHwnd, SW_SHOWNA)
+    videoHidden = false
+  }
   try {
     overlay.syncBounds(bounds)
     overlay.bringToFront()
@@ -891,6 +1019,35 @@ async function command(op, value) {
 
 function setBounds(rect) {
   if (!rect) return { ok: false }
+  /*
+    LOG DE BOUNDS - copiado do `stur-player.cjs`, que tem o mesmo portao.
+
+    Sem isto nao da para comparar os dois motores: o stur grava o retangulo que
+    recebe e o mpeg nao, e a investigacao do "fica grande em modo janela" precisa
+    justamente dos DOIS numeros lado a lado. Medido pelo dono: o stur volta ao
+    tamanho certo e o mpeg fica com o retangulo de tela cheia.
+
+    Atras de `STPLAY_BOUNDS_DEBUG` porque `setBounds` e chamado em toda troca de
+    canal, em todo resize e em cada frame da reconciliacao - logar sempre encheria
+    o arquivo e esconderia o que importa.
+  */
+  if (process.env.STPLAY_BOUNDS_DEBUG) {
+    log.info('mpeg', 'setBounds', {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      w: Math.round(rect.width),
+      h: Math.round(rect.height),
+      cliente: mainWindow
+        ? (() => {
+            const c = mainWindow.getContentBounds()
+            return `${Math.round(c.width)}x${Math.round(c.height)}`
+          })()
+        : null,
+      fullscreen: mainWindow && !mainWindow.isDestroyed() ? mainWindow.isFullScreen() : null,
+      surfaceActive,
+      hwnd: mpvHwnd || null,
+    })
+  }
   placeVideo(rect)
   return { ok: true }
 }
