@@ -14,7 +14,29 @@ export type PlayerStartOptions = {
   startTime?: number
   bounds?: VideoRect
   referer?: string
+  /**
+   * Como a imagem ocupa a area do player. Vai no `start` porque o mpv resolve
+   * `wide` na flag de spawn (`keepaspect`) e `fit`/`fill` na propriedade
+   * `panscan` — quem decide e o motor, nao o CSS.
+   */
+  aspect?: VideoFit
 }
+
+/**
+ * Ajuste da imagem dentro da area do player.
+ *
+ *   fit   - a imagem inteira cabe; sobram tarjas pretas.
+ *   fill  - preenche cortando a borda da imagem; sem tarja, sem distorcao.
+ *   wide  - preenche esticando; a imagem perde a proporcao.
+ *
+ * O historico era `fit` fixo, sem estado e sem botao: o `<video>` recebia
+ * `object-fit: contain` pelo CSS e o mpv, que nao tem `<video>`, mantinha o
+ * padrao dele de preservar proporcao. Nos dois motores a tarja era inevitavel.
+ * `fill` e o padrao agora porque e o que a TV entrega do mesmo canal — janela
+ * 16:9 com fonte 16:9 nao gera tarja, e no PC a janela nunca e exatamente o
+ * aspecto da fonte.
+ */
+export type VideoFit = 'fit' | 'fill' | 'wide'
 
 export type PlayerCommand =
   | { op: 'pause' }
@@ -23,6 +45,7 @@ export type PlayerCommand =
   | { op: 'seek'; seconds: number }
   | { op: 'volume'; value: number }
   | { op: 'mute'; value: boolean }
+  | { op: 'aspect'; mode: VideoFit }
 
 export type PlayerEvent =
   | { type: 'ready' }

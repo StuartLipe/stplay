@@ -231,6 +231,36 @@ let raiseTimer = null
 const CACHE_PAUSE_WAIT = 8
 /** Ao vivo: start imediato (sem esperar buffer). VOD mantém cache-pause. */
 let liveMode = false
+/**
+ * Ajuste da imagem: `fit` deixa tarja, `fill` corta a borda, `wide` estica.
+ *
+ * No modulo, e nao na sessao, porque o `reload` reaproveita o mesmo mpv — trocar
+ * de canal tem que manter o modo escolhido, nao voltar ao padrao.
+ */
+let currentAspect = 'fill'
+/** Quanto da fonte o mpv pode cortar para casar com a janela. */
+const ASPECTO_PANSCAN = { fit: '0', fill: '1', wide: '0' }
+
+function aspectoValido(modo) {
+  return modo === 'fit' || modo === 'fill' || modo === 'wide'
+}
+
+async function aplicarAspecto(modo) {
+  if (!aspectoValido(modo)) return { ok: false }
+  currentAspect = modo
+  try {
+    await sendIpc(['set_property', 'keepaspect', modo === 'wide' ? 'no' : 'yes'])
+    await sendIpc(['set_property', 'panscan', ASPECTO_PANSCAN[modo]])
+    log.info('stur', 'aspecto', {
+      modo,
+      keepaspect: modo === 'wide' ? 'no' : 'yes',
+      panscan: ASPECTO_PANSCAN[modo],
+    })
+    return { ok: true }
+  } catch {
+    return { ok: false }
+  }
+}
 /** @type {ReturnType<typeof setTimeout> | null} */
 let liveShowTimer = null
 /** Ao vivo: após 1º frame — ignora pause/buffer espúrios do mpv. */
@@ -1124,6 +1154,7 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
     await sendIpc(['set_property', 'start', 'none'])
   }
   await applyReferrer(playUrl)
+    await aplicarAspecto(currentAspect)
   // Em live, esta e a URL que o mpv esta realmente recebendo — inclusive quando
   // a preflight desviou para o .ts. Registrar aqui e o unico ponto confiavel.
   if (liveMode) livePlayUrl = playUrl
@@ -4043,6 +4074,10 @@ function buildMpvArgs(url, wid = 0) {
     ...(anchored
       ? [`--wid=${wid}`, '--force-window=immediate']
       : ['--force-window=yes', '--geometry=320x180+20000+20000']),
+    // Na argv E na propriedade: na argv para o 1o frame ja nascer certo, sem
+    // flash de tarja; na propriedade porque `aplicarAspecto` roda depois do
+    // loadfile e cobre o reload.
+    `--keepaspect=${currentAspect === 'wide' ? 'no' : 'yes'}`,
     '--no-border',
     '--osc=no',
     '--osd-level=0',
@@ -4574,6 +4609,9 @@ async function openUrl(win, url, startTime = 0, bounds = null, opts = {}) {
 }
 
 async function start(win, url, startTime = 0, bounds = null, opts = {}) {
+  // Antes de `buildMpvArgs`: a flag `keepaspect` da argv precisa ja sair com o
+  // modo certo, senao o 1o frame nasce com tarja e so corrige depois do loadfile.
+  if (aspectoValido(opts?.aspect)) currentAspect = opts.aspect
   if (!isAvailable()) {
     log.warn('stur', 'start rejected: mpv.exe missing')
     return { ok: false, error: 'STUR indisponível (resources/mpv/mpv.exe)' }
@@ -4719,6 +4757,7 @@ function isBusy() {
 }
 
 async function reload(win, url, startTime = 0, bounds = null, opts = {}) {
+  if (aspectoValido(opts?.aspect)) currentAspect = opts.aspect
   if (!isRunning()) return null
   if (!win || win.isDestroyed()) return null
   if (typeof url !== 'string' || !isPlayableUrl(url)) return null
@@ -4871,6 +4910,8 @@ async function command(op, value) {
     } else if (op === 'seek' && typeof value === 'number') await sendIpc(['seek', value, 'absolute'])
     else if (op === 'volume' && typeof value === 'number') {
       await sendIpc(['set_property', 'volume', Math.round(Math.max(0, Math.min(100, value * 100)))])
+    } else if (op === 'aspect') {
+      return await aplicarAspecto(value)
     } else return { ok: false }
     return { ok: true }
   } catch {

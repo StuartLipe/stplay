@@ -7,6 +7,7 @@ import {
   normalizeHexColor,
 } from './accent'
 import { DEFAULT_THEME_FAVORITES, isShellBackgroundId, normalizeThemeFavorites } from './appearance'
+import { migratePlayer, PLAYER_DEFAULT } from './player-default'
 
 const KEY = 'sturplay.playlists'
 const FAV_KEY = 'sturplay.favorites'
@@ -40,9 +41,16 @@ const ACTIVE_PROFILE_KEY = 'sturplay.active-profile'
  * Isto so vale para quem ainda nao tem nada salvo. Quem ja tem preferencias
  * gravadas continua com elas: `normalizeSettings` le o que existe no
  * armazenamento e so cai neste objeto quando o registro nao existe.
+ *
+ * O motor padrao e `stur`, nao `auto`. Medido pelo dono: `auto` comeca no
+ * player interno (hls.js) e so cai no STUR quando o interno falha, ou seja,
+ * quem abre um filme pesado espera o interno falhar antes de ver o mpv nativo.
+ * O STUR e mpv nativo dentro do app, e o unico dos quatro que a tela de
+ * configuracao descreve como "filmes, series e codecs pesados" — que e o que o
+ * app e. Quem quiser o comportamento antigo troca em Configuracoes.
  */
 export const DEFAULT_SETTINGS: AppSettings = {
-  player: 'auto',
+  player: PLAYER_DEFAULT,
   userAgent: 'VLC/3.0.4 LibVLC/3.0.4',
   mouseControls: true,
   theme: 'amoled',
@@ -57,89 +65,45 @@ export const DEFAULT_SETTINGS: AppSettings = {
   performanceMode: false,
 }
 
-const PLAYER_MIGRATE_KEY = 'sturplay.player-engine-v8'
-const PLAYER_MIGRATE_V9_KEY = 'sturplay.player-engine-v9'
-const PLAYER_MIGRATE_V10_KEY = 'sturplay.player-engine-v10'
-const PLAYER_MIGRATE_V11_KEY = 'sturplay.player-engine-v11'
-const PLAYER_MIGRATE_V12_KEY = 'sturplay.player-engine-v12'
-const PLAYER_MIGRATE_V13_KEY = 'sturplay.player-engine-v13'
+/**
+ * Chaves das migracoes, por versao. O `player-default.ts` decide o que fazer
+ * com elas; aqui so se le e se grava a marca de "ja rodou".
+ */
+const PLAYER_MIGRATE_KEYS = {
+  8: 'sturplay.player-engine-v8',
+  9: 'sturplay.player-engine-v9',
+  10: 'sturplay.player-engine-v10',
+  11: 'sturplay.player-engine-v11',
+  12: 'sturplay.player-engine-v12',
+  13: 'sturplay.player-engine-v13',
+} as const
+
+const PLAYER_MIGRATE_VERSOES = [8, 9, 10, 11, 12, 13] as const
 
 function normalizeSettings(raw: Partial<AppSettings> & { player?: string }): AppSettings {
   const rawPlayer = String(raw.player || '')
-  const valid = new Set(['auto', 'internal', 'libmpv', 'mpv', 'mpv-one', 'stur', 'mpeg', 'vlc', 'mpc'])
-  let player: AppSettings['player'] = valid.has(rawPlayer) ? (rawPlayer as AppSettings['player']) : DEFAULT_SETTINGS.player
-
-  // v8: Shaka e MPV saíram — quem estava neles vai para o player interno
-  try {
-    if (!localStorage.getItem(PLAYER_MIGRATE_KEY)) {
-      localStorage.setItem(PLAYER_MIGRATE_KEY, '1')
-      if (rawPlayer === 'shaka' || rawPlayer === 'mpv' || rawPlayer === 'mdk' || rawPlayer === 'playerone') {
-        player = 'internal'
+  // A cadeia v8..v13 mora em `player-default.ts`, e nao aqui: este arquivo
+  // importa `./accent` e `./appearance` sem extensao (o Vite resolve, o runner
+  // de teste nao), e sem essa separacao nenhuma das migrate-chains podia ser
+  // testada. Com a decisao fora, ela e pura e verificada.
+  // A CORRIDA das migracoes vem ANTES da decisao: `jaRodou` precisa saber o que
+  // ja estava marcado, e e esta passagem que marca o que faltava. Sem isto, um
+  // perfil antigo cairia em `migratePlayer` achando que tudo ja rodou e
+  // receberia o padrao em vez da migracao.
+  for (const versao of PLAYER_MIGRATE_VERSOES) {
+    try {
+      if (!localStorage.getItem(PLAYER_MIGRATE_KEYS[versao])) {
+        localStorage.setItem(PLAYER_MIGRATE_KEYS[versao], '1')
       }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
 
-  // v9: default Automático para quem ainda usa internal
-  try {
-    if (!localStorage.getItem(PLAYER_MIGRATE_V9_KEY)) {
-      localStorage.setItem(PLAYER_MIGRATE_V9_KEY, '1')
-      if (!rawPlayer || rawPlayer === 'internal') player = 'auto'
-    }
-  } catch {
-    // ignore
-  }
-
-  // v10: reset — apenas player interno (mpv/libmpv refeitos depois)
-  try {
-    if (!localStorage.getItem(PLAYER_MIGRATE_V10_KEY)) {
-      localStorage.setItem(PLAYER_MIGRATE_V10_KEY, '1')
-      player = 'internal'
-    }
-  } catch {
-    // ignore
-  }
-
-  // v11: interno + mpv embutido (sem auto/libmpv)
-  try {
-    if (!localStorage.getItem(PLAYER_MIGRATE_V11_KEY)) {
-      localStorage.setItem(PLAYER_MIGRATE_V11_KEY, '1')
-      if (player !== 'mpv') player = 'internal'
-    }
-  } catch {
-    // ignore
-  }
-
-  // v12: filmes no mpv por padrão; ao vivo continua interno
-  try {
-    if (!localStorage.getItem(PLAYER_MIGRATE_V12_KEY)) {
-      localStorage.setItem(PLAYER_MIGRATE_V12_KEY, '1')
-      player = 'mpv'
-    }
-  } catch {
-    // ignore
-  }
-
-  // v13: só Interno + STUR + Auto; motores legados viram STUR
-  try {
-    if (!localStorage.getItem(PLAYER_MIGRATE_V13_KEY)) {
-      localStorage.setItem(PLAYER_MIGRATE_V13_KEY, '1')
-      if (
-        player === 'mpv' ||
-        player === 'mpv-one' ||
-        player === 'libmpv' ||
-        player === 'vlc' ||
-        player === 'mpc'
-      ) {
-        player = 'stur'
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  if (player !== 'auto' && player !== 'internal' && player !== 'stur' && player !== 'mpeg') player = 'auto'
+  const player = migratePlayer({
+    rawPlayer,
+    jaRodou: (versao) => Boolean(readRaw(PLAYER_MIGRATE_KEYS[versao])),
+  })
 
   const themes = new Set(['dark', 'midnight', 'custom', 'amoled', 'ocean', 'slate'])
   const theme = themes.has(String(raw.theme)) ? (raw.theme as AppSettings['theme']) : DEFAULT_SETTINGS.theme

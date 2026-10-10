@@ -482,6 +482,7 @@ export class PlayerManager {
         startTime: startOpts.startTime,
         bounds,
         live: startOpts.live === true,
+        aspect: startOpts.aspect,
       })
       if (playGen !== this.playGen) return false
       if (result?.ok) return true

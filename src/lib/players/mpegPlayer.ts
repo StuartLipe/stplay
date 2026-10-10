@@ -65,6 +65,7 @@ function bridge(engine: PlayerEngine): PlayerBackend {
         startTime: opts.startTime,
         bounds: opts.bounds,
         live: opts.live === true,
+        aspect: opts.aspect,
       })
       if (!result?.ok) {
         emit({ type: 'failed', reason: result?.error || `${engine} falhou ao iniciar` })
@@ -89,7 +90,16 @@ function bridge(engine: PlayerEngine): PlayerBackend {
               : cmd.op === 'toggle'
                 ? 'toggle'
                 : cmd.op
-      const value = cmd.op === 'seek' ? cmd.seconds : cmd.op === 'volume' ? cmd.value : cmd.op === 'mute' ? cmd.value : undefined
+      const value =
+        cmd.op === 'seek'
+          ? cmd.seconds
+          : cmd.op === 'volume'
+            ? cmd.value
+            : cmd.op === 'mute'
+              ? cmd.value
+              : cmd.op === 'aspect'
+                ? cmd.mode
+                : undefined
       await api()?.command?.(op, value)
     },
     onEvent(cb) {

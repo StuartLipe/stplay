@@ -113,12 +113,18 @@ declare global {
           startTime?: number
           live?: boolean
           bounds?: { x: number; y: number; width: number; height: number }
+          /**
+           * Ajuste da imagem. Vai no `start` e nao so no `command` porque o
+           * motor decide a flag de spawn (`keepaspect`) antes do primeiro
+           * frame — mandar so depois deixaria um flash de tarja na abertura.
+           */
+          aspect?: 'fit' | 'fill' | 'wide'
         }) => Promise<{ ok: boolean; error?: string; engine?: string }>
         hide?: () => Promise<{ ok: boolean }>
         hideSync?: () => { ok: boolean }
         restoreShell?: () => { ok: boolean }
         stop: () => Promise<{ ok: boolean }>
-        command: (op: string, value?: number | boolean) => Promise<{ ok: boolean }>
+        command: (op: string, value?: number | boolean | 'fit' | 'fill' | 'wide') => Promise<{ ok: boolean }>
         setBounds: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>
         syncOverlay: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>
         setOverlayMeta?: (meta: Record<string, unknown>) => Promise<{ ok: boolean }>

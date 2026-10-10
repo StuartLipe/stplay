@@ -27,6 +27,8 @@ import { cachedCount, clearCatalog, hydrateCatalogFromDisk, loadCatalog, loadCat
 import { clearDiskCatalog } from './lib/catalogDisk'
 import { setPlayerKeepMuted, attachPlayerEx } from './lib/player'
 import { PlayerManager } from './lib/players/playerManager'
+import type { VideoFit } from './lib/players/types'
+import { aspectHint, nextAspect, normalizeAspect } from './lib/players/video-aspect'
 import {
   playbackUiAfterFailed,
   playbackUiAfterRetry,
@@ -143,6 +145,8 @@ import {
   Unlock,
   Copy,
   Info,
+  Crop,
+  Maximize2,
 } from 'lucide-react'
 
 const DEMO: Channel[] = [{ id: 'demo-hls', name: 'Demo HLS (Mux)', group: 'Testes', url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8', kind: 'live' }]
@@ -9872,6 +9876,25 @@ function readStoredVolume() {
   }
 }
 
+/**
+ * Ajuste da imagem, guardado porque quem assiste escolhe uma vez e espera.
+ *
+ * O padrao e `fill` (preenche cortando a borda) e nao `fit`. `fit` era o unico
+ * valor possivel — o estado existia mas nunca era mudado — e ele sobrava tarja
+ * sempre, porque a janela do PC nunca tem exatamente o aspecto da fonte. `fill`
+ * e o que a TV entrega do mesmo canal.
+ *
+ * O catch mantem `fill`: `localStorage` falha em janela privada e com quota
+ * cheia, e um ajuste de imagem nao vale um componente nao montado.
+ */
+function readStoredAspect(): VideoFit {
+  try {
+    return normalizeAspect(localStorage.getItem('stplay.video-aspect'))
+  } catch {
+    return 'fill'
+  }
+}
+
 const LIVE_ZAP_FEEDBACK_MS = 450
 
 function Player({
@@ -9924,7 +9947,23 @@ function Player({
   const onChangeRef = useRef(onChange)
   channelListRef.current = list
   onChangeRef.current = onChange
-  const [aspect] = useState<'fit' | 'fill' | 'wide'>('fit')
+  const [aspect, setAspect] = useState<VideoFit>(readStoredAspect)
+  // O mesmo modo, lido dentro do efeito de reproducao. Existe porque o efeito
+  // nao pode listar `aspect` nas deps (reabriria a reproducao a cada clique na
+  // tarja) e a closure dele ficaria com o valor da montagem.
+  const aspectRef = useRef(aspect)
+  aspectRef.current = aspect
+
+  const applyAspect = useCallback((modo: VideoFit) => {
+    aspectRef.current = modo
+    setAspect(modo)
+    try {
+      localStorage.setItem('stplay.video-aspect', modo)
+    } catch {
+      // sem persistencia o ajuste vale so nesta sessao; nao vale derrubar o app
+    }
+    void managerRef.current?.command({ op: 'aspect', mode: modo })
+  }, [])
   const [volume, setVolume] = useState(readStoredVolume)
   const [muted, setMuted] = useState(false)
   const [playing, setPlaying] = useState(false)
@@ -10978,6 +11017,7 @@ const manager = new PlayerManager({
           live: channel.kind === 'live',
           heavy: channel.kind === 'live' && isHeavyLiveChannel(channel),
           startTime: initialTimeRef.current,
+          aspect: aspectRef.current,
         },
         playbackEngine,
       )
@@ -10988,6 +11028,9 @@ const manager = new PlayerManager({
       return () => window.cancelAnimationFrame(id)
     }
     runPlay()
+    // `aspect` NAO entra nas deps de proposito: ele nao reinicia nada, e um
+    // clique na tarja nao pode reabrir o efeito de reproducao. O modo chega ao
+    // motor por `command`, e no primeiro frame por `aspectRef.current`.
   }, [channel.url, channel.kind, mediaRetry, usePlayerManager, playbackEngine, embedded])
 
   const isAudioMuted = muted || volume <= 0
@@ -11572,6 +11615,18 @@ const manager = new PlayerManager({
             </span>
           </div>
           <div className="player-top-actions">
+            <button
+              className="player-btn-clean"
+              onClick={() => {
+                // Ciclico de proposito: quem assiste ve o resultado na hora e
+                // nao deveria precisar abrir menu pra achar o modo.
+                applyAspect(nextAspect(aspect))
+              }}
+              title={aspectHint(aspect)}
+              aria-label="Ajustar imagem do vídeo"
+            >
+              {aspect === 'wide' ? <Maximize2 size={18} /> : <Crop size={18} />}
+            </button>
             <button
               className={`player-btn-clean ${favorite ? 'active' : ''}`}
               onClick={onFav}

@@ -564,7 +564,7 @@ function registerPlayerIpc() {
   })
 
   ipcMain.handle('player:start', async (_event, payload) => {
-    const { engine, url, startTime, bounds, live } = payload || {}
+    const { engine, url, startTime, bounds, live, aspect } = payload || {}
     // Zap rápido ao vivo: cancela fila de reloads antigos (só o último canal importa).
     if (engine === 'stur' && live === true && stur.isRunning()) {
       bumpHostEpoch()
@@ -582,7 +582,7 @@ function registerPlayerIpc() {
       }
       const win = getMainWindow()
       if (!win) return { ok: false, error: 'Janela indisponível' }
-      const opts = { live: live === true }
+      const opts = { live: live === true, aspect: aspect }
 
       if (engine === 'stur' && stur.isRunning()) {
         const fast = await stur.reload(win, playUrl, startTime, bounds, opts)

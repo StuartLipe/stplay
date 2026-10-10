@@ -139,6 +139,10 @@ export function createInternalPlayer(
       if (cmd.op === 'seek') video.currentTime = cmd.seconds
       if (cmd.op === 'volume') video.volume = cmd.value
       if (cmd.op === 'mute') video.muted = cmd.value
+      // `aspect` nao chega aqui de proposito: neste motor a imagem e um
+      // `<video>` de verdade e o ajuste e CSS — `object-fit` pela classe
+      // `aspect-*` do `player-wrap`. Quem precisa falar com o mpv por IPC e o
+      // caminho nativo.
     },
     onEvent(cb) {
       listeners.add(cb)

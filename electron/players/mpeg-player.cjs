@@ -798,6 +798,10 @@ async function loadDirect(url, startSec, gen) {
     return null
   }
   log.info('mpeg', 'loadfile ok', { try: retryCount + 1, url: String(url).slice(0, 100) })
+  // Depois do loadfile, nao antes: `panscan` e `keepaspect` sao ajustados pelo
+  // VO assim que existe um display, e antes disso o mpv aceita o comando mas
+  // nao tem o que aplicar.
+  await aplicarAspecto(currentAspect)
   // Sem file-loaded em 20s: conta como tentativa queimada, retry.
   setTimeout(() => {
     if (gen !== loadGeneration || !running) return
@@ -854,12 +858,18 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
 
   // mpv direto, flags mínimas — autoplay, hwdec,
   // UA de VLC (painel libera igual), sem cache agressivo que atrasa o 1º frame.
+  //
+  // `keepaspect` vai na argv E na propriedade: na argv para o primeiro frame ja
+  // nascer certo (sem um flash de tarja antes do `loadfile`), na propriedade
+  // porque `aplicarAspecto` roda depois do loadfile e cobre o reload.
+  if (aspectoValido(opts?.aspect)) currentAspect = opts.aspect
   const args = [
     `--input-ipc-server=${pipePath}`,
     '--idle=yes',
     '--keep-open=yes',
     '--force-window=yes',
     '--geometry=320x180+20000+20000',
+    `--keepaspect=${currentAspect === 'wide' ? 'no' : 'yes'}`,
     '--no-border',
     '--osc=no',
     '--osd-level=0',
@@ -944,6 +954,10 @@ async function start(win, url, startTime = 0, bounds = null, opts = {}) {
 }
 
 async function reload(win, url, startTime, bounds, opts = {}) {
+  // No reload com o processo vivo nao ha spawn, entao a argv nao roda: o modo
+  // so entraria pelo `aplicarAspecto` que o `loadDirect` chama. Atualizar aqui
+  // e o que faz `wide` valer no zape seguinte, e nao so no proximo app aberto.
+  if (aspectoValido(opts?.aspect)) currentAspect = opts.aspect
   if (!running || !mpvProc || mpvProc.exitCode !== null) {
     return start(win, url, startTime, bounds, opts)
   }
@@ -999,6 +1013,51 @@ function hide() {
   return { ok: true }
 }
 
+/**
+ * Ajuste da imagem. Ver `aplicarAspecto`.
+ *
+ * Vive em modulo, e nao em variavel da sessao, porque o `reload` reaproveita o
+ * mesmo processo do mpv: trocar de canal tem que manter o modo que o usuario
+ * escolheu, nao voltar ao padrao.
+ */
+let currentAspect = 'fill'
+
+/**
+ * `fit` deixa a tarja, `fill` corta a borda da imagem ate preencher, `wide`
+ * estica e perde a proporcao.
+ *
+ * Sao duas propriedades e nao uma flag de spawn porque o `keepaspect` deste
+ * mpv responde a `set_property` em tempo de execucao — medido: `set_property
+ * keepaspect no` devolveu `error: success` com o processo de idle rodando.
+ * Antes de assumir isso eu tinha deixado `wide` valendo so no proximo canal;
+ * com o probe ele passa a valer na hora, sem matar nem recarregar a surface.
+ *
+ * `panscan` e o quanto da fonte pode ser cortado para casar com a janela. Em 0
+ * sobra tarja, em 1 o mpv corta exatamente o necessario.
+ */
+const ASPECTO_PANSCAN = { fit: '0', fill: '1', wide: '0' }
+
+function aspectoValido(modo) {
+  return modo === 'fit' || modo === 'fill' || modo === 'wide'
+}
+
+async function aplicarAspecto(modo) {
+  if (!aspectoValido(modo)) return { ok: false }
+  currentAspect = modo
+  try {
+    await sendIpc(['set_property', 'keepaspect', modo === 'wide' ? 'no' : 'yes'])
+    await sendIpc(['set_property', 'panscan', ASPECTO_PANSCAN[modo]])
+    log.info('mpeg', 'aspecto', {
+      modo,
+      keepaspect: modo === 'wide' ? 'no' : 'yes',
+      panscan: ASPECTO_PANSCAN[modo],
+    })
+    return { ok: true }
+  } catch {
+    return { ok: false }
+  }
+}
+
 async function command(op, value) {
   if (!ipcSocket || ipcSocket.destroyed) return { ok: false }
   try {
@@ -1010,6 +1069,8 @@ async function command(op, value) {
       await sendIpc(['set_property', 'volume', Math.round(Math.max(0, Math.min(100, value * 100)))])
     } else if (op === 'mute' && typeof value === 'boolean') {
       await sendIpc(['set_property', 'mute', value])
+    } else if (op === 'aspect') {
+      return await aplicarAspecto(value)
     } else return { ok: false }
     return { ok: true }
   } catch {
