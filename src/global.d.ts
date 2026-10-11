@@ -94,6 +94,11 @@ export type UpdaterEvent =
 declare global {
   interface Window {
     sturplay?: {
+    /**
+     * Abre uma URL no navegador de fora, no ÚLTIMO navegador usado pela pessoa.
+     * Só aceita `https:`.
+     */
+    openExternal?: (url: string) => Promise<{ ok: boolean; error?: string; via?: string }>
       proxyBase: string
       coverBase?: string
       clearCoverCache?: () => Promise<{ ok: boolean }>

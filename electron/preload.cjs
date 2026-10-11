@@ -20,6 +20,16 @@ contextBridge.exposeInMainWorld('sturplay', {
   proxyBase: readProxyBase(),
   coverBase: 'sturplay://cover',
   clearCoverCache: () => ipcRenderer.invoke('covers:clear'),
+    /*
+      Abre uma URL NO NAVEGADOR DE FORA, nunca dentro do app.
+
+      A razao de existir: um `<a target="_blank">` num renderer com
+      `contextIsolation` e `sandbox` nao abre janela nenhuma. O Chromium pederia
+      uma BrowserWindow nova, o app nao cria nenhuma, e o clique nao produz
+      efeito visivel — que e exatamente o sintoma reportado. Aqui quem abre e o
+      main, com `shell`.
+    */
+    openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   player: {
     detect: () => ipcRenderer.invoke('player:detect'),
     open: (payload) => ipcRenderer.invoke('player:open', payload),

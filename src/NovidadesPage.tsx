@@ -8,6 +8,17 @@ import {
   type Novidade,
 } from './lib/novidades'
 
+/*
+  Autoria. Mesmo par que o `package.json` grava em `author` e `homepage`, e que
+  o electron-builder joga em `build.win.publisherName`.
+
+  Sao duas copias em vez de uma importacao porque o `package.json` nao e um modulo
+  que o renderer possa ler (ele vive no build, nao no bundle) e o valor e fixo.
+  Se algum dia mudar, e estes dois que mudam junto.
+*/
+const AUTOR_NOME = 'Sturt'
+const AUTOR_LINK = 'https://github.com/StuartLipe'
+
 type Props = {
   /** `updaterStatus.current`, ou `null` em dev sem status carregado. */
   versaoAtual: string | null
@@ -100,6 +111,31 @@ export function NovidadesPage({ versaoAtual, aoMarcarVista }: Props) {
           })}
         </div>
       )}
+
+      {/*
+        AUTORIA. Nome e link do perfil, aqui dentro do app.
+
+        O `author` do `package.json` e o `publisherName` do electron-builder
+        alcançam quem olha Propriedades do .exe, a lista de Aplicativos
+        Instalados e o instalador do Windows. NINGUM dos tres aparece quando a
+        pessoa esta usando o app — e usar e o caso comum.
+
+        O nome e o link sao as MESMOS strings do `package.json` de proposito: duas
+        copias do mesmo dado divergem sozinhas, e a primeira a divergir e sempre
+        a que ninguem lembra de atualizar.
+      */}
+      <div className="sobre-stplay">
+        <span className="sobre-stplay-nome">ST PLAY</span>
+        <span className="sobre-stplay-autor">por {AUTOR_NOME}</span>
+        <a
+          className="sobre-stplay-link"
+          href={AUTOR_LINK}
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          {AUTOR_LINK.replace(/^https:\/\/github\.com\//, '@')}
+        </a>
+      </div>
     </div>
   )
 }

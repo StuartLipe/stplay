@@ -575,6 +575,8 @@ function bumpLoadGeneration() {
   cacheTickSinceLoad = false
   cacheWaitRounds = 0
   pendingVodSeekSec = 0
+  // Um seek que ficou pendente é de um canal que acabou de sair. Disparar
+  // depois, sobre um video novo, jogaria o filme para um ponto aleatorio.
   bufferPollStartedAt = 0
   clearLoadWatchdog()
   resolveEndFileWaiters()
@@ -1221,6 +1223,36 @@ async function loadStream(url, startSec, mode = 'direct', preflightDepth = 0) {
       : ['loadfile', playUrl, 'replace'],
   )
   releasingLiveSlot = false
+    /*
+     * O `start` DENTRO do `loadfile` nao funciona neste mpv — medido, nao suposto:
+     * `loadfile <url> replace [["start","30"]]` devolve `invalid parameter`, e o
+     * mesmo acontece com mapa e com numero. Sem o terceiro argumento, aceita.
+     *
+     * Como `loadOpts` so existe quando `startSec > 0`, isto quebrava TODO
+     * "Continuar": os tres modos caem na mesma recusa, os tres devolvem null, e
+     * o app diz "o servidor nao respondeu" com o servidor respondendo. O
+     * comentario deste bloco ja desconfiava e citava `applyPendingVodSeek` como
+     * rede de seguranca — a rede existia, mas nunca era acionada, porque o erro
+     * de `loadfile` era fatal em vez de cair nela.
+     *
+     * Aqui ele volta a ser a rede que o texto dizia ser: recusa com options,
+     * refaz sem eles, e deixa o seek pos-loadfile fazer o trabalho.
+     */
+    if (!res.ok && loadOpts) {
+      log.warn('stur', 'start no loadfile recusado; refazendo sem ele', {
+        erro: res.error,
+        startSec,
+      })
+      const semOpts = await sendIpc(['loadfile', playUrl, 'replace'])
+      releasingLiveSlot = false
+      if (semOpts.ok) {
+        log.info('stur', 'loadfile ok sem start no comando', { mode, url: playUrl.slice(0, 120) })
+        armLoadWatchdog(gen)
+        return playUrl
+      }
+      log.warn('stur', 'loadfile failed', { mode, error: semOpts.error, url: playUrl.slice(0, 120) })
+      return null
+    }
   if (!res.ok) {
     log.warn('stur', 'loadfile failed', { mode, error: res.error, url: playUrl.slice(0, 120) })
     return null
@@ -3889,6 +3921,7 @@ function observeProperties() {
     'cache-buffering-state',
     'paused-for-cache',
     'demuxer-cache-time',
+
   ]
   for (let i = 0; i < props.length; i++) {
     void sendIpc(['observe_property', i + 1, props[i]])
@@ -4151,11 +4184,25 @@ function buildMpvArgs(url, wid = 0) {
      *    overlay for clique-atravesso a resposta vem de baixo.
      *
      * Sobra o CSS, e ele so funciona enquanto a janela do overlay for alvo do
-     * hit-test. Ver o efeito de `setOverlayIgnoreMouse` em PlayerOverlayApp.tsx:
-     * em tela cheia a janela segura o hit-test de proposito, e ai o `cursor: none`
-     * no `<html>` manda. No painel embarcado o overlay precisa ser clique-atravesso
-     * (ele cobre o catalogo), ai o SO consulta a janela de baixo e o CSS nao tem
-     * atalho — e o preco de um clique no catalogo funcionando.
+     * hit-test. Ja foi resolvido, e a solucao esta em `PlayerOverlayApp.tsx`,
+     * na linha do `overlayHitTest`:
+     *
+     *     const overlayHitTest = dockVisible || fullscreen || hideCursor
+     *
+     * O `|| hideCursor` segura o hit-test no modo janela tambem. Sem ele a
+     * janela entregava o cursor a HWND do mpv exatamente quando o `cursor: none`
+     * estava pedindo para esconder — o ponteiro ficava parado sobre o video com a
+     * barra ja apagada. Tela cheia nunca sentiu o defeito porque o
+     * `|| fullscreen` ja segurava o hit-test; o bug era so do modo janela.
+     *
+     * A objecao original — "o overlay precisa ser clique-atravesso, ele cobre o
+     * catalogo" — nao se sustenta: durante o playback o overlay e dimensionado
+     * pelo rect do VIDEO (`player:set-bounds`), entao cobre o video. O que o
+     * clique atravessado comprava era fechar os controles, e nesse estado eles ja
+     * estavam fechados. Nao ha wheel handler (grep em `onWheel`: zero).
+     *
+     * Sem codigo nativo: `SetCursor(NULL)` continuaria sendo a unica forma de
+     * vencer uma janela de terceiros de verdade, e nao ha motivo para isso aqui.
      */
     '--osd-on-seek=no',
     '--no-input-default-bindings',
@@ -4302,6 +4349,11 @@ async function spawnMpvCore(win, bounds) {
     parentHwnd,
     wid: args.find((a) => a.startsWith('--wid=')) || null,
     forceWindow: args.find((a) => a.startsWith('--force-window=')) || null,
+    // Sem estes dois no log nao da para provar, depois do fato, que o seek
+    // estava com busca por keyframe. A flag existe no codigo; ninguem viu o
+    // mpv receber.
+    hrSeek: args.find((a) => a.startsWith('--hr-seek=')) || null,
+    demuxerMaxBytes: args.find((a) => a.startsWith('--demuxer-max-bytes=')) || null,
   })
 
   const pid = mpvProc.pid || 0

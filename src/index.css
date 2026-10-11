@@ -8217,6 +8217,163 @@ body.electron-fullscreen .player-wrap {
   flex-wrap: wrap;
 }
 
+/*
+  AUTORIA, no fim da tela de Novidades.
+
+  Espacamento por `margin-top` simples, e nao por `margin-top: auto`. O `auto`
+  empurra para a base do contêiner flex, e o `.settings-card` nao e flex column
+  — e nao deve virar, porque o mesmo cartao cobre meia tela de configuracoes e
+  mexer no display dele mexe em todos os outros blocos.
+
+  O link usa a cor do texto normal em vez da cor de destaque: um destaque nessa
+  posicao compete com os botoes da tela, e aqui nao ha nada a fazer compete.
+*/
+.sobre-stplay {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sobre-stplay-nome {
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.3px;
+}
+
+.sobre-stplay-autor {
+  opacity: 0.85;
+}
+
+.sobre-stplay-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.35);
+  padding-bottom: 1px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.sobre-stplay-link:hover {
+  color: var(--text-primary);
+  border-color: currentColor;
+}
+
+/* ------------------------------------------------------------------ SOBRE */
+
+/*
+  Tela de leitura: marca e versao em cima, texto corrido no meio, autoria
+  embaixo.
+
+  O texto tem `max-width` porque paragrafo de largura total em coluna estreita
+  custa caro para ler — o olho volta demais. 68 caracteres e a faixa confortavel
+  para corpo de texto; acima disso a linha fica longa demais em telas estreitas
+  e curta demais em larga.
+*/
+.sobre-card {
+  max-width: 720px;
+}
+
+.sobre-topo {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.sobre-marca {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  color: var(--text-primary);
+}
+
+.sobre-versao {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sobre-texto {
+  margin: 14px 0 0;
+  max-width: 68ch;
+  font-size: 13.5px;
+  line-height: 1.62;
+  color: var(--text-body);
+}
+
+.sobre-texto strong {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.sobre-code {
+  font-size: 12.5px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.sobre-rodape {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sobre-autor {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sobre-autor-nome {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-primary);
+}
+
+.sobre-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-muted);
+  text-decoration: none;
+  background: none;
+  border: none;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.32);
+  padding: 0 0 1px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.sobre-link:hover {
+  color: var(--text-primary);
+  border-color: currentColor;
+}
+
+.sobre-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
 .novidades-titulo {
   display: flex;
   align-items: center;
@@ -8226,7 +8383,7 @@ body.electron-fullscreen .player-wrap {
 
 .novidades-versao-atual {
   font-size: 12px;
-  color: var(--muted, #8b93a7);
+  color: var(--text-muted);
 }
 
 .novidades-lista {
@@ -8332,7 +8489,7 @@ body.electron-fullscreen .player-wrap {
 .novidades-item-data {
   margin-left: auto;
   font-size: 12px;
-  color: var(--muted, #8b93a7);
+  color: var(--text-muted);
 }
 
 /*
@@ -9219,6 +9376,124 @@ body.electron-fullscreen .player-wrap {
 
 .favorites-head {
   margin-bottom: 22px;
+}
+/*
+ * Cabecalho com acoes a direita.
+ *
+ * `favorites-head` era so titulo + texto e nao tem posicao. As acoes precisam
+ * de uma linha propria: o aviso do item sem card e o botao dividem espaco com o
+ * titulo quando a janela e estreita, e o titulo cedendo espaco para botao e o
+ * jeito de o titulo parecer quebrado.
+ */
+.favorites-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.favorites-head-row .favorites-title {
+  margin-bottom: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+/*
+ * O numero que aparece so quando salvo e visivel nao batem.
+ */
+.favorites-title-count {
+  font-size: 0.42em;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  padding: 4px 10px;
+  transform: translateY(-0.15em);
+}
+
+.favorites-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/*
+ * O aviso do favorito preso. Uma linha, cor fraca, sem botao: o botao de tirar
+ * ja esta la em cima. Repetir a mesma acao duas vezes na mesma tela e o jeito de
+ * a pessoa nao saber qual das duas e a certain.
+ */
+.favorites-ghost-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0 0;
+  max-width: 720px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  background: rgba(251, 191, 36, 0.08);
+  color: #fcd34d;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.favorites-ghost-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.favorites-ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.1);
+  color: #fcd34d;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.favorites-ghost-btn:hover {
+  background: rgba(251, 191, 36, 0.18);
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+/*
+ * Apagar tudo. O estado `is-confirming` e o mesmo desenho da lixeira do card:
+ * o botao troca de texto e de cor e desarma sozinho em 4s. Duas telas com duas
+ * acoes destrutivas nao podem ter dois jeitos de confirmar.
+ */
+.favorites-clear-btn {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.favorites-clear-btn:hover {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+.favorites-clear-btn.is-confirming {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: #ef4444;
+  color: #fecaca;
 }
 
 .favorites-title {

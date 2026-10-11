@@ -565,7 +565,26 @@ function handleIpcMessage(msg) {
     if (msg.name === 'duration' && typeof msg.data === 'number' && msg.data > 0) {
       emit({ type: 'duration', value: msg.data })
     }
-    if (msg.name === 'pause') emit({ type: msg.data ? 'paused' : 'playing' })
+    /*
+     * `pause` NAO FALA DA INTERFACE ANTES DO PRIMEIRO QUADRO.
+     *
+     * O mpv publica `pause = false` assim que o arquivo carrega, muito antes do
+     * primeiro quadro decodificar. Emitir `playing` nesse instante diz ao overlay que
+     * "o quadro esta na tela" — e o overlay usa `playing` para PODER desligar a
+     * animacao de buffering. Com ele chegando cedo, o veu sumia sobre a tela preta:
+     * o dono via preto sem animacao e so depois o video aparecia.
+     *
+     * O mesmo cuidado existe no STUR, em `stur-player.cjs`, no mesmo evento — la o
+     * VOD sai do handler antes de emitir. E vale pelo segundo motivo tambem:
+     * `cache-pause` mexe na property `pause` durante o buffering, e isso nao e a
+     * pessoa pausando.
+     *
+     * Sem `return`: o resto do handler precisa rodar — e o `dwidth` logo abaixo que
+     * destrava o retry quando o arquivo morre antes do primeiro quadro.
+     */
+    if (msg.name === 'pause' && !waitingFirstFrame) {
+      emit({ type: msg.data ? 'paused' : 'playing' })
+    }
     if (msg.name === 'dwidth' && typeof msg.data === 'number' && msg.data > 0) {
       /*
        * `fileLoaded` é obrigatório, e não é redundância com o `dwidth`.
@@ -1072,6 +1091,14 @@ async function aplicarAspecto(modo) {
   }
 }
 
+/**
+ * SEEK COALESCIDO — mesma regra do `stur-player.cjs`, e o mesmo motivo.
+ *
+ * Cada seek manda o mpv recarregar a regiao desejada. Arraste da barra e cliques
+ * repetidos viravam N recargas em menos de um segundo, e o video congela
+ * esperando o buffer. Relativo acumula (tres "-10s" = um "-30s"), absoluto
+ * substitui (arrastar escolhe um lugar), e nunca ha dois em voo.
+ */
 async function command(op, value, mode) {
   if (!ipcSocket || ipcSocket.destroyed) return { ok: false }
   try {

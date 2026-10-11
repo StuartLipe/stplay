@@ -245,6 +245,77 @@ ipcMain.handle('covers:clear', async () => {
   }
 })
 
+/**
+ * Abre uma URL no navegador de fora.
+ *
+ * POR QUE EXISTE, E POR QUE NAO E UM `<a target="_blank">`:
+ * o renderer roda com `contextIsolation` e `sandbox`, e nao existe nenhuma
+ * `setWindowOpenHandler` neste app. Um link `target="_blank"` pede ao Chromium uma
+ * BrowserWindow nova; ninguem responde; o clique nao produz efeito visivel. Foi o
+ * que o dono viu: clicou no link do perfil e nada aconteceu.
+ *
+ * O "POR QUE NAO `shell.openExternal` SO": no Windows moderno e comum nao haver
+ * navegador padrao definido. `ShellExecute` nesse caso cai no handler escolhido pelo
+ * Windows, que nem sempre e o que a pessoa usou por ultimo. O dono pediu
+ * explicitamente o ULTIMO navegador aberto, e esse dado existe no registro:
+ *
+ *   HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice
+ *     ProgId = o navegador da ultima vez (ChromeHTML, MSEdgeHTM, FirefoxURL...)
+ *
+ * O `ProgId` vira o executavel por `HKCR\<ProgId>\shell\open\command`. Sem registro
+ * legivel — conta nova do Windows, `AppExecutionAlias` — o codigo cai no
+ * `shell.openExternal`, que e o melhor palpite disponivel.
+ */
+function navegadorUltimaVez() {
+  if (process.platform !== 'win32') return null
+  try {
+    const chave =
+      'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice'
+    const saida = require('child_process').execFileSync(
+      'reg.exe',
+      ['query', chave, '/v', 'ProgId'],
+      { encoding: 'utf8', windowsHide: true, timeout: 3000 },
+    )
+    const progId = (saida.match(/ProgId\s+REG_SZ\s+(\S+)/i) || [])[1]
+    if (!progId) return null
+
+    const comando = require('child_process').execFileSync(
+      'reg.exe',
+      ['query', `HKCR\\${progId}\\shell\\open\\command`, '/ve'],
+      { encoding: 'utf8', windowsHide: true, timeout: 3000 },
+    )
+    // O valor vem como `"C:\...\chrome.exe" "%1"`. O primeiro caminho entre
+    // aspas e o executavel; o `%1` e o placeholder da URL.
+    const bruto = (comando.match(/REG_SZ\s+(.*)/i) || [])[1] || ''
+    const exe = (bruto.match(/"([^"]+\.exe)"/i) || bruto.match(/([\w:\\ .()-]+\.exe)/i) || [])[1]
+    return exe && fs.existsSync(exe) ? exe : null
+  } catch {
+    return null
+  }
+}
+
+ipcMain.handle('app:open-external', async (_event, url) => {
+  // SO https. Este canal aceita qualquer string que o renderer mandar, e o
+  // renderer mostra dado de painel — hostil por natureza. Sem esta trava, um
+  // `file://` ou um esquema customizado passaria direto para o SO abrir.
+  try {
+    const alvo = new URL(String(url))
+    if (alvo.protocol !== 'https:') {
+      return { ok: false, error: 'apenas https' }
+    }
+    const exe = navegadorUltimaVez()
+    if (exe) {
+      const { spawn } = require('child_process')
+      spawn(exe, [alvo.toString()], { detached: true, stdio: 'ignore', windowsHide: false })
+      return { ok: true, via: exe }
+    }
+    await shell.openExternal(alvo.toString())
+    return { ok: true, via: 'padrao-do-sistema' }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'falhou ao abrir' }
+  }
+})
+
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 app.commandLine.appendSwitch('disable-renderer-backgrounding')

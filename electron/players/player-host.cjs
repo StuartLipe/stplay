@@ -460,6 +460,12 @@ function emit(win, payload) {
  * relacao ao mpv. Seek para tras no mpv descarta o buffer e volta a rede.
  */
 async function command(op, value, mode) {
+  // Sem este registro o meio da cadeia e um buraco: da para ver que o
+  // renderer pediu e que o motor nao recebeu, sem saber QUAL dos dois
+  // intrumentos esta mentindo.
+  if (op === 'seek') {
+    log.info('host', 'seek recebido', { op, value, mode, engine: activeEngine })
+  }
   if (activeEngine === 'libmpv') return libmpv.command(op, value, mode)
   if (activeEngine === 'mpv') return mpvExe.command(op, value, mode)
   if (activeEngine === 'mpv-one') return mpvOne.command(op, value, mode)
@@ -654,6 +660,7 @@ function registerPlayerIpc() {
   })
 
   ipcMain.handle('overlay:set-ignore-mouse', async (_event, ignore) => {
+
     overlay.setIgnoreMouse(ignore === true)
     return { ok: true }
   })

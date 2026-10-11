@@ -8,6 +8,8 @@ import {
   resolveEpisodeSeason,
 } from './lib/episode-seasons'
 import { SeasonSelect } from './lib/SeasonSelect'
+import type { VideoFit } from './lib/players/types'
+import { aspectHint, nextAspect, normalizeAspect } from './lib/players/video-aspect'
 
 type OverlayItem = { id: string; name: string; group?: string }
 
@@ -127,6 +129,13 @@ function Seek10Icon({ dir }: { dir: 'back' | 'fwd' }) {
 }
 
 /** Overlay Windows — layout compacto, com seek vermelho. */
+function readAspect(): VideoFit {
+  try {
+    return normalizeAspect(localStorage.getItem('stplay.video-aspect'))
+  } catch {
+    return 'fill'
+  }
+}
 export function PlayerOverlayApp() {
   const [meta, setMeta] = useState<OverlayMeta>({})
   const [playing, setPlaying] = useState(false)
@@ -177,6 +186,27 @@ export function PlayerOverlayApp() {
   const [listFilter, setListFilter] = useState('')
   const [listSeason, setListSeason] = useState<string | null>(null)
   const [scrubPos, setScrubPos] = useState<number | null>(null)
+
+  /*
+   * AJUSTE DE IMAGEM, no overlay. O mesmo estado que a `player-topbar` do
+   * renderer principal, e pelo MESMO motivo: no modo nativo quem mostra os
+   * controles e esta janela. Deixar o botao so la deixava o ajuste fora de
+   * alcance de quem usa STUR.
+   *
+   * A chave e compartilhada (`stplay.video-aspect`), entao alternar num dos
+   * dois muda no outro e o padrao sobrevive ao reinicio.
+   */
+  const [aspect, setAspect] = useState<VideoFit>(readAspect)
+  const applyAspect = (modo: VideoFit) => {
+    setAspect(modo)
+    try {
+      localStorage.setItem('stplay.video-aspect', modo)
+    } catch {
+      // sem persistencia o ajuste vale so nesta sessao
+    }
+    cmd('aspect', modo)
+    showControls()
+  }
   const hideTimer = useRef(0)
   const playingRef = useRef(false)
   const hasPlayedRef = useRef(false)
@@ -443,8 +473,22 @@ export function PlayerOverlayApp() {
     return () => window.clearTimeout(hideTimer.current)
   }, [playing, planHide])
 
-  const cmd = (op: string, value?: number | boolean) => {
-    void window.sturplay?.player?.command?.(op, value)
+  const cmd = (op: string, value?: number | boolean | VideoFit, mode?: string) => {
+    void window.sturplay?.player?.command?.(op, value, mode)
+  }
+
+  /*
+    SALTO RELATIVO. O que a pessoa quer com a seta e "anda 10s daqui", e nao
+    "va para <position + 10>". A diferenca so aparece quando a tecla se
+    repete: o `position` vem de `timeupdate` e nao avanca entre dois `keydown`
+    seguidos, entao o segundo salto ia para onde o video JA estava. Medido no
+    log: cinco seeks seguidos para o mesmo valor.
+  */
+  const skip = (delta: number) => {
+    cmd('seek', delta, 'relative')
+    // A interface acompanha pela乐观 posicao mostrada; quem manda o numero de
+    // verdade e o motor, e ele corrige no proximo timeupdate.
+    showControls()
   }
 
   const sendAction = (action: Record<string, unknown>) => {
@@ -554,20 +598,26 @@ export function PlayerOverlayApp() {
    * Ver o bloco do efeito de `setOverlayIgnoreMouse` para por que a tela cheia
    * precisa disso apesar de os controles estarem escondidos.
    */
-  const overlayHitTest = dockVisible || fullscreen
   /*
-  O cursor segue a INTERFACE, e nao a tela cheia.
+   * `hideCursor` vem antes do hit-test porque e ele que decide o hit-test. A
+   * ordem deixa isso a vista; na ordem antiga o `hideCursor` vivia doze linhas
+   * abaixo, e o bug era invisivel justamente por causa disso.
+   */
+  const hideCursor = !uiVisible && playing
 
-  Era `fullscreen && !uiVisible && playing`: so sumia em tela cheia, e em modo
-  janela o cursor ficava parado no video com a barra ja apagada — o ponteiro
-  brilhando em cima da imagem, apontando para controles que nao existem mais.
-
-  `!uiVisible` ja e exatamente "a barra sumiu": os controles estao escondidos, o
-  video toca, nao ha lista aberta e nao esta carregando. Nao ha nada para o
-  cursor apontar. O `&& playing` continua, porque pausado a pessoa vai clicar em
-  botao e sumir o cursor debaixo da mao dela impede.
- */
-const hideCursor = !uiVisible && playing
+  /*
+   * HIT-TEST: A JANELA RESPONDE PELO PONTEIRO?
+   *
+   *   `|| hideCursor` e o conserto. Sem ele, no modo janela, a barra escondia E o
+   *   hit-test caia no MESMO instante — a janela entregava o cursor a HWND do mpv
+   *   exatamente quando o `cursor: none` estava pedindo para esconder. A tela cheia
+   *   nunca sentiu isso porque o `|| fullscreen` segurava o hit-test.
+   *
+   *   Os tres termos nao se sobrepoem, e nao precisam: `hideCursor` exige
+   *   `!uiVisible`, que exclui `dockVisible`; e `fullscreen` cobre o video inteiro,
+   *   onde nao ha clique atravessavel que valha perder.
+   */
+  const overlayHitTest = dockVisible || fullscreen || hideCursor
   const showMutedIcon = muted
 
   /*
@@ -652,11 +702,11 @@ const hideCursor = !uiVisible && playing
         return
       }
       if (key === 'ArrowLeft' || key === 'Left') {
-        seekTo(position - 10)
+        skip(-10)
         return
       }
       if (key === 'ArrowRight' || key === 'Right') {
-        seekTo(position + 10)
+        skip(10)
         return
       }
       if (key === 'F11') {
@@ -686,12 +736,12 @@ const hideCursor = !uiVisible && playing
       }
       if (event.key === 'ArrowLeft') {
         event.preventDefault()
-        seekTo(position - 10)
+        skip(-10)
         return
       }
       if (event.key === 'ArrowRight') {
         event.preventDefault()
-        seekTo(position + 10)
+        skip(10)
         return
       }
       if (event.key === 'Escape') {
@@ -752,7 +802,29 @@ const hideCursor = !uiVisible && playing
    * e virar toggle de controle junto.
    */
   useEffect(() => {
-    const onMove = () => showControls()
+    /*
+     * MOUSE PARADO NAO E INTERACAO.
+     *
+     * O `mousemove` da janela rearmava o auto-esconder inteiro (4s) a cada
+     * chegada. Com `setIgnoreMouseEvents(true, { forward: true })` o Electron
+     * reenvia movimento para o renderer mesmo sem o ponteiro andar, e o timer nunca
+     * vencia: os controles ficavam na tela para sempre e, com eles, o cursor.
+     *
+     * Medido: 5s parado, `controlsVisible: true` e nenhuma transicao no log — o
+     * `setControlsVisible(true)` com o valor ja `true` nao repinta, entao o defeito
+     * era invisivel.
+     *
+     * O `e.clientX/clientY` resolve: o evento reenviado chega com a mesma posicao
+     * do ultimo, e nao ha interacao nenhuma para rearmar o timer.
+     */
+    let ultimoX = -1
+    let ultimoY = -1
+    const onMove = (e: MouseEvent) => {
+      if (e.clientX === ultimoX && e.clientY === ultimoY) return
+      ultimoX = e.clientX
+      ultimoY = e.clientY
+      showControls()
+    }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('click', onBackgroundClick)
     return () => {
@@ -777,7 +849,7 @@ const hideCursor = !uiVisible && playing
    *   controles visiveis   -> a janela engole, porque a pessoa esta interagindo com
    *     o pause e o volume. O clique fora dos botoes e o que fecha.
    *
-   * TELA CHEIA E A EXCECAO QUE ABRE O HIT-TEST DE PROPOSITO.
+   * O HIT-TEST ABRE SEMPRE QUE O CURSOR TEM QUE SUMIR (ver `overlayHitTest`).
    *
    * A regra acima era "esconder = clicar atraves", e isso e o que matava o cursor:
    * com a janela em ignore-mouse, o Windows para de perguntar o cursor a ela e
@@ -1005,10 +1077,10 @@ const hideCursor = !uiVisible && playing
           */}
           {!isLive && (
             <>
-              <IconBtn title="Voltar 10s" onClick={(e) => seekTo(position - 10, e)}>
+              <IconBtn title="Voltar 10s" onClick={(e) => { e.stopPropagation(); skip(-10) }}>
                 <Seek10Icon dir="back" />
               </IconBtn>
-              <IconBtn title="Avançar 10s" onClick={(e) => seekTo(position + 10, e)}>
+              <IconBtn title="Avançar 10s" onClick={(e) => { e.stopPropagation(); skip(10) }}>
                 <Seek10Icon dir="fwd" />
               </IconBtn>
             </>
@@ -1023,7 +1095,7 @@ const hideCursor = !uiVisible && playing
               </svg>
             </IconBtn>
           )}
-
+
           <IconBtn title={showMutedIcon ? 'Ativar som' : 'Mudo'} onClick={toggleMute}>
             <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
               <path d="M2 6v4h3l4 3.5v-11L5 6H2z" />
@@ -1059,6 +1131,28 @@ const hideCursor = !uiVisible && playing
               }}
             >
               <List size={18} />
+            </IconBtn>
+          )}
+
+          {!isLive && (
+            /*
+             * O ciclo e o mesmo do renderer principal: `fill -> fit -> wide`.
+             * O icone muda no terceiro clique para dizer "esticar", que e o
+             * unico modo que perde a proporcao da imagem.
+             */
+            <IconBtn
+              title={aspectHint(aspect)}
+              onClick={(e) => { e.stopPropagation(); applyAspect(nextAspect(aspect)) }}
+            >
+              {aspect === 'wide' ? (
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                  <path d="M6 2v4a2 2 0 0 1-2 2H2M18 2v4a2 2 0 0 0 2 2h2M6 22v-4a2 2 0 0 0-2-2H2M18 22v-4a2 2 0 0 1 2-2h2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
             </IconBtn>
           )}
 

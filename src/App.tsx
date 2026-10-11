@@ -1,3 +1,5 @@
+
+const CONTENT_KINDS = ['live', 'movie', 'series'] as const
 import { startTransition, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { flushSync } from 'react-dom'
 import { playerLog } from './lib/players/playerLogger'
@@ -93,6 +95,7 @@ import { useUpdater } from './lib/use-updater'
 import type { UpdateToastState } from './lib/use-updater'
 import { lerNovidadeVista, temNovidadeNaoVista } from './lib/novidades'
 import { NovidadesPage } from './NovidadesPage'
+import { SobrePage } from './SobrePage'
 import { decideFullscreenAction, escapeShouldExitFullscreen } from './lib/player/fullscreen-decision'
 import {
   ArrowLeft,
@@ -674,6 +677,36 @@ export default function App() {
   const [parentalUnlocked, setParentalUnlocked] = useState(false)
   const [parentalPrompt, setParentalPrompt] = useState<null | { title?: string; onSuccess: () => void }>(null)
   const [catalogs, setCatalogs] = useState<Record<ContentKind, Channel[]>>(EMPTY)
+
+  /*
+   * FAVORITOS QUE VIRAM CARD, E OS QUE NAO VIRAM.
+   *
+   * `favorites` guarda IDs. O catalogo de hoje pode nao ter mais o canal que um
+   * deles aponta — a playlist mudou, o perfil trocou, o item saiu do servidor. O
+   * ID continua salvo, o card nao aparece, e a contagem antiga (`favorites.length`)
+   * prometia um item a mais do que a tela mostrava.
+   *
+   * Um memo, um Set, duas saidas. Sao o mesmo dado visto de dois jeitos, e sao ~45
+   * mil canais: fazer isso duas vezes dobra o custo de cada troca de playlist sem
+   * acrescentar nada.
+   *
+   * `visiveis` e o numero que a barra lateral promete. `semCard` sao os IDs presos,
+   * que a tela mostra como aviso e devolve como botao de limpar.
+   */
+  const { favoritosVisiveis, favoritosSemCard } = useMemo(() => {
+    if (favorites.length === 0) return { favoritosVisiveis: 0, favoritosSemCard: [] as string[] }
+    const existentes = new Set<string>()
+    for (const kind of CONTENT_KINDS) {
+      for (const channel of catalogs[kind]) existentes.add(channel.id)
+    }
+    let visiveis = 0
+    const semCard: string[] = []
+    for (const id of favorites) {
+      if (existentes.has(id)) visiveis += 1
+      else semCard.push(id)
+    }
+    return { favoritosVisiveis: visiveis, favoritosSemCard: semCard }
+  }, [favorites, catalogs])
   const [serverCategories, setServerCategories] = useState<Record<'movie' | 'series', XtreamCategory[]>>({
     movie: [],
     series: [],
@@ -1379,6 +1412,26 @@ export default function App() {
     setFavorites((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }
 
+  /*
+   * Limpa os favoritos salvos SEM card. E o caso que não tinha saída nenhuma: o
+   * cartão que teria o botão de desfavoritar nunca é desenhado, então o item
+   * ficava preso no salvamento para sempre.
+   */
+  function limparFavoritosSemCard() {
+    if (favoritosSemCard.length === 0) return
+    const ids = new Set(favoritosSemCard)
+    setFavorites((prev) => prev.filter((id) => !ids.has(id)))
+  }
+
+  /*
+   * Limpa TUDO, inclusive os que ainda viram card. Dois toques para confirmar,
+   * pelo mesmo motivo da lixeira do card: aqui não existe modal, e o botão vai
+   * destoar se precisar de um.
+   */
+  function limparTodosFavoritos() {
+    setFavorites([])
+  }
+
   function updateProgress(channel: Channel, currentTime: number, duration: number) {
     if (!active || channel.kind === 'live' || !Number.isFinite(currentTime) || !Number.isFinite(duration)) {
       return
@@ -1922,12 +1975,14 @@ export default function App() {
               <button
                 type="button"
                 className={`home-rail-btn ${view.name === 'favorites' ? 'active' : ''}`}
-                title={`Favoritos (${favorites.length})`}
+                title={`Favoritos (${favoritosVisiveis})`}
                 onClick={() => startTransition(() => setView({ name: 'favorites' }))}
               >
                 <Heart size={20} />
                 <span className="home-rail-label">Favoritos</span>
-                {favorites.length > 0 && <span className="home-rail-count">{favorites.length}</span>}
+                {favoritosVisiveis > 0 && (
+                  <span className="home-rail-count">{favoritosVisiveis}</span>
+                )}
               </button>
               <button
                 type="button"
@@ -2063,6 +2118,9 @@ export default function App() {
                 onOpen={openContent}
                 onToggleFavorite={toggleFav}
                 onRemoveContinue={removeContinueWatching}
+              onClearFavorites={limparTodosFavoritos}
+              onDropGhostFavorites={limparFavoritosSemCard}
+              ghostCount={favoritosSemCard.length}
               />
             )}
 
@@ -3830,6 +3888,7 @@ function SettingsPage({
     | 'parental'
     | 'playlist'
     | 'hidden'
+    | 'sobre'
 type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
   // Abre em "Playlist / Login", que e a primeira aba do menu lateral. O padrao
   // anterior era 'player', entao Configuracoes ja abria no Reprodutor e o
@@ -4178,6 +4237,23 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
               {updaterStatus?.disponivelParaInstalar && updaterStatus.installing === false && (
                 <span className="settings-nav-dot" title="Atualização pronta para instalar" />
               )}
+            </button>
+            {/*
+              "Sobre" fecha a lista. Nao e configuracao: e leitura. Fica no fim
+              pelo mesmo motivo de "Atualizacoes" — o menu vai do que se ajusta
+              para o que se le, e quem chega ate o fim ja terminou de configurar.
+
+              O icone e `Info`, que ja vem de lucide: um icone novo aqui seria
+              uma dependencia visual para uma tela que nunca precisa de icones
+              proprios.
+            */}
+            <button
+              type="button"
+              className={`settings-page-nav-btn${section === 'sobre' ? ' active' : ''}`}
+              onClick={() => setSection('sobre')}
+            >
+              <Info size={15} strokeWidth={2.2} />
+              Sobre
             </button>
           </nav>
         </aside>
@@ -5049,6 +5125,9 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
               versaoAtual={updaterStatus?.current ?? null}
               aoMarcarVista={setNovidadeVista}
             />
+          )}
+          {section === 'sobre' && (
+            <SobrePage versaoAtual={updaterStatus?.current ?? null} />
           )}
           {section === 'updates' && (
             <div className="settings-card">
@@ -9309,6 +9388,9 @@ function FavoritesView({
   onOpen,
   onToggleFavorite,
   onRemoveContinue,
+  onClearFavorites,
+  onDropGhostFavorites,
+  ghostCount,
 }: {
   favorites: string[]
   catalogs: Record<ContentKind, Channel[]>
@@ -9316,6 +9398,9 @@ function FavoritesView({
   onOpen: (channel: Channel, list: Channel[], startTime?: number) => void
   onToggleFavorite: (id: string) => void
   onRemoveContinue?: (channelId: string, seriesId?: string) => void
+  onClearFavorites: () => void
+  onDropGhostFavorites: () => void
+  ghostCount: number
 }) {
   const items = useMemo(() => {
     const byId = new Map<string, Channel>()
@@ -9336,6 +9421,19 @@ function FavoritesView({
    * limpar quando a lista muda e o card não existe mais.
    */
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
+
+  /*
+   * Confirmar o "limpar todos". Separate do `confirmRemoveId` de propósito: são
+   * duas ações com Consequences diferentes. O card tira UM item e some na hora, o
+   * que dá para desfavoritar de novo. Este apaga a lista inteira, e desfazer
+   * significa favoritar tudo de volta item por item.
+   */
+  const [confirmClearAll, setConfirmClearAll] = useState(false)
+  useEffect(() => {
+    if (!confirmClearAll) return
+    const timer = setTimeout(() => setConfirmClearAll(false), 4000)
+    return () => clearTimeout(timer)
+  }, [confirmClearAll])
   useEffect(() => {
     if (!confirmRemoveId) return
     const timer = setTimeout(() => setConfirmRemoveId(null), 4000)
@@ -9349,12 +9447,81 @@ function FavoritesView({
     <div className="favorites-view">
       <ShellBrand />
       <header className="favorites-head">
-        <h1 className="favorites-title">Favoritos</h1>
+        <div className="favorites-head-row">
+          <h1 className="favorites-title">
+            Favoritos
+            {/*
+             * A contagem entra so quando ha divergencia entre o que foi salvo e o
+             * que virou card. Sem ela, o proprio grid ja conta; com ela, a resposta
+             * para "por que o numero nao bate" fica na tela em vez de exigir
+             * mentira.
+             */}
+            {favorites.length !== items.length && (
+              <span className="favorites-title-count">{items.length}</span>
+            )}
+          </h1>
+
+          {/*
+           * As duas saidas. "Limpar todos" some com a lista vazia: botao que apaga
+           * nada e botao que a pessoa nao sabe explicar depois.
+           */}
+          {favorites.length > 0 && (
+            <div className="favorites-head-actions">
+              {ghostCount > 0 && (
+                <button
+                  type="button"
+                  className="favorites-ghost-btn"
+                  onClick={onDropGhostFavorites}
+                  title="Tirar os favoritos salvos que não estão mais nas suas listas"
+                >
+                  <Trash2 size={15} />
+                  <span>
+                    Tirar {ghostCount} que {ghostCount === 1 ? "sumiu" : "sumiram"}
+                  </span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                className={`favorites-clear-btn${confirmClearAll ? " is-confirming" : ""}`}
+                title={confirmClearAll ? "Tocar de novo para confirmar" : "Apagar todos os favoritos"}
+                aria-label="Apagar todos os favoritos"
+                onClick={() => {
+                  if (confirmClearAll) {
+                    onClearFavorites()
+                    setConfirmClearAll(false)
+                    return
+                  }
+                  setConfirmClearAll(true)
+                }}
+              >
+                {confirmClearAll ? "Tocar de novo para confirmar" : "Limpar todos"}
+              </button>
+            </div>
+          )}
+        </div>
+
         <p className="favorites-subtitle">
           Cada canal, filme e série marcado com coração nas suas listas. Toque no card para abrir; no
           canto, a volta para continuar de onde parou, a lixeira para tirar de Continuar Assistindo e o
           coração para desfavoritar.
         </p>
+
+        {/*
+         * A causa do "fala 3 mas so tem 2": um ID salvo cujo canal nao esta mais
+         * em nenhum catalogo. O card nao nasce, e sem esta linha a pessoa so
+         * descobre olhando a contagem.
+         */}
+        {ghostCount > 0 && (
+          <p className="favorites-ghost-note">
+            <Info size={14} />
+            <span>
+              {ghostCount === 1
+                ? "1 favorito continua salvo, mas esse canal não está mais nas suas listas — a playlist mudou ou o item saiu do servidor."
+                : `${ghostCount} favoritos continuam salvos, mas esses canais não estão mais nas suas listas — a playlist mudou ou os itens saíram do servidor.`}
+            </span>
+          </p>
+        )}
       </header>
 
       <div className="favorites-panel">
@@ -9967,6 +10134,27 @@ function Player({
   const [volume, setVolume] = useState(readStoredVolume)
   const [muted, setMuted] = useState(false)
   const [playing, setPlaying] = useState(false)
+
+  /*
+   * CURSOR ESCONDIDO — a metade da janela principal.
+   *
+   * A mesma regra do overlay (`!overlay && playing`), pelo mesmo motivo. O que nao
+   * era o mesmo era o alcance: la a classe vai no `<html>` da janela do overlay, e
+   * aqui precisa vir no `<html>` desta. Dois `BrowserWindow`, dois `document`, dois
+   * `<html>` — a classe de um nao toca o outro. Um comentario anterior dizia que o
+   * `<html>` do overlay "cobre as duas janelas", e e exatamente por ai que o cursor
+   * continuava visivel no modo janela.
+   *
+   * Tela cheia nunca sentiu: o overlay cobre a tela inteira e nao sobra superficie
+   * para o ponteiro cair aqui.
+   */
+  useEffect(() => {
+    const raiz = document.documentElement
+    const esconder = !overlay && playing
+    if (esconder) raiz.classList.add('is-cursor-none')
+    else raiz.classList.remove('is-cursor-none')
+    return () => raiz.classList.remove('is-cursor-none')
+  }, [overlay, playing])
   const [buffering, setBuffering] = useState(true)
   const [bufferPercent, setBufferPercent] = useState(0)
   const [playbackError, setPlaybackError] = useState<string | null>(null)
