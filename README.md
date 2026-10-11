@@ -18,7 +18,7 @@ O app verifica sozinho uma vez por dia e baixa em segundo plano.
 - Ajuste de imagem em três modos: **tarja**, **preencher** e **esticar**
 - **Continuar assistindo**, com posição salva por canal e por episódio
 - Favoritos, EPG, controle parental e busca
-- Legenda externa ainda não está implementada
+
 
 ## Requisitos
 
@@ -32,11 +32,7 @@ O app não é assinado com certificado de código, então o Windows pode mostrar
 **SmartScreen** na primeira execução. Clique em **"Mais informações"** →
 **"Executar assim mesmo"**.
 
-## Código
 
-MIT. Se abrir o `app.asar` dentro de uma instalação, o código está lá — isso é
-inato de um aplicativo desktop em JavaScript, e não há como evitar sem transformar
-o produto em um serviço web.
 
 ## Autor
 
