@@ -1,0 +1,1 @@
+export { createSturPlayer } from './embeddedBridge'

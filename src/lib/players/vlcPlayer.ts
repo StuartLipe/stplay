@@ -1,0 +1,1 @@
+export { createVlcPlayer } from './embeddedBridge'

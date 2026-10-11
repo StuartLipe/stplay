@@ -1,0 +1,1 @@
+export { createMpcPlayer } from './embeddedBridge'
