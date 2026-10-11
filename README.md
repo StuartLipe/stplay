@@ -1,50 +1,43 @@
 # ST PLAY
 
-Player de IPTV para desktop Windows. Eletro, com reprodutor próprio, listas M3U e Xtream Codes, EPG, favoritos e download.
+Player de IPTV para Windows, construído em Electron com o mpv como motor de vídeo.
+
+## Baixar
+
+- **[ST-PLAY-Setup-1.0.5.exe](https://github.com/StuartLipe/stplay/releases/download/v1.0.5/ST-PLAY-Setup-1.0.5.exe)** — instalador
+- **[ST-PLAY-1.0.5.exe](https://github.com/StuartLipe/stplay/releases/download/v1.0.5/ST-PLAY-1.0.5.exe)** — portátil, sem instalar
+
+O app verifica sozinho uma vez por dia e baixa em segundo plano.
 
 ## O que ele faz
 
-- Toca canais ao vivo, filmes e séries, de painel Xtream Codes ou de lista M3U
-- EPG, favoritos, "continuar assistindo" e busca
-- Download de filmes e séries
-- Vários players, com escolha automática e opção de forçar
-- Interface em português, com tema escuro, tamanho de fonte e densidade ajustáveis
-- **Atualização automática** — ele verifica sozinho e só pede para reiniciar quando a instalação está pronta
+- Catálogo de **canais ao vivo, filmes e séries** a partir do painel que você
+  configurar — o app **não vem com lista nenhuma**
+- **Três motores de vídeo** atrás do mesmo player: STUR (padrão), MPEG e o
+  player interno do navegador
+- Ajuste de imagem em três modos: **tarja**, **preencher** e **esticar**
+- **Continuar assistindo**, com posição salva por canal e por episódio
+- Favoritos, EPG, controle parental e busca
+- Legenda externa ainda não está implementada
 
-## Instalar
+## Requisitos
 
-Baixe o **instalador** (`ST-PLAY-Setup-<versão>.exe`). É ele que permite atualização automática.
+- Windows 10 ou 11, 64 bits
+- ~300 MB livres em disco
+- O `mpv` e o `ffmpeg` vêm embutidos no instalador
 
-O `ST-PLAY-<versão>.exe` é o portátil: roda sem instalar, mas **não se atualiza sozinho** — é um arquivo único, sem pasta de instalação para o programa substituir. Se você começar no portátil, migre para o instalador.
+## Aviso
 
-## Conferir se o instalador é o certo
+O app não é assinado com certificado de código, então o Windows pode mostrar o
+**SmartScreen** na primeira execução. Clique em **"Mais informações"** →
+**"Executar assim mesmo"**.
 
-O nome do arquivo não prova nada. Qualquer um pode salvar um executável com o nome `ST-PLAY-Setup-1.0.0.exe` — o Windows mostra o nome, não a origem. O `sha256` que aparece ao lado de cada arquivo na release é a impressão digital do conteúdo, e é o que distingue o meu de qualquer outro com o mesmo nome.
+## Código
 
-Rode no PowerShell, na pasta onde baixou:
+MIT. Se abrir o `app.asar` dentro de uma instalação, o código está lá — isso é
+inato de um aplicativo desktop em JavaScript, e não há como evitar sem transformar
+o produto em um serviço web.
 
-```powershell
-Get-FileHash ".\ST-PLAY-Setup-1.0.0.exe" -Algorithm SHA256
-```
+## Autor
 
-Compare com o `sha256:` da lista de assets na página da release.
-
-**Se bater** — é o arquivo publicado aqui. Pode instalar.
-
-**Se não bater** — não é este instalador. Ou o download veio corrompido, ou veio de outro lugar com o mesmo nome. Apague e baixe de novo da release. **Não instale.**
-
-Vale conferir principalmente se o arquivo veio por WhatsApp, Telegram, e-mail ou link de terceiro.
-
-## Atualização automática
-
-O app confere a release uma vez por dia, baixa em segundo plano e só pede para reiniciar quando a instalação está pronta.
-
-- **Nada é instalado sem você mandar.** O instalador sempre aparece com a barra e o botão de cancelar.
-- **O aviso aparece uma vez por versão**, não uma vez por dia. O item "Atualizações" ganha um ponto que fica aceso até você resolver.
-- Para forçar: **Configurações → Atualizações → Verificar agora**.
-
-Se você instalar uma versão nova na mão, é só baixar o instalador e rodar por cima — ele substitui a anterior e mantém seus dados.
-
-## Licença
-
-MIT. Ver [LICENSE](LICENSE).
+**Sturt** — [github.com/StuartLipe](https://github.com/StuartLipe)
