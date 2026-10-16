@@ -30,7 +30,13 @@ import type { UpdaterCheckResult, UpdaterEvent, UpdaterStatus } from '../global'
  */
 
 export type UpdateToastState = {
-  phase: 'idle' | 'available' | 'ready' | 'installing' | 'portable' | 'error'
+  /**
+   * `atual` e o "voce ja esta na versao mais recente". Nao e `error`: o cartaz de
+   * erro abre com "Nao foi possivel atualizar" no titulo, e a pessoa lia essa
+   * frase em cima de "Voce esta na versao mais recente". Duas frases que se
+   * contradizem, com a pior na linha de cima.
+   */
+  phase: 'idle' | 'available' | 'ready' | 'installing' | 'portable' | 'error' | 'atual'
   version?: string
   percent?: number
   message?: string
@@ -106,12 +112,24 @@ export function useUpdater() {
       } else if (payload.type === 'downloaded') {
         setProgress(100)
         setToast({ phase: 'ready', version: payload.version })
-        if (payload.firstTime) agendarFechar(AUTO_HIDE_MS)
         /*
-         * O cartaz some em 10 s e o instalador fica em `pending`. Sem esta
-         * releitura o ponto do menu nunca acenderia, e a unica forma de
-         * descobrir que ha atualizacao pronta seria lembrar de ir em
-         * "Verificar agora" — que e o que o dono reclamou.
+         * Este cartaz NAO fecha sozinho.
+         *
+         * Medido no log do dono, no update real de 1.0.5:
+         *
+         *   05:40:31  update-downloaded 1.0.5
+         *   05:40:46  quitAndInstall solicitado
+         *
+         * O download de 138 MB leva minutos, e o cartaz vivia `AUTO_HIDE_MS`
+         * (10 s). O dono nao viu o popup: ele apareceu, ficou 10 segundos e
+         * sumiu — o que ele viu foi o botao de Configuracoes virar "Reiniciar
+         * agora". O unico cartaz da tela inteira que some sozinho e justamente
+         * o que fecha o ciclo: chegou a hora de agir e nada sinaliza.
+         *
+         * O `firstTime` ja protege do incomodo de verdade — uma vez por versao,
+         * nunca mais. Esconder nao protege de nada e ainda tira a pessoa do
+         * fluxo: fechar "Agora nao" e um gesto, e nao um temporizador competindo
+         * com quem esta lendo a tela.
          */
         void relerStatus()
       } else if (payload.type === 'portable') {
@@ -166,7 +184,10 @@ export function useUpdater() {
         setToast({ phase: 'available', version: resultado.version, percent: 0 })
         setProgress(0)
       } else {
-        setToast({ phase: 'error', message: 'Voce esta na versao mais recente.' })
+        setToast({
+          phase: 'atual',
+          version: (resultado as { version?: string }).version,
+        })
         agendarFechar(AUTO_HIDE_MS)
       }
       return resultado

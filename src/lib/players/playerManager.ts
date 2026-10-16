@@ -321,8 +321,31 @@ export class PlayerManager {
       playerLog('info', 'manager', 'skip unavailable', { engine })
       if (!auto && !this.opts.silent) {
         const needsDesktop = engine === 'stur' || engine === 'mpv-one' || engine === 'mpv' || engine === 'libmpv'
+        /*
+          A frase antiga era sempre a do navegador, e ela mente.
+          *
+          Havia dois motivos completamente diferentes para `isAvailable()`
+          responder false, e o texto antigo tratava os dois como "voce abriu no
+          navegador":
+
+          1. Sem `window.sturplay` — a interface aberta direto no Chrome. A
+             frase antiga servia.
+          2. Com o IPC presente, mas sem o `mpv.exe` em lugar nenhum. E o que
+             aconteceu no dev quando a pasta `resources/mpv/` sumiu: o app
+             estava aberto, funccionando, e a tela dizia "nao no navegador"
+             para uma pessoa que nunca saiu do app. Ela foi procurar problema
+             de navegador que nao existia.
+
+          O sintoma e identico — `false` — mas a causa e o conserto nao. A tela
+          precisa distinguir, e o unico jeito e perguntar ao backend o motivo em
+          vez de so o sim/nao.
+          */
+        const semDesktop = typeof window === 'undefined' || !window.sturplay?.nativePlayer
+        const label = engine === 'stur' ? 'STUR' : engine
         const reason = needsDesktop
-          ? `${engine === 'stur' ? 'STUR' : engine} só funciona no app ST PLAY (.exe), não no navegador`
+          ? semDesktop
+            ? `${label} só funciona no app ST PLAY (.exe), não no navegador`
+            : `${label} não está disponível: o mpv não foi encontrado nesta instalação`
           : `Player ${engine} não disponível neste ambiente`
         this.emit({ type: 'failed', reason })
       }
