@@ -99,13 +99,6 @@ declare global {
      * Só aceita `https:`.
      */
     openExternal?: (url: string) => Promise<{ ok: boolean; error?: string; via?: string }>
-      /**
-       * Login Google. Declarado AQUI, e não num `declare global` dentro da tela
-       * que usa: dois `declare global` para a mesma propriedade com tipos
-       * diferentes é TS2717, e o erro aparece em arquivo que ninguém estava
-       * mexendo. A tela consome esta mesma linha.
-       */
-      googleLogin?: () => Promise<{ ok: boolean; token?: string; error?: string }>
       proxyBase: string
       coverBase?: string
       clearCoverCache?: () => Promise<{ ok: boolean }>
