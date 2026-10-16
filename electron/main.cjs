@@ -27,6 +27,12 @@ process.on('uncaughtException', (error) => {
     console.error('[stplay] ByteString header ignored:', error instanceof Error ? error.message : error)
     return
   }
+  // Vai para o arquivo E para o console.
+  //
+  // So no console o rastro nao existe: console de app empacotado no Windows nao
+  // e janela que alguem abre, e a linha morre com a sessao. O `player.log` e a
+  // unica prova que sobra para investigar um travamento depois.
+  plog.warn('main', 'uncaughtException', { error: String(error && error.stack ? error.stack : error) })
   console.error('[stplay] uncaughtException:', error)
 })
 
@@ -35,6 +41,10 @@ process.on('unhandledRejection', (reason) => {
     console.error('[stplay] ByteString rejection ignored:', reason instanceof Error ? reason.message : reason)
     return
   }
+  // Mesma razao do `uncaughtException` acima. Estes dois apareceram no dev com
+  // `net::ERR_CONNECTION_RESET` e nao deixaram rastro nenhum no log - que e
+  // exatamente o caso em que a pessoa precisa saber que houve erro.
+  plog.warn('main', 'unhandledRejection', { error: String(reason && reason.stack ? reason.stack : reason) })
   console.error('[stplay] unhandledRejection:', reason)
 })
 

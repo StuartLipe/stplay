@@ -4,6 +4,7 @@ import { startTransition, useCallback, useDeferredValue, useEffect, useLayoutEff
 import { flushSync } from 'react-dom'
 import { playerLog } from './lib/players/playerLogger'
 import { RestaurarOcultosSheet } from './RestaurarOcultosSheet'
+import { ehCanalAdulto, ehCategoriaAdulta } from './lib/adulto'
 import {
   categoriasVisiveis,
   deveMostrarRestaurar,
@@ -487,7 +488,7 @@ function ProfileEditModal({
   const [playlistIds, setPlaylistIds] = useState<string[]>(profile.playlistIds)
 
   return (
-    <div className="modal-backdrop profile-modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop profile-modal-backdrop">
       <div
         className="modal profile-edit-modal"
         role="dialog"
@@ -938,7 +939,7 @@ export default function App() {
       let changed = false
       const next = { ...prev }
       for (const kind of ['live', 'movie', 'series'] as ContentKind[]) {
-        if (isAdultGroup(next[kind])) {
+        if (ehCategoriaAdulta(next[kind])) {
           next[kind] = 'Todos'
           changed = true
         }
@@ -1716,7 +1717,7 @@ export default function App() {
             }
           })()
         }
-        if (isAdultChannel(episode)) requireAdultAccess(openEpisode)
+        if (ehCanalAdulto(episode)) requireAdultAccess(openEpisode)
         else openEpisode()
         return
       }
@@ -1746,7 +1747,7 @@ export default function App() {
           void window.sturplay?.player?.hide?.()
           startTransition(() => setView({ name: 'series', series: fromSeries }))
         }
-        if (isAdultChannel(fromSeries)) requireAdultAccess(openSeries)
+        if (ehCanalAdulto(fromSeries)) requireAdultAccess(openSeries)
         else openSeries()
         return
       }
@@ -1783,7 +1784,7 @@ export default function App() {
           }
         })
       }
-      if (isAdultChannel(channel)) requireAdultAccess(openSeries)
+      if (ehCanalAdulto(channel)) requireAdultAccess(openSeries)
       else openSeries()
       return
     }
@@ -1805,7 +1806,7 @@ export default function App() {
           }),
         )
       }
-      if (isAdultChannel(fresh)) requireAdultAccess(openMovie)
+      if (ehCanalAdulto(fresh)) requireAdultAccess(openMovie)
       else openMovie()
       return
     }
@@ -1819,7 +1820,7 @@ export default function App() {
         fromLive: view.name === 'browse' ? 'browse' : 'home',
         autoFullscreen: opts?.autoFullscreen,
       })
-    if (isAdultChannel(channel)) requireAdultAccess(openLive)
+    if (ehCanalAdulto(channel)) requireAdultAccess(openLive)
     else openLive()
   }
 
@@ -2074,7 +2075,7 @@ export default function App() {
                 onEpgRefreshed={() => updateSettings({ epgUpdatedAt: Date.now() })}
                 onOpen={(channel, list) => {
                   const go = () => setView({ name: 'player', channel, list, fromLive: 'browse' })
-                  if (isAdultChannel(channel)) requireAdultAccess(go)
+                  if (ehCanalAdulto(channel)) requireAdultAccess(go)
                   else go()
                 }}
               />
@@ -2092,7 +2093,7 @@ export default function App() {
                       setView({ name: 'player', channel, list, startTime: 0 })
                     }
                   }
-                  if (isAdultChannel(channel)) requireAdultAccess(go)
+                  if (ehCanalAdulto(channel)) requireAdultAccess(go)
                   else go()
                 }}
                 onRemove={handleRemoveDownload}
@@ -2275,7 +2276,7 @@ export default function App() {
                 selectedGroup={selectedGroups[parkedBrowseKind] || 'Todos'}
                 onSelectGroup={(group) => {
                   const apply = () => setSelectedGroups((prev) => ({ ...prev, [parkedBrowseKind]: group }))
-                  if (isAdultGroup(group)) requireAdultAccess(apply, 'Categoria adulta')
+                  if (ehCategoriaAdulta(group)) requireAdultAccess(apply, 'Categoria adulta')
                   else apply()
                 }}
                 parentalLocked={Boolean(settings.parentalPin) && !parentalUnlocked}
@@ -2335,7 +2336,7 @@ export default function App() {
                 fromSeries: view.fromSeries,
                 fromLive: view.fromLive,
               })
-            if (isAdultChannel(channel)) requireAdultAccess(go)
+            if (ehCanalAdulto(channel)) requireAdultAccess(go)
             else go()
           }}
           onBack={() => {
@@ -3567,7 +3568,19 @@ const [tab, setTab] = useState<'m3u' | 'xtream'>('xtream')
       </div>
 
       {editing && (
-        <div className="modal-backdrop" onClick={closeEditor}>
+        /*
+          A backdrop NAO fecha mais este modal.
+          *
+          Era `onClick={closeEditor}`, e o preco era alto: esta caixa e onde a
+          pessoa digita host, usuario e SENHA. Clicar no escuro para buscar um
+          numero no gerenciador de senhas, ou so para fechar o teclado, levava
+          junto tudo o que tinha sido digitado — sem aviso, sem "tem certeza" e
+          sem rascunho. Nada do que estava na tela se recuperava.
+          *
+          O cancelamento passa a ser so pelo botao "Cancelar". Perder o que se
+          digitou e acao de quem quis perder, nao de quem clicou no lugar errado.
+          */
+        <div className="modal-backdrop">
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="edit-playlist-title" onClick={(event) => event.stopPropagation()}>
             <h2 id="edit-playlist-title">Editar lista</h2>
             <div className="field">
@@ -3633,7 +3646,15 @@ const [tab, setTab] = useState<'m3u' | 'xtream'>('xtream')
       )}
 
       {deletingPlaylist && (
-        <div className="modal-backdrop" onClick={() => setDeletingPlaylist(null)}>
+        /*
+          Clicar no escuro nao apaga a lista nem cancela a pergunta.
+          *
+          Este era o pior dos cinco: um toque no lado errado da tela confirmava
+          a remocao sem querer. A resposta a "tem certeza" nao pode ser o
+          clique que a pessoa fez para HOVER na tela. Sai por "Cancelar" ou
+          pelo proprio "Remover".
+          */
+        <div className="modal-backdrop">
           <div
             className="modal"
             role="dialog"
@@ -3766,7 +3787,7 @@ function ParentalPinModal({
   }
 
   return (
-    <div className="modal-backdrop parental-backdrop" onClick={onCancel}>
+    <div className="modal-backdrop parental-backdrop">
       <div
         className="modal parental-pin-modal"
         role="dialog"
@@ -3797,7 +3818,21 @@ function ParentalPinModal({
             const next = event.target.value.replace(/\D/g, '').slice(0, 4)
             setPin(next)
             setError(null)
-            if (next.length === 4) window.setTimeout(() => submit(next), 40)
+            /*
+              Envia na hora, sem `setTimeout`.
+
+              Com os 40 ms de espera, apagar o ultimo digito dentro dessa janela
+              nao cancelava nada: o timer ja carregava os quatro digitos certainhos
+              e abria a protecao parental com uma senha que a pessoa tinha acabado
+              de apagar da tela. E se o modal fechasse nesses 40 ms, o `submit`
+              rodava em componente desmontado.
+
+              O atraso era cosmético — deixar o quarto ponto pintar antes da tela
+              trocar — e o custo de um `setState` dentro do mesmo evento ja e
+              zero: o React agrupa a atualizacao e o ponto final pinta junto com
+              a troca.
+            */
+            if (next.length === 4) submit(next)
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') submit()
@@ -5654,7 +5689,8 @@ type AppearanceFolder = 'theme' | 'shellBg' | 'colors' | 'accent' | null
       </div>
 
       {historyKind && (
-        <div className="history-modal-backdrop" onClick={() => setHistoryKind(null)}>
+        /* Mesmo motivo dos outros: sair do escuro nao e resposta. */
+        <div className="history-modal-backdrop">
           <div
             className="history-modal"
             role="dialog"
@@ -5933,35 +5969,13 @@ function channelInGroup(channel: Channel, groupName: string, serverCategories: X
   return false
 }
 
-function isAdultGroup(group?: string): boolean {
-  if (!group) return false
-  // `ADULT` sem o `O` final e o que faltava. O painel deste provedor nomeia as
-  // categorias em ingles: "ADULT SWIN", "ADULT SWIN 4K", "ADULT SWIN UHD". Com
-  // so `ADULTO|ADULTA` no padrao, essas tres passavam como categoria comum: a
-  // categoria trancada nao aparecia na coluna e os canais apareciam dentro de
-  // "CANAIS 4K" — que e a falha observada.
-  //
-  // O limite de palavra e obrigatorio: `ADULT` cru pega "ADULTADO", e o resto
-  // do padrao ja usa `\b` justamente para isso.
-  return /\bADULT\b|\bADULTO\b|\bADULTA\b|\+18|18\+|XXX|ONLYFANS|ONLY\s*FANS|PRIVACY|PORNO|PORNÔ|PORN|HENTAI|SEXTREME|EROTIC|PRIVE|PRIVÊ|CINE\s*PRIV|BRAZZER|BANG\s*BROS|BANGBROS|VIXEN|BLACKED|TUSHY|SWEET\s*SINNER|EVIL\s*ANGEL|PLAYBOY|VENUS|FETISH|FETICHE|REDLIGHT|SEXXX|HARDCORE|SOFTCORE/i.test(
-    group,
-  )
-}
-
-function isAdultChannel(channel?: Channel): boolean {
-  if (!channel) return false
-  if (isAdultGroup(channel.group) || isAdultGroup(channel.name)) return true
-  // Prefixo comum no painel: [XXX], (XXX), XXX -
-  return /(?:^|[\s\[\(\-_])XXX(?:$|[\s\]\)\-_])/i.test(String(channel.name || ''))
-}
-
 /** Mantém a ordem interna; só empurra conteúdo adulto para o fim. */
 function moveAdultToEnd(items: Channel[]): Channel[] {
   if (items.length < 2) return items
   const normal: Channel[] = []
   const adult: Channel[] = []
   for (const item of items) {
-    if (isAdultChannel(item)) adult.push(item)
+    if (ehCanalAdulto(item)) adult.push(item)
     else normal.push(item)
   }
   if (adult.length === 0) return items
@@ -5970,7 +5984,7 @@ function moveAdultToEnd(items: Channel[]): Channel[] {
 
 function recentlyAddedMovies(items: Channel[], meta?: Map<string, ChannelSortMeta> | null): Channel[] {
   return items
-    .filter((channel) => !isAdultChannel(channel))
+    .filter((channel) => !ehCanalAdulto(channel))
     .sort((a, b) => {
       const timeA = meta?.get(a.id)?.added || getItemAddedTime(a)
       const timeB = meta?.get(b.id)?.added || getItemAddedTime(b)
@@ -6020,7 +6034,7 @@ function matchHeroFeaturedMovies(movies: Channel[]): Channel[] {
   const out: Channel[] = []
   const push = (items: Channel[]) => {
     for (const item of items) {
-      if (!item || item.kind === 'series' || seen.has(item.id) || isAdultChannel(item)) continue
+      if (!item || item.kind === 'series' || seen.has(item.id) || ehCanalAdulto(item)) continue
       if (!isTrendMovieGroup(item) && !isUhd4kChannel(item)) continue
       seen.add(item.id)
       out.push(item)
@@ -6060,7 +6074,7 @@ function recommendSimilarMovies(
   )
 
   const scored = pool
-    .filter((item) => item.id !== anchor.id && !usedIds.has(item.id) && !isAdultChannel(item))
+    .filter((item) => item.id !== anchor.id && !usedIds.has(item.id) && !ehCanalAdulto(item))
     .map((item) => {
       const group = normalizeForMatching(item.group || '')
       let score = movieRatingValue(item) * 2
@@ -6085,7 +6099,7 @@ function recommendSimilarMovies(
 
   if (picks.length < 8) {
     const fallback = [...pool]
-      .filter((item) => item.id !== anchor.id && !usedIds.has(item.id) && !isAdultChannel(item))
+      .filter((item) => item.id !== anchor.id && !usedIds.has(item.id) && !ehCanalAdulto(item))
       .sort((a, b) => movieRatingValue(b) - movieRatingValue(a) || String(a.name).localeCompare(String(b.name), 'pt-BR'))
     for (const item of fallback) {
       picks.push(item)
@@ -6563,7 +6577,7 @@ function Browse({
 
     for (const tier of keywordGroups) {
       for (const groupName of originalOrder) {
-        if (!added.has(groupName) && !isAdultGroup(groupName)) {
+        if (!added.has(groupName) && !ehCategoriaAdulta(groupName)) {
           const norm = normalizeForMatching(groupName)
           const matches = tier.some((keyword) => norm.includes(keyword))
           if (matches) {
@@ -6575,11 +6589,11 @@ function Browse({
     }
 
     const regular = originalOrder
-      .filter((g) => !added.has(g) && !isAdultGroup(g))
+      .filter((g) => !added.has(g) && !ehCategoriaAdulta(g))
       .sort((a, b) => a.localeCompare(b, 'pt-BR'))
 
     const adult = originalOrder
-      .filter((g) => !added.has(g) && isAdultGroup(g))
+      .filter((g) => !added.has(g) && ehCategoriaAdulta(g))
       .sort((a, b) => a.localeCompare(b, 'pt-BR'))
 
     return [...top, ...priorityGroups, ...regular, ...adult]
@@ -6599,7 +6613,7 @@ function Browse({
       Trancado -> esconde coluna e canais, e a categoria entra como item de cadeiro.
       Desligado -> mostra tudo, que e o que nao configurar protecao significa.
     */
-    if (parentalLocked) lista = lista.filter((g) => !isAdultGroup(g))
+    if (parentalLocked) lista = lista.filter((g) => !ehCategoriaAdulta(g))
     // A COLUNA TAMBEM E FILTRADA, e nao so a grade.
     //
     // Sem isto a categoria oculta continuava listada com contagem zero, e
@@ -6737,7 +6751,7 @@ function Browse({
     for (const c of channels) {
       if (hiddenChannelSet.has(c.id) || hiddenGroupSet.has(c.group)) continue
       visibleTotal += 1
-      if (kind === 'movie' && !isAdultChannel(c) && (sortMeta?.get(c.id)?.added || getItemAddedTime(c)) > 0) {
+      if (kind === 'movie' && !ehCanalAdulto(c) && (sortMeta?.get(c.id)?.added || getItemAddedTime(c)) > 0) {
         recentCount += 1
       }
 
@@ -6833,7 +6847,7 @@ function Browse({
       (channel) =>
         !hiddenChannelSet.has(channel.id) &&
         !hiddenGroupSet.has(channel.group) &&
-        !(parentalLocked && isAdultChannel(channel)),
+        !(parentalLocked && ehCanalAdulto(channel)),
     )
 
     // Primeiro paint: sem sort/adulto — virtualização mostra a tela na hora
@@ -6946,7 +6960,7 @@ function Browse({
           seriesLogo: item.seriesLogo || item.channel.seriesLogo,
         }))
         .filter((channel) => {
-          if (!isAdultGroup(group) && isAdultChannel(channel)) return false
+          if (!ehCategoriaAdulta(group) && ehCanalAdulto(channel)) return false
           return searchMatchScore(channel, search, searchHaystack?.get(channel.id)) > 0
         })
       return sortSearchResults(filtered, search, searchHaystack || new Map()).slice(0, 250)
@@ -6955,10 +6969,10 @@ function Browse({
     const matched: Channel[] = []
     const limit = kind === 'live' ? 250 : 1200
 
-    const allowAdult = isAdultGroup(group)
+    const allowAdult = ehCategoriaAdulta(group)
     for (const channel of channels) {
       if (hiddenChannelSet.has(channel.id) || hiddenGroupSet.has(channel.group)) continue
-      if (!allowAdult && isAdultChannel(channel)) continue
+      if (!allowAdult && ehCanalAdulto(channel)) continue
       const score = searchMatchScore(channel, search, searchHaystack?.get(channel.id))
       if (score <= 0) continue
       matched.push(channel)

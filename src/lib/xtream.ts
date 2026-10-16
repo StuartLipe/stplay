@@ -1,4 +1,5 @@
 import type { Channel, ContentDetails, Playlist, SeriesInfo, ShortEpg, XtreamProfile } from '../types'
+import { ehCategoriaAdulta } from './adulto'
 import { parseM3u } from './m3u'
 import { matchLiveStream } from './live-stream-match'
 import { dedupeEpisodesByNumber } from './dedupe-episodes'
@@ -410,12 +411,6 @@ function getStreamCatId(s: unknown): string {
   return ''
 }
 
-function isAdultCategoryName(name: string): boolean {
-  return /ADULTO|ADULTA|\+18|18\+|XXX|ONLYFANS|PRIVACY|PORNO|PORNÔ|PORN|HENTAI|SEXTREME|EROTIC|PRIVE|PRIVÊ|CINE\s*PRIV|BRAZZER|BANG\s*BROS|PLAYBOY|VENUS|FETISH|SEXXX/i.test(
-    name,
-  )
-}
-
 /**
  * Sinaliza "sessão inválida" para o retry loop saber que NÃO deve repetir.
  * Sem isso, `loadXtreamVodCategory` gastava 1,2 + 2,4 + 3,6 + 4,8 + 6 = 18s de
@@ -484,7 +479,7 @@ export async function loadXtreamLive(playlist: Playlist): Promise<Channel[]> {
   const presentCatIds = new Set(streams.map((s) => getStreamCatId(s)).filter(Boolean))
   const missingCats = cats.filter((c) => {
     const cid = getCatId(c)
-    return cid && (!presentCatIds.has(cid) || isAdultCategoryName(getCatName(c)))
+    return cid && (!presentCatIds.has(cid) || ehCategoriaAdulta(getCatName(c)))
   })
 
   // Completa categorias faltantes com pouca concorrência (evita 429)
@@ -511,7 +506,7 @@ export async function loadXtreamLive(playlist: Playlist): Promise<Channel[]> {
   return streams.map((s) => {
     const cid = getStreamCatId(s)
     const sname = s.name || ''
-    const groupName = names.get(cid) || (isAdultCategoryName(sname) ? 'ADULTOS +18 | CANAIS' : 'Ao vivo')
+    const groupName = names.get(cid) || (ehCategoriaAdulta(sname) ? 'ADULTOS +18 | CANAIS' : 'Ao vivo')
     return {
       id: `live-${s.stream_id}`,
       name: sname,
@@ -863,7 +858,7 @@ export async function loadXtreamVod(
       const cid = getStreamCatId(s)
       const group =
         (cid && names.get(cid)) ||
-        (isAdultCategoryName(s.name || '') ? 'ADULTOS XXX' : 'Filmes')
+        (ehCategoriaAdulta(s.name || '') ? 'ADULTOS XXX' : 'Filmes')
       byId.set(`vod-${s.stream_id}`, mapVodToChannel(playlist, s, group, cid || undefined))
     }
     emit()
@@ -997,7 +992,7 @@ export async function loadXtreamSeries(
       const cid = getStreamCatId(s)
       const group =
         (cid && names.get(cid)) ||
-        (isAdultCategoryName(s.name || '') ? 'ADULTOS XXX' : 'Séries')
+        (ehCategoriaAdulta(s.name || '') ? 'ADULTOS XXX' : 'Séries')
       byId.set(`series-${s.series_id}`, mapSeriesToChannel(playlist, s, group, cid || undefined))
     }
     emit()

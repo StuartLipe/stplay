@@ -1,4 +1,4 @@
-import { Download, RefreshCw, RotateCcw, X } from 'lucide-react'
+import { CheckCircle2, Download, RefreshCw, RotateCcw, X } from 'lucide-react'
 import type { UpdateToastState } from './use-updater'
 
 /*
@@ -79,6 +79,26 @@ export function UpdateToast({
         </div>
         <div className="update-toast-actions">
           <button onClick={onClose}>Ocultar</button>
+        </div>
+      </div>
+    )
+  }
+
+  if (toast.phase === 'atual') {
+    return (
+      <div className="update-toast" role="status">
+        <div className="update-toast-copy">
+          <CheckCircle2 size={17} strokeWidth={1.9} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div>
+            <strong>Voce ja esta na versao mais recente</strong>
+            <span>
+              {toast.version ? `Instalada: ${toast.version}.` : 'Nada para baixar.'} Nenhuma
+              atualizacao pendente.
+            </span>
+          </div>
+        </div>
+        <div className="update-toast-actions">
+          <button onClick={onClose}>Fechar</button>
         </div>
       </div>
     )

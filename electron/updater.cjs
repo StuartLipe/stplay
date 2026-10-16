@@ -217,6 +217,77 @@ function marcarChecagem() {
   gravarEstado({ ultimoCheck: Date.now() })
 }
 
+/*
+ * O estado em disco sobrevive a instalacao feita FORA do app.
+ *
+ * `instalar()` zera `aguardandoInstalacao` antes do `quitAndInstall`, mas quem
+ * baixa o instalador da release e roda o setup na mao nao passa por aqui: o
+ * arquivo de estado continua dizendo que ha um instalador da 1.0.5 esperando, e
+ * a caixa de "reiniciar" aparecia para reinstalar a versao que ja estava rodando.
+ *
+ * Comparacao numerica por segmento: string resolve errado em 1.0.10 vs 1.0.9.
+ *
+ * Mesma regra de `compararVersoes` em `src/lib/novidades.ts`, em copia. O main e
+ * CJS e o renderer e TS com bundle proprio: um nao alcanca o outro sem um build
+ * a mais, e duas copias de dez linhas sao mais baratas que esse build.
+ */
+function compararVersoes(a, b) {
+  const segA = String(a).split(/[.-]/).map((n) => Number.parseInt(n, 10) || 0)
+  const segB = String(b).split(/[.-]/).map((n) => Number.parseInt(n, 10) || 0)
+  const tamanho = Math.max(segA.length, segB.length)
+  for (let i = 0; i < tamanho; i++) {
+    const dif = (segA[i] || 0) - (segB[i] || 0)
+    if (dif !== 0) return dif < 0 ? -1 : 1
+  }
+  return 0
+}
+
+/** O instalador esperando so serve se a versao dele for MESMO mais nova que a instalada. */
+function pendenteEhUtil(versao) {
+  return Boolean(versao) && compararVersoes(versao, versaoDoApp()) > 0
+}
+
+/**
+ * Joga fora o instalador baixado que a versao instalada ja superou.
+ *
+ * Sao duas coisas, e elas podem existir separadas: o ESTADO em disco (a flag
+ * `aguardandoInstalacao`) e o CACHE de verdade (os 138 MB em
+ * `%LOCALAPPDATA%\stplay-updater\pending`).
+ *
+ *_installando na mao_ — baixando o setup da release e rodando em duplo clique —
+ * o estado nunca passa por `update-downloaded`, entao fica limpo; mas o
+ * `electron-updater` acha o `ST-PLAY-Setup-1.0.5.exe` no `pending/` com o
+ * `update-info.json` ao lado e passa a tratar aquilo como um download em
+ * andamento. Da ideia a ele para sempre, mesmo ja estando na 1.0.5.
+ *
+ * Por isso o cache e limpo pelo VALOR da versao, e nao pela flag: o estado
+ * limpo nao significa cache limpo.
+ */
+function limparPendenciaVelha(versaoRemota) {
+  const estado = lerEstado()
+  const alvo = versaoRemota || estado.aguardandoVersao
+  // Uma versao realmente mais nova ainda vale: e o download legitimo.
+  if (pendenteEhUtil(alvo)) return false
+
+  let limpou = false
+  if (estado.aguardandoInstalacao || estado.aguardandoVersao) {
+    plog.info('updater', 'descarta estado obsoleto', {
+      pendente: estado.aguardandoVersao,
+      remota: versaoRemota || null,
+      instalada: versaoDoApp(),
+    })
+    gravarEstado({ aguardandoInstalacao: false, aguardandoVersao: null })
+    limpou = true
+  }
+
+  try {
+    carregarAutoUpdater()?.clearCachedDownload?.()
+  } catch {
+    // O cache e regeneravel; falhar aqui nao pode derrubar a checagem.
+  }
+  return limpou
+}
+
 /* ----------------------------------------------------------------- eventos */
 
 function ligarEventos(up) {
@@ -228,6 +299,14 @@ function ligarEventos(up) {
 
   up.on('update-not-available', (info) => {
     plog.info('updater', 'update-not-available', { version: info && info.version })
+    /*
+     * "Nao ha versao nova" e a unica checagem que prova que a pendencia do
+     * estado em disco e velha: a unica coisa que podia mudar desde o
+     * `update-downloaded` e a propria instalacao. Sem esta linha o cartaz de
+     * "reiniciar" sobrevivia a instalacao feita por fora e ficava pedindo para
+     * reinstalar a versao ja rodando.
+     */
+    limparPendenciaVelha()
     emitir({ type: 'not-available', version: info ? String(info.version) : null })
   })
 
@@ -322,11 +401,35 @@ async function checar({ manual } = {}) {
     const resultado = await up.checkForUpdates()
     marcarChecagem()
     if (!resultado || !resultado.updateInfo) return { ok: true, available: false }
-    return {
-      ok: true,
-      available: true,
-      version: String(resultado.updateInfo.version),
+
+    /*
+     * `checkForUpdates()` DEVOLVE `updateInfo` mesmo quando NAO ha versao nova.
+     *
+     * Medido no `AppUpdater.js:404-411`: quando `isUpdateAvailable` e falso ele
+     * emite `update-not-available` e retorna
+     *
+     *     { isUpdateAvailable: false, versionInfo: updateInfo, updateInfo }
+     *
+     * — o objeto do mesmo jeito. O codigo antigo so olhava `resultado.updateInfo`
+     * e devolvia `available: true` para a versao que ja estava instalada.
+     *
+     * O cartaz de "Baixando a 1.0.5" num app 1.0.5 era isto: o evento
+     * `update-not-available` chegava primeiro e fechava o cartaz, mas a resposta
+     * do IPC vinha logo em seguida e sobrescrevia com "baixando". A tela mostrava
+     * "Instalada: 1.0.5" ao lado de um download que nao existia.
+     *
+     * A comparacao de versao e a segunda rede: `isUpdateAvailable` e o que o
+     * updater decidiu, e uma pendencia antiga no cache (a pasta `pending`) pode
+     * fazer ele decidir errado. Instalar o que ja esta instalado nao e
+     * atualizacao.
+     */
+    const info = resultado.updateInfo
+    const versao = String(info.version)
+    if (resultado.isUpdateAvailable === false || compararVersoes(versao, versaoDoApp()) <= 0) {
+      limparPendenciaVelha(versao)
+      return { ok: true, available: false, version: versao }
     }
+    return { ok: true, available: true, version: versao }
   } catch (error) {
     const mensagem = String(error && error.message ? error.message : error)
     plog.warn('updater', 'check falhou', { error: mensagem, manual: Boolean(manual) })
@@ -357,9 +460,22 @@ function instalar() {
   try {
     instalando = true
     plog.info('updater', 'quitAndInstall solicitado')
-    // O instalador assume daqui em diante; se sobrar resquicio no disco, o
-    // proximo boot mostraria a caixa de reiniciar para um pacote velho.
-    gravarEstado({ aguardandoInstalacao: false, aguardandoVersao: null })
+    /*
+     * NAO zera `aguardandoInstalacao` aqui. Era o que o codigo fazia, e a
+     * intencao era boa: se sobrasse resquicio no disco, o proximo boot
+     * mostraria a caixa de reiniciar para um pacote velho.
+     *
+     * O problema e que a limpeza acontecia ANTES de o instalador assumir. Se
+     * ele nao rodasse — SmartScreen, permissao, antivirus — o estado ja
+     * estava limpo e a caixa de "Reiniciar agora" nao voltava: ficava sem o
+     * botao e sem o caminho de tentar de novo, ate a checagem diaria passar
+     * pelo mesmo caminho.
+     *
+     * `limparPendenciaVelha()` agora cobre o caso que motivou a limpeza, e
+     * melhor: ele compara a versao pendente com a instalada e so descarta o
+     * que a versao atual ja superou. Enquanto o app estiver na versao antiga,
+     * a pendencia e valida e a caixa continua acesa.
+     */
     /*
      * `isSilent` = TRUE. O instalador roda sem wizard e sem perguntar nada: e o
      * comportamento de Discord, que e o que foi pedido.
@@ -375,18 +491,36 @@ function instalar() {
      * atualizacao NAO deve instalar sozinho. O silencio aqui e so para quem
      * clicou em "Reiniciar agora", que ja decidiu.
      *
-     * O SEGUNDO argumento e o que reabre o app depois da instalacao, e era
-     * `false`. O instalador silencioso termina e sai: o app nao voltava, e o
-     * usuario ficava com o icone atualizado na area de trabalho e nenhuma
-     * janela aberta. Nao havia checkbox para marcar, porque o instalador
-     * silencioso nao mostra nada — o `oneClick: true` que existe hoje em
-     * `package.json` nao tem "executar ao terminar" para clicar.
+     * O SEGUNDO argumento NAO reabre o app. Foi escrito aqui que sim, e essa e
+     * a razao do bug "instalei e o app nao voltou": medido nesta versao do
+     * electron-updater e do template NSIS que vem com ela.
      *
-     * `true` aqui e o `--force-run-after-install`: o instalador sobe o app no
-     * fim, sem perguntar. O `before-quit` ja foi liberado acima, entao o
-     * processo antigo sai inteiro antes do instalador assumir.
+     * O que existe de verdade:
+     *
+     *   1. `NsisUpdater.doInstall` monta os argumentos e, para o segundo
+     *      argumento, empurra `--force-run`:
+     *
+     *          const args = ['--updated']
+     *          if (options.isSilent)      args.push('/S')
+     *          if (options.isForceRunAfter) args.push('--force-run')
+     *
+     *   2. `--force-run` NAO aparece em lugar nenhum do template
+     *      (`app-builder-lib/templates/nsis/`). Nem `force-run`, nem
+     *      `forceRun`. O instalador recebe o flag e simplesmente nao faz nada
+     *      com ele.
+     *
+     * A reabertura de verdade vem da `Function StartApp`, que so e chamada pela
+     * pagina de FINISH do instalador — e a pagina de finish e exatamente o que
+     * `/S` pula. Instalacao silenciosa termina e sai.
+     *
+     * Como resolver e uma decisao de produto (silencioso de verdade, ou um
+     * clique a mais), o codigo fica como esta e a escolha mora no `nsis` do
+     * `package.json`.
+     *
+     * O `before-quit` ja foi liberado acima, entao o processo antigo sai inteiro
+     * antes do instalador assumir.
      */
-    plog.info('updater', 'quitAndInstall silencioso com reabertura automatica')
+    plog.info('updater', 'quitAndInstall silencioso')
     setImmediate(() => up.quitAndInstall(true, true))
     return { ok: true }
   } catch (error) {
@@ -401,6 +535,15 @@ function registerUpdaterIpc() {
   ipcMain.handle('updater:status', async () => {
     const up = carregarAutoUpdater()
     const estado = lerEstado()
+    /*
+     * O `status()` e LEITURA: nao limpa nada, apenas nao conta pendencia velha.
+     * A limpeza acontece em `update-not-available`, que e onde a prova chega. Mas
+     * se o `check` de 24 h ainda nao rodou neste boot, e `pending` esta no disco
+     * porque o setup foi rodado na mao, a tela ficaria mostrando "reiniciar" ate
+     * a proxima checagem — e a unica forma de sair disso seria clicar em
+     * "Verificar agora". Aqui a resposta honesta e "nao ha nada pronto".
+     */
+    const pendenteUtil = Boolean(estado.aguardandoInstalacao) && pendenteEhUtil(estado.aguardandoVersao)
     return {
       ok: true,
       packaged: app.isPackaged,
@@ -426,8 +569,8 @@ function registerUpdaterIpc() {
        *      objeto e recriado vazio, mas o instalador continua em `pending` no
        *      disco. O estado em disco e o que sobrevive.
        */
-      disponivelParaInstalar: Boolean(estado.aguardandoInstalacao),
-      versaoPronta: estado.aguardandoInstalacao ? estado.aguardandoVersao || null : null,
+      disponivelParaInstalar: pendenteUtil,
+      versaoPronta: pendenteUtil ? estado.aguardandoVersao || null : null,
       installing: instalando,
     }
   })
