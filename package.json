@@ -60,10 +60,7 @@
     "publish": {
       "provider": "github",
       "owner": "StuartLipe",
-      "repo": "stplay",
-      "publisherName": [
-        "Sturt"
-      ]
+      "repo": "stplay"
     },
     "directories": {
       "output": "release",

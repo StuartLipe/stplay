@@ -210,9 +210,21 @@ const arquivos = [setup, portatil, latestYml, blockmap]
 const notasTmp = join(root, 'release', `.notas-${versao}.md`)
 writeFileSync(notasTmp, notas, 'utf8')
 
+/*
+ * `--repo` EXPLICITO em toda chamada do `gh release`.
+ *
+ * Sem isso o `gh` descobre o repositorio pelo remote da pasta, e aqui o remote
+ * default e `origin` = `stplay-codigo`, o repo PRIVADO. A 1.0.6 foi publicada
+ * la: os 276 MB subiram, a release ficou no privado, e o script so avisou no
+ * fim — a conferencia usa `repos/${repo}` e achou o publico vazio. Quem leu a
+ * tela viu "publicando" e acreditou.
+ *
+ * O `repo` ja vem do `package.json` e e o publico, que e o unico de onde o
+ * `electron-updater` le.
+ */
 let jaExiste = true
 try {
-  gh('release', 'view', tag)
+  gh('release', 'view', tag, '--repo', repo)
 } catch {
   jaExiste = false
 }
@@ -221,10 +233,10 @@ log('')
 log(`  publicando  ${tag} ...`)
 if (jaExiste) {
   log('              a release ja existe: --clobber nos artefatos')
-  gh('release', 'upload', tag, '--clobber', ...arquivos)
-  gh('release', 'edit', tag, '--notes-file', notasTmp, '--title', `ST PLAY ${versao}`, '--latest')
+  gh('release', 'upload', tag, '--clobber', '--repo', repo, ...arquivos)
+  gh('release', 'edit', tag, '--repo', repo, '--notes-file', notasTmp, '--title', `ST PLAY ${versao}`, '--latest')
 } else {
-  gh('release', 'create', tag, '--title', `ST PLAY ${versao}`, '--notes-file', notasTmp, '--latest', ...arquivos)
+  gh('release', 'create', tag, '--repo', repo, '--title', `ST PLAY ${versao}`, '--notes-file', notasTmp, '--latest', ...arquivos)
 }
 rmSync(notasTmp, { force: true })
 
