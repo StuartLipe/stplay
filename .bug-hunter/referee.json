@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "role": "referee",
+  "runId": "scan-2026-10-16-live-buffer",
+  "verdicts": [
+    {
+      "bugId": "BUG-1",
+      "verdict": "REAL_BUG",
+      "trueSeverity": "High",
+      "confidenceScore": 88,
+      "rationale": "Independently re-read. The arithmetic is sound and the evidence is first-hand: 4 MiB measured against 4000 kbps on the target panel yields 8.4 s of runway against a 10-11 s publication interval. A ceiling that cannot hold one segment is a ceiling that guarantees a pause at every boundary. The Skeptic correctly narrowed the claim: this is a real miscalibration and a real contributor, but live-load-policy.cjs identifies demuxer starvation as the better-evidenced root cause of the observed freeze. Fixing the ceiling alone should not be presented as fixing the freeze.",
+      "remediation": "safe-autofix"
+    },
+    {
+      "bugId": "BUG-2",
+      "verdict": "REAL_BUG",
+      "trueSeverity": "Low",
+      "confidenceScore": 82,
+      "rationale": "Confirmed as configuration incoherence. Downgraded from Medium after accepting the Skeptic's point that a permissive startup ceiling does not starve. The defect is real and the project's own comment names the hazard.",
+      "remediation": "safe-autofix"
+    },
+    {
+      "bugId": "BUG-3",
+      "verdict": "REAL_BUG",
+      "trueSeverity": "Low",
+      "confidenceScore": 84,
+      "rationale": "Confirmed. One literal, 96 MiB, is 24x the value the owning module and its test suite require, and it is the value the project measured as producing the 887 s accumulation.",
+      "remediation": "safe-autofix"
+    },
+    {
+      "bugId": "BUG-4",
+      "verdict": "NOT_A_BUG",
+      "trueSeverity": "Low",
+      "confidenceScore": 90,
+      "rationale": "Skeptic disproved. Deriving TARGETDURATION from parsed EXTINF values is spec-conformant and is the safer source in a module whose entire purpose is to not trust this panel's declared metadata. No change warranted.",
+      "remediation": "none"
+    },
+    {
+      "bugId": "BUG-5",
+      "verdict": "MANUAL_REVIEW",
+      "trueSeverity": "Low",
+      "confidenceScore": 40,
+      "rationale": "The observation is verified (mode 'raw' is absent from loadModeOrder's output and from every currentLoadMode assignment), but the claim about which variable the log line reads was never completed. Unresolved rather than confirmed.",
+      "remediation": "manual-review"
+    }
+  ],
+  "note": "BUG-2 and BUG-3 are one defect: the live byte ceiling has two disagreeing sources, one in the command line and one in the profile, and the command line wins at process start."
+}

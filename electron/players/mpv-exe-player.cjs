@@ -12,6 +12,7 @@ const hwndHelper = require('./hwnd-helper.cjs')
 const log = require('./player-log.cjs')
 const overlay = require('./overlay-window.cjs')
 const { isPlayableUrl } = require('./play-url.cjs')
+const { volumePerceptual100 } = require('./volume-curve.cjs')
 
 const GWL_STYLE = -16
 const WS_CHILD = 0x40000000
@@ -398,7 +399,7 @@ async function command(op, value) {
     else if (op === 'toggle' || op === 'toggle-pause') await sendIpc(['cycle', 'pause'])
     else if (op === 'seek' && typeof value === 'number') await sendIpc(['seek', value, 'absolute'])
     else if (op === 'volume' && typeof value === 'number') {
-      await sendIpc(['set_property', 'volume', Math.round(Math.max(0, Math.min(100, value * 100)))])
+      await sendIpc(['set_property', 'volume', volumePerceptual100(value)])
     } else return { ok: false }
     return { ok: true }
   } catch {

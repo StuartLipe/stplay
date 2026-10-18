@@ -26,8 +26,21 @@ function evict() {
   }
 }
 
+/**
+ * Chave do cache de metadata de VOD.
+ *
+ * O comentario aqui dizia "o host entra na chave" e era FALSO: a chave e
+ * `${playlistId}:${vodId}`, e nada mais. O `playlistId` sobrevive a troca de
+ * usuario/senha, entao o synopsis e a capa de um id vinham da conta anterior.
+ *
+ * Nao coloquei host na chave por conta propria porque a assinatura e usada em
+ * varias call-sites e mudar a forma da chave invalida o cache em voo de forma
+ * silenciosa. O que fecha o problema de verdade e a invalidacao explicita:
+ * `updatePlaylist` no `App.tsx` detecta mudanca de host/usuario/senha e chama
+ * `clearVodInfoCache()`/`clearSeriesInfoCache()`. Antes esses `clear*` nao eram
+ * chamados por NINGUEM, so expiravam por TTL.
+ */
 export function vodInfoCacheKey(playlistId: string, vodId: string) {
-  // O host entra na chave: trocar de host com o mesmo id tem que ser miss.
   return `${playlistId}:${vodId}`
 }
 

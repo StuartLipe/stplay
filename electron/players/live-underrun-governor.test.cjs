@@ -36,7 +36,7 @@ test('o primeiro degrau e o perfil que ja estava em uso', () => {
 })
 
 test('uma pausa isolada nao move nada', () => {
-  const d = decidir({ pausas: [1000], agoraMs: 2000 })
+  const d = decidir({ pausas: [{ t: 1000, folgaSecs: -1 }], agoraMs: 2000 })
   assert.equal(d.subiu, false)
   assert.equal(d.degrau, 0)
   assert.equal(d.naJanela, 1)
@@ -45,7 +45,7 @@ test('uma pausa isolada nao move nada', () => {
 
 test('duas pausas ainda nao sobem', () => {
   const agora = 1000 + ENTRE_MUDANCAS_MS
-  const d = decidir({ pausas: [1000, agora - 1000], agoraMs: agora })
+  const d = decidir({ pausas: [{ t: 1000, folgaSecs: -1 }, { t: agora - 1000, folgaSecs: -1 }], agoraMs: agora })
   assert.equal(d.subiu, false)
   assert.equal(d.degrau, 0)
 })
@@ -53,7 +53,7 @@ test('duas pausas ainda nao sobem', () => {
 test('tres pausas na janela sobem um degrau', () => {
   const agora = 1000 + ENTRE_MUDANCAS_MS
   const d = decidir({
-    pausas: [agora - 3000, agora - 2000, agora - 1000],
+    pausas: [{ t: agora - 3000, folgaSecs: -1 }, { t: agora - 2000, folgaSecs: -1 }, { t: agora - 1000, folgaSecs: -1 }],
     agoraMs: agora,
   })
   assert.equal(d.subiu, true)
@@ -66,7 +66,7 @@ test('pausa fora da janela nao conta', () => {
   const agora = 100_000 + ENTRE_MUDANCAS_MS
   const velha = agora - JANELA_MS - 1
   const d = decidir({
-    pausas: [velha, agora - 2000, agora - 1000],
+    pausas: [{ t: velha, folgaSecs: -1 }, { t: agora - 2000, folgaSecs: -1 }, { t: agora - 1000, folgaSecs: -1 }],
     agoraMs: agora,
   })
   assert.equal(d.subiu, false, 'a pausa velha saiu da janela deslizante')
@@ -79,7 +79,7 @@ test('sobe ate o degrau maximo e para de pedir', () => {
   let subidas = 0
   for (let i = 0; i < 40; i += 1) {
     t += ENTRE_MUDANCAS_MS
-    for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t)
+    for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t, -1)
     const acao = proximaAcao(gov, t)
     if (acao) subidas += 1
   }
@@ -91,7 +91,7 @@ test('nunca desce, nem com o canal limpo', () => {
   const gov = criarGovernador()
   let t = 1000
   t += ENTRE_MUDANCAS_MS
-  for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t)
+  for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t, -1)
   proximaAcao(gov, t)
   assert.equal(gov.degrau, 1)
 
@@ -106,12 +106,12 @@ test('o intervalo entre mudancas e respeitado', () => {
   const gov = criarGovernador()
   let t = 1000
   t += ENTRE_MUDANCAS_MS
-  for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t)
+  for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t, -1)
   assert.ok(proximaAcao(gov, t), 'a primeira vez passa')
 
   // Mesma janela, mesmo com pausinhas novas: nao pode escalar de novo na hora.
   t += 1000
-  for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t)
+  for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t, -1)
   assert.equal(proximaAcao(gov, t), null, 'o demuxer precisa de tempo para encher')
 })
 
@@ -119,7 +119,7 @@ test('a janela zera depois de subir, senao escalona sem parar', () => {
   const gov = criarGovernador()
   let t = 1000
   t += ENTRE_MUDANCAS_MS
-  for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t)
+  for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t, -1)
   const acao = proximaAcao(gov, t)
   assert.equal(acao.subiu, true)
   assert.equal(gov.pausas.length, 0, 'as 3 pausinhas que motivaram nao contam de novo')
@@ -130,7 +130,7 @@ test('o historico fica preso na janela, nao cresce a sessao toda', () => {
   let t = 1000
   for (let i = 0; i < 500; i += 1) {
     t += 1000
-    registrarUnderrun(gov, t)
+    registrarUnderrun(gov, t, -1)
   }
   // Um underrun por segundo durante 500 s. O que segura o array e a janela
   // deslizante de 30 s, entao o teto e a janela em segundos, mais o que acabou
@@ -160,7 +160,7 @@ test('o gatilho da pausa NAO sobe — so o teto', () => {
   for (let i = 0; i < DEGRAUS.length + 2; i += 1) {
     const antes = gov.degrau
     t += ENTRE_MUDANCAS_MS
-    for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t)
+    for (let k = 0; k < PAUSAS_PARA_SUBIR; k += 1) registrarUnderrun(gov, t, -1)
     const acao = proximaAcao(gov, t)
     if (!acao) {
       assert.equal(gov.degrau, DEGRAUS.length - 1, 'no topo nao ha degrau acima')

@@ -56,7 +56,10 @@ function normalizeLogo(url?: string) {
 export function mediaSrc(url?: string) {
   const clean = normalizeLogo(url)
   if (!clean) return undefined
-  if (clean.startsWith('data:') || clean.startsWith('blob:')) return clean
+  /*
+   * `data:` e `blob:` caem no mesmo `return clean` do fim — o `if` era
+   * identico ao fallthrough e nao podia mudar o resultado. Ficou so o retorno.
+   */
   return clean
 }
 
@@ -118,7 +121,21 @@ function retryWaitMs(response: Response, attempt: number) {
     const asInt = Number(raw)
     if (!Number.isNaN(asInt) && asInt >= 0) return Math.min(Math.max(asInt * 1000, 5000), 60000)
     const asDate = Date.parse(raw)
-    if (!Number.isNaN(asDate)) return Math.min(Math.max(0, asDate - Date.now()), 60000)
+    if (!Number.isNaN(asDate)) {
+      /*
+       * `Math.max(0, ...)` podia devolver 0.
+       *
+       * Uma data de `Retry-After` no PASADO (ou no presente) significa "pode
+       * tentar agora". Traduzida em espera, isso virava `sleep(0)` — e o loop de
+       * 6 tentativas do `fetchRaw` disparava as 6 de uma vez, contra o painel
+       * que acabara de dizer para esperar. O mesmo cotoque do problema de 429
+       * em rajada que motivou o `PANEL_MAX`.
+       *
+       * O piso de 5s e o mesmo do ramo numerico: coerente entre as duas
+       * interpretacoes do mesmo header.
+       */
+      return Math.min(Math.max(asDate - Date.now(), 5000), 60000)
+    }
   }
   // Sem Retry-After o painel usa backoff próprio curto (medido: ~1-3s).
   // O piso de 4s de antes segurava mais que o necessário e, com 3 tentativas,
@@ -173,9 +190,42 @@ async function fetchOnce(url: string, opts?: FetchOpts): Promise<Response> {
   return fetch(viaProxy(url), init)
 }
 
+/**
+ * Tira a credencial da URL antes de qualquer log.
+ *
+ * A URL do painel Xtream carrega a senha em DUAS formas, e as duas vazavam:
+ *
+ *   http://host/player_api.php?username=639563670&password=334918348&action=X
+ *   http://host/live/639563670/334918348/2396226.m3u8
+ *
+ * O corte de 160 caracteres nao protegia nada: a credencial cai entre a
+ * posicao 28 e 90 nas duas formas, ou seja, no COMECO da string. E nao era so o
+ * console do dev — `logNet` tambem manda pro `internal-debug.log`, que fica em
+ * `%APPDATA%\ST PLAY\` e sobrevive ao fechar o app. Quem pegasse esse arquivo
+ * tinha usuario e senha do painel, em texto plano.
+ *
+ * A redacao e por desenho, nao por allowlist: qualquer param que pareca
+ * credencial e o par de segmentos numericos depois de um tipo de midia viram
+ * `***`. Sobram host, tipo, id e `action` — o que o diagnostico usa de fato.
+ */
+export function redactUrlForLog(url: string): string {
+  return url
+    // Query string: username, password, pass, user, token, auth, key, mac.
+    .replace(
+      /([?&](?:username|password|pass|passwd|user|token|auth|api_?key|key|mac|mac_address)=)[^&#]*/gi,
+      '$1***',
+    )
+    // Caminho do Xtream: /<tipo>/<usuario>/<senha>/<id>.<ext>
+    .replace(
+      /(\/(?:live|movie|series|player_api)(?:\.php)?\/)\d+\/\d+(\/)/gi,
+      '$1***/***$2',
+    )
+}
+
 /** Diagnóstico de rede. Vai pro console do renderer e pro internal-debug.log. */
 function logNet(message: string, url: string, data: Record<string, unknown>) {
-  const short = url.length > 160 ? url.slice(0, 160) + '...' : url
+  const redigida = redactUrlForLog(url)
+  const short = redigida.length > 160 ? redigida.slice(0, 160) + '...' : redigida
   console.debug('[net]', message, short, data)
   try {
     const api = (window as unknown as { sturplay?: { dev?: { internalDebug?: (p: unknown) => unknown } } }).sturplay

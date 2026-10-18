@@ -22,7 +22,7 @@ import type { VideoFit } from './types'
  */
 export const ASPECT_ORDER: readonly VideoFit[] = ['fit', 'fill', 'wide'] as const
 
-export const ASPECT_DEFAULT: VideoFit = 'fill'
+export const ASPECT_DEFAULT: VideoFit = 'fit'
 
 /** Próximo do ciclo. `fit` → `fill` → `wide` → `fit`. */
 export function nextAspect(atual: VideoFit): VideoFit {
@@ -37,11 +37,12 @@ export function nextAspect(atual: VideoFit): VideoFit {
 /**
  * Le o modo guardado.
  *
- * Qualquer coisa que nao seja `fit` ou `wide` vira `fill`. Um `localStorage`
- * corrompido nao pode reintroduzir a tarja que o padrao tira.
+ * Sempre devolve `fit`: o padrão não corta nada. Quem já tinha `fill` salvo
+ * continua sem corte — a escolha de quem preferia preencher a tela inteira
+ * continua acessível pelo botão de aspecto no player.
  */
-export function normalizeAspect(raw: string | null | undefined): VideoFit {
-  return raw === 'fit' || raw === 'wide' ? raw : ASPECT_DEFAULT
+export function normalizeAspect(): VideoFit {
+  return ASPECT_DEFAULT
 }
 
 /** O que o botão diz que vai acontecer, não o que ele fez. */

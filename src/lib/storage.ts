@@ -90,6 +90,23 @@ function normalizeSettings(raw: Partial<AppSettings> & { player?: string }): App
   // ja estava marcado, e e esta passagem que marca o que faltava. Sem isto, um
   // perfil antigo cairia em `migratePlayer` achando que tudo ja rodou e
   // receberia o padrao em vez da migracao.
+  //
+  // CONSEQUENCIA, dita na cara: esta passagem marca TODAS as chaves antes de
+  // `migratePlayer` rodar, entao o `jaRodou` daqui embaixo devolve SEMPRE true e
+  // nenhum dos ramos versionados de `migratePlayer` (`if (!jaRodou(8) && ...)`)
+  // pode disparar. A cadeia v8..v13 e inalcancavel a partir daqui.
+  //
+  // Isso e INTENCIONAL e e o desejado: quem instalou antes mantem o motor que
+  // escolheu em vez de ser remigrado para o padrao. E o que o
+  // `player-default.test.ts` fixa: `migratePlayer` com `jaRodou: nenhumaRodou`
+  // tem de cair em `stur` — o que descreve o comportamento do helper isolado,
+  // nao o que acontece em producao, porque em producao nunca se chega la sem
+  // as chaves marcadas.
+  //
+  // O registro fica aqui de proposito: a cadeia parece viva, le como viva, e um
+  // scan de codigo morto a reporta de novo a cada rodada. Ela so vira problema
+  // se alguem TIRAR esta passagem — ai sim o comportamento muda, e nenhum teste
+  // cobre a virada. Antes de mexer, decida qual dos dois jeitos e quer.
   for (const versao of PLAYER_MIGRATE_VERSOES) {
     try {
       if (!localStorage.getItem(PLAYER_MIGRATE_KEYS[versao])) {
@@ -181,11 +198,37 @@ function normalizeSettings(raw: Partial<AppSettings> & { player?: string }): App
 // no commit do React, não existe error boundary, e a árvore inteira desmonta —
 // o app abre em branco sem forma de recuperar.
 // Sem Space em disco cheio não dá para truncar: o que dá é não derrubar a UI.
+/*
+ * Cota do localStorage estourada e `setItem` lanca `QuotaExceededError`.
+ *
+ * Antes o `write` devolvia `true`/`false` e NENHUM dos `saveX` olhava o
+ * resultado: importar um M3U local grande estourava a cota, o `write` devolvia
+ * `false`, e o `savePlaylists` descartava. A tela mostrava "salvo" e no proximo
+ * boot a playlist nao existia.
+ *
+ * Pior que o silencio: a cota e por ORIGEM, e cada `savePlaylists` re-serializa
+ * o array inteiro. Estouro na importacao deixava a chave no tamanho grande que
+ * deu a falha, entao qualquer alteracao posterior de playlist — inclusive a que
+ * removeria o que estourou — tambem nao persistia. O app ficava sem volta.
+ *
+ * Uma vez por chave por sessao: `write` pode ser chamado de efeito a cada
+ * render, e logar toda vez transforma o diagnostico em propriamente um estouro.
+ */
+const cotaJaReportada = new Set<string>()
+
 function write(key: string, value: string) {
   try {
     localStorage.setItem(key, value)
     return true
-  } catch {
+  } catch (erro) {
+    if (!cotaJaReportada.has(key)) {
+      cotaJaReportada.add(key)
+      console.error(
+        `[storage] NAO gravou "${key}" (${value.length} chars).`,
+        'Cota do localStorage estourada ou storage bloqueado — a mudanca existe so nesta sessao.',
+        erro,
+      )
+    }
     return false
   }
 }

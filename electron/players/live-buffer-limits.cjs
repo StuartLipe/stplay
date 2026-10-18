@@ -60,12 +60,36 @@
 const { MiB, parseBytes, formatBytes } = require('./vod-buffer-limits.cjs')
 
 /**
- * O PADRÃO É 4 MiB — TESTADO, não calculado.
+ * Teto de bytes do demuxer no AO VIVO.
  *
- * Era 96 MiB, o valor do pico de 887,6 s. A medição de 05/10 mostrou que o tamanho
- * do colchão é o que produz o gaguejo, e 4 MiB o remove.
+ * O TETO EM BYTES ESCALA COM O BITRATE. O READAHEAD NAO.
+ *
+ * Este numero foi medido num painel de ~240 kbps, onde 4 MiB davam 139 s de
+ * runway. Medido no painel do dono em 16/out, a MESMA URL entrega 1920x1080 a
+ * ~4000 kbps (mpv pelado, cache enchendo do zero, sem perfil e sem VO):
+ *
+ *   4 MiB a  240 kbps  ->  139,8 s de runway
+ *   4 MiB a 4000 kbps  ->    8,4 s de runway
+ *
+ * E o segmento do painel dura 10-11 s (TARGETDURATION). Ou seja: 4 MiB nao
+ * cabia UM segmento. O demuxer encostava na borda em cada publicacao, e o
+ * log media `folgaSecs: 0.124` com o buffer em 100%.
+ *
+ * O AGRAVANTE: o governador de underrun sobe `demuxer-readahead-secs` de 8 para
+ * 16 s quando a folga seca, e esse reparo era NEUTRALIZADO por este teto — a
+ * 4 Mbps, 16 s de readahead precisariam de 8 MB, e so havia 4. O conflito entre
+ * os dois numeros era silencioso: o governador subia, o teto voltava a cortar.
+ *
+ * 16 MiB a 4000 kbps dao ~33 s: dois segmentos e cambio. E nao ressuscita o
+ * acumulo de 887 s, porque quem limita no TEMPO continua sendo
+ * `demuxer-readahead-secs` — 8 s, ou 16 s depois que o governador sobe. O teto
+ * em bytes e um rede de seguranca contra OOM, nao o que dimensiona o runway.
+ *
+ * O manual do mpv diz a mesma coisa: "If you want to limit the demuxer cache I
+ * strongly recommend you use --demuxer-readahead-secs to do this rather than
+ * --demuxer-max(-back)-bytes".
  */
-const LIVE_MAX_BYTES_PADRAO = 4 * MiB
+const LIVE_MAX_BYTES_PADRAO = 16 * MiB
 
 function liveMaxBytes(env = process.env) {
   const bruto = env.STPLAY_LIVE_MAX_BYTES

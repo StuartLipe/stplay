@@ -23,6 +23,7 @@ const hwndHelper = require('./hwnd-helper.cjs')
 const log = require('./player-log.cjs')
 const overlay = require('./overlay-window.cjs')
 const { isPlayableUrl } = require('./play-url.cjs')
+const { volumePerceptual100 } = require('./volume-curve.cjs')
 
 const GWL_STYLE = -16
 const GWL_EXSTYLE = -20
@@ -1112,7 +1113,25 @@ async function command(op, value, mode) {
       await sendIpc(['seek', value, mode === 'relative' ? 'relative' : 'absolute'])
     }
     else if (op === 'volume' && typeof value === 'number') {
-      await sendIpc(['set_property', 'volume', Math.round(Math.max(0, Math.min(100, value * 100)))])
+      /*
+       * O RESULTADO do `sendIpc` era descartado em toda parte.
+       *
+       * `sendIpc` resolve `{ ok: false }` quando o socket morreu, quando o mpv
+       * nao devolveu em 3s e quando o comando nem existe. Ninguem lia, entao um
+       * volume que nao foi aplicado era indistinguivel de um volume aplicado:
+       * o slider mostrava 100%, o motor nao tinha mudado, e o sintoma era "no
+       * maximo nao sai som" — sem uma linha no log que explicasse.
+       *
+       * Agora toda mudanca de volume deixa rastro: o valor do slider, o valor
+       * depois da curva, e se o mpv aceitou.
+       */
+      const alvo = volumePerceptual100(value)
+      const r = await sendIpc(['set_property', 'volume', alvo])
+      log.info('mpeg', 'volume', {
+        slider: Number(value.toFixed(3)),
+        aplicado: alvo,
+        aceito: Boolean(r && r.ok),
+      })
     } else if (op === 'mute' && typeof value === 'boolean') {
       await sendIpc(['set_property', 'mute', value])
     } else if (op === 'aspect') {

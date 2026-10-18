@@ -1,0 +1,171 @@
+{
+  "totalFiles": 140,
+  "deadCount": 83,
+  "porArquivo": {
+    "src/dev/seed-endpoints.ts": [
+      "ResultadoSeed"
+    ],
+    "src/global.d.ts": [
+      "DownloadProgressEvent",
+      "PlayerDetectResult",
+      "PlayerEventPayload"
+    ],
+    "src/lib/accent.ts": [
+      "AccentPresetId",
+      "AccentId",
+      "AccentSwatch",
+      "isAccentPresetId",
+      "getAccentPreset",
+      "accentGlowFor",
+      "replaceAccentFavorite"
+    ],
+    "src/lib/appearance.ts": [
+      "ThemeOption",
+      "isThemeId",
+      "replaceThemeFavorite",
+      "ShellBackgroundId",
+      "ShellBackgroundOption"
+    ],
+    "src/lib/catalog.ts": [
+      "patchCachedChannel"
+    ],
+    "src/lib/continue-matching.ts": [
+      "channelIsSeries"
+    ],
+    "src/lib/episode-seasons.ts": [
+      "EpisodeListItem"
+    ],
+    "src/lib/games-area.ts": [
+      "isScheduledLiveEventName"
+    ],
+    "src/lib/live-stream-match.ts": [
+      "LiveStreamLike",
+      "LiveChannelLike"
+    ],
+    "src/lib/m3u.ts": [
+      "inferKind"
+    ],
+    "src/lib/novidades.ts": [
+      "GrupoNovidade"
+    ],
+    "src/lib/ocultos.ts": [
+      "Selecao",
+      "LinhasDoBotao"
+    ],
+    "src/lib/player/fullscreen-decision.ts": [
+      "FullscreenAction"
+    ],
+    "src/lib/player-default.ts": [
+      "PlayerMigrationState"
+    ],
+    "src/lib/player.ts": [
+      "toLiveHlsUrl",
+      "hlsSourceCandidates",
+      "PlayerAttachOptions",
+      "attachPlayer"
+    ],
+    "src/lib/players/overlayBridge.ts": [
+      "measureVideoRect"
+    ],
+    "src/lib/players/playerManager.ts": [
+      "PlayerManagerOptions"
+    ],
+    "src/lib/players/retryPlayback.ts": [
+      "PlaybackRetryUi"
+    ],
+    "src/lib/players/tentativa-automatica.ts": [
+      "tentarNovamenteCanceladoPorSucesso"
+    ],
+    "src/lib/players/types.ts": [
+      "AUTO_CHAIN_LIVE",
+      "AUTO_CHAIN_VOD",
+      "AUTO_CHAIN"
+    ],
+    "src/lib/poster-tint.ts": [
+      "PosterTint"
+    ],
+    "src/lib/proxy.ts": [
+      "FetchOpts"
+    ],
+    "src/lib/SeasonSelect.tsx": [
+      "SeasonSelectOption"
+    ],
+    "src/lib/storage.ts": [
+      "DEFAULT_SETTINGS"
+    ],
+    "src/lib/stream-compat.ts": [
+      "StreamCompat",
+      "StreamCompatInfo",
+      "classifyStreamByUrl",
+      "probeStreamHeaders",
+      "getStreamCompatCached",
+      "STREAM_COMPAT_LABELS"
+    ],
+    "src/lib/theme-tokens.ts": [
+      "Ramp",
+      "SurfaceRamp",
+      "CustomTokens",
+      "PanelTone"
+    ],
+    "src/lib/use-updater.ts": [
+      "UPDATE_TOAST_IDLE"
+    ],
+    "src/types.ts": [
+      "PlaylistKind",
+      "DownloadStatus"
+    ],
+    "electron/downloads.cjs": [
+      "getDownloadFolder"
+    ],
+    "electron/find-player.cjs": [
+      "fileIfExists",
+      "which",
+      "findPlayerOneMpv",
+      "searchRoots"
+    ],
+    "electron/log-writer.cjs": [
+      "flush"
+    ],
+    "electron/players/hls-window.cjs": [
+      "PADRAO"
+    ],
+    "electron/players/hwnd-helper.cjs": [
+      "adopt",
+      "place",
+      "raise"
+    ],
+    "electron/players/libmpv-player.cjs": [
+      "resolveDll",
+      "isPreloaded",
+      "getPlaybackSnapshot"
+    ],
+    "electron/players/live-edge-keeper.cjs": [
+      "LIVE_RELOAD_COOLDOWN_PADRAO",
+      "LIVE_MIN_TOCANDO_PADRAO"
+    ],
+    "electron/players/mpv-kill.cjs": [
+      "forceKillPidAsync"
+    ],
+    "electron/players/overlay-bounds.cjs": [
+      "OVERLAY_BAR_MIN_HEIGHT",
+      "OVERLAY_TOP_STRIP",
+      "CONTROL_INSET_PX"
+    ],
+    "electron/players/overlay-window.cjs": [
+      "canReshow",
+      "focusOverlay",
+      "destroyIfIdle",
+      "getFullscreenHint"
+    ],
+    "electron/players/player-host.cjs": [
+      "preloadLibmpv",
+      "startEngine"
+    ],
+    "electron/players/validate-mpv-modes.cjs": [
+      "testMpvExeStandalone"
+    ],
+    "electron/stur-ffmpeg-proxy.cjs": [
+      "encodeTarget"
+    ]
+  }
+}

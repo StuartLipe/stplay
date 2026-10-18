@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "runId": "scan-2026-10-16-live-buffer",
+  "generatedAt": "2026-10-16",
+  "mode": "local-sequential",
+  "target": "electron/players",
+  "trigger": "User-reported: live channel loads then stutters 2-3s; audio+video gargalando; low adult-channel resolution",
+  "filesScanned": 6,
+  "strategy": "extended",
+  "needsLoop": false,
+  "loopCoverage": "complete for the assigned subset",
+  "threatModelLoaded": false,
+  "dependencies": { "status": "not-applicable" },
+  "counts": {
+    "findings": 5,
+    "confirmed": 3,
+    "dismissed": 1,
+    "manualReview": 1,
+    "unreviewed": 0
+  },
+  "confirmed": [
+    {
+      "id": "BUG-1",
+      "file": "electron/players/playback-profile.cjs",
+      "line": 83,
+      "verdict": "REAL_BUG",
+      "trueSeverity": "High",
+      "confidenceScore": 88,
+      "fixApplied": "LIVE_MAX_BYTES_PADRAO 4MiB -> 16MiB; cabecalho do modulo documenta que teto em BYTES escala com bitrate e readhead em TEMPO nao",
+      "scopeCaveat": "Colaborador, nao a causa unica. live-load-policy.cjs:170-200 identifica a desnutricao do demuxer (playlist nao canonica, ffmpeg HLS keyado por numero de sequencia) como causa melhor-evidenciada do congelamento observado. Redimensionar o teto sozinho nao deve ser vendido como conserto do congelamento."
+    },
+    {
+      "id": "BUG-2",
+      "file": "electron/players/playback-profile.cjs",
+      "line": 83,
+      "verdict": "REAL_BUG",
+      "trueSeverity": "Low",
+      "confidenceScore": 82,
+      "fixApplied": "argv agora deriva --demuxer-max-bytes do modulo dono por modo, respeitando a regra documentada de que a linha de comando vence no inicio da reproducao"
+    },
+    {
+      "id": "BUG-3",
+      "file": "electron/players/stur-player.cjs",
+      "line": 4286,
+      "verdict": "REAL_BUG",
+      "trueSeverity": "Low",
+      "confidenceScore": 84,
+      "fixApplied": "removido o literal argv 96MiB incondicional; tambem removido o constante morta LIVE_MAX_BYTES = '96MiB' do playback-profile.cjs"
+    }
+  ],
+  "dismissed": [
+    {
+      "id": "BUG-4",
+      "verdict": "NOT_A_BUG",
+      "trueSeverity": "Low",
+      "confidenceScore": 90,
+      "rationale": "Derivar TARGETDURATION dos valores EXTINF e especificamente seguro e coerente com o proposito do modulo de nao confiar nos metadados declarados deste painel. state.targetDuration e campo vestigial, nao defeito."
+    }
+  ],
+  "manualReview": [
+    {
+      "id": "BUG-5",
+      "verdict": "MANUAL_REVIEW",
+      "confidenceScore": 40,
+      "claim": "O campo mode do log de loadfile emite 'raw', valor inexistente tanto na saida de loadModeOrder quanto em toda atribuicao de currentLoadMode",
+      "needed": "completar o rastreio da linha de log de loadfile para estabelecer de qual variavel ele vem"
+    }
+  ],
+  "verification": {
+    "command": "npm run verify",
+    "exit": 0,
+    "tests": 396,
+    "pass": 396,
+    "fail": 0
+  },
+  "regressionGuardProof": {
+    "test": "electron/players/live-buffer-limits.test.cjs (2 novos testes)",
+    "method": "teto 16MiB -> 0 falhas; 8MiB -> 3 falhas; 4MiB -> 4 falhas; restaurado para 16MiB",
+    "conclusion": "a guarda nao e decorativa: falha no valor que causou o defeito"
+  },
+  "notFixed": [
+    "live-load-policy.cjs identifica a playlist nao canonica / desnutricao do demuxer como causa raiz melhor-evidenciada do congelamento. Nao tocado: eh decisao de arquitetura que afeta todos os paineis.",
+    "cache-pause-initial permanece yes. Trocar para no troca ~1s de partida por zero de travada na abertura. Proposto ao dono, nao aplicado."
+  ],
+  "runtimeEvidence": {
+    "sourceDimensions": "1920x1080 DAR=1.7778 H.264 (mpv pelado, 3 URLs distintas de canal, sem perfil do app, sem VO)",
+    "measuredThroughput": "~4000 kbps sustentados, cache enchendo do zero",
+    "appPauseLog": "live pausou por falta de byte { folgaSecs: 0.124, cacheSecs: 49.06, tempoPos: 48.94, colchao: 8 }",
+    "segmentInterval": "TARGETDURATION 10-11s (documentado em hls-window.cjs e live-load-policy.cjs)",
+    "live-buffer-limits.cjs": "header reescrito com a conta bitrate-dependente: 4 MiB = 8,4s a 4000 kbps vs 139,8s a 240 kbps"
+  }
+}

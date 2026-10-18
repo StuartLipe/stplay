@@ -672,11 +672,20 @@ async function startTransfer(id, startAt = 0) {
 
     const done = await new Promise((resolve) => {
       const fail = (message) => {
+        /*
+         * `clearStall` ANTES do teste de pausa, e nao depois.
+         *
+         * O `stallTimer` so se auto-limpa em `res.on('end')`, e esse evento nao
+         * chega quando o motivo da falha foi a PAUSA — o `req.abort()` corta a
+         * resposta. Com o interval de 2s vivo e o corpo devolvendo em
+         * `if (entry.paused) return`, ele passava o resto da sessao executando
+         * um no-op a cada 2s, um por download pausado.
+         */
+        clearStall()
         if (entry.paused) {
           resolve('paused')
           return
         }
-        clearStall()
         try {
           file.destroy?.()
         } catch {
@@ -744,11 +753,13 @@ async function startTransfer(id, startAt = 0) {
       })
 
       file.on('finish', () => {
+        // Mesmo motivo do `fail()`: o `res.on('end')` nao dispara quando a
+        // pausa abortou a resposta, entao o timer sobrevive ao download.
+        clearStall()
         if (entry.paused) {
           resolve('paused')
           return
         }
-        clearStall()
         emit('completed')
         entry.running = false
         active.delete(id)
@@ -813,6 +824,45 @@ async function startTransfer(id, startAt = 0) {
 }
 
 function registerDownloadsIpc() {
+  /*
+   * Este arquivo nao registrava NENHUM hook de saida (grep confirmado: zero
+   * `app.on`/`process.on`), e o `main.cjs` so chama
+   * `playerHost.shutdownSync()` no encerramento.
+   *
+   * Consequencia: se o app fechasse durante um dump HLS, o `mpv.exe` que o
+   * `runMpvDump` tinha spariado continuava rodando depois do `app.exit(0)`,
+   * baixando episodio sozinho, com o log ja fechado e o pai morto. No Windows
+   * ele nao morre junto: `spawn` nao cria job object.
+   *
+   * `before-quit` e o gancho que ainda roda com o event loop vivo.
+   * `process.on('exit')` e a rede de seguranca para o `app.exit(0)`, que pula o
+   * `before-quit` — la so da para trabalho sincrono, e `kill()` e sincrono. O
+   * `taskkill` do `killProc` e async, entao fica so no `before-quit`.
+   */
+  app.on('before-quit', () => {
+    for (const entry of active.values()) {
+      const proc = entry?.proc
+      if (!proc || proc.killed) continue
+      try {
+        proc.kill('SIGTERM')
+      } catch {
+        // ignore
+      }
+    }
+  })
+
+  process.on('exit', () => {
+    for (const entry of active.values()) {
+      const proc = entry?.proc
+      if (!proc || proc.killed) continue
+      try {
+        proc.kill()
+      } catch {
+        // ignore
+      }
+    }
+  })
+
   ipcMain.handle('downloads:get-folder', () => ({ ok: true, path: getDownloadFolder() }))
 
   ipcMain.handle('downloads:pick-folder', async () => {

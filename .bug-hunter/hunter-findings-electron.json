@@ -1,0 +1,174 @@
+{
+  "agent": "hunter",
+  "scope": "electron/main.cjs, electron/downloads.cjs, electron/updater.cjs, electron/preload.cjs, electron/stream-proxy.cjs, electron/stur-ffmpeg-proxy.cjs, electron/find-player.cjs, electron/log-writer.cjs, electron/latin1-headers.cjs, electron/harden-web-contents.cjs, electron/players/stur-player.cjs, electron/players/player-host.cjs",
+  "outOfScope": [
+    "electron/players/live-*.cjs, playback-profile.cjs, live-buffer-limits.cjs, live-load-policy.cjs (auditados na sessao anterior)"
+  ],
+  "findings": [
+    {
+      "id": "HE-1",
+      "file": "electron/updater.cjs",
+      "line": 459,
+      "title": "`instalando` fica true para sempre quando o electron-updater nao instala: botao \"Reiniciar agora\" morre e o `before-quit` do main para de derrubar mpv / flushar log",
+      "trigger": "Renderer clica em instalar (src/lib/use-updater.ts:204 -> ipc `updater:install`) enquanto `updater-state.json` diz que ha instalador pronto mas `%LOCALAPPDATA%\\stplay-updater\\pending` esta vazio (limpeza de disco / antivirus / `limparPendenciaVelha`->`clearCachedDownload()`). Em electron-updater 6.8.9, `BaseUpdater.install()` (node_modules/electron-updater/out/BaseUpdater.js:42-68) retorna `false` e so chama `dispatchError` quando `installerPath == null`; `quitAndInstall` (linha 13-27) nao lanca nada nesse caminho. Logo o `catch` de `instalar()` nunca roda e `instalando = false` (linha 527) nunca e alcancado.",
+      "impact": "A partir dai: (1) todo `instalar()` seguinte devolve `{ok:true, alreadyRunning:true}`, e use-updater.ts:205 so trata `!r.ok` — o cartaz fica em `phase:'installing'` sem erro e sem auto-fecho, para sempre; (2) `isInstalando()` devolve true, e main.cjs:686 faz `before-quit` retornar cedo: `playerHost.shutdownSync()` (linha 695) e `logWriter.closeAll()` (linha 703) deixam de rodar em TODOS os fechamentos restantes da sessao — mpv.exe fica orfao e ate 400 ms de log se perdem a cada saida; (3) use-updater.ts:95 (`s.installing === false`) deixa de acender o cartaz 'ready' no resto da sessao.",
+      "severity": "high",
+      "category": "bug",
+      "evidence": "electron/updater.cjs:456-529\n  function instalar() {\n    const up = carregarAutoUpdater()\n    if (!up) return { ok: false, message: 'Updater indisponivel neste build.' }\n    if (instalando) return { ok: true, alreadyRunning: true }\n    try {\n      instalando = true\n      ...\n      setImmediate(() => up.quitAndInstall(true, true))\n      return { ok: true }\n    } catch (error) {\n      instalando = false\n      return { ok: false, message: ... }\n    }\n  }\nnode_modules/electron-updater/out/BaseUpdater.js:50-53\n    if (installerPath == null || downloadedFileInfo == null) {\n      this.dispatchError(new Error(\"No update filepath provided, can't quit and install\"));\n      return false;\n    }",
+      "confidence": "high"
+    },
+    {
+      "id": "HE-2",
+      "file": "electron/downloads.cjs",
+      "line": 748,
+      "title": "O intervalo de stall de 2s nunca e limpo no caminho de pausa/cancelamento: um timer vazado por download pausado ou cancelado, e a promise `done` pode nao resolver nunca",
+      "trigger": "Usuario comeca um download e clica Pausar (ou Cancelar) com a transferencia em andamento. `downloads:pause` (linha 933) faz `entry.paused = true` e `entry.file.end()`; o handler `file.on('finish')` entra no ramo `if (entry.paused) { resolve('paused'); return }` e sai SEM `clearStall()`. O `stallTimer` (linha 688) continua vivo; ele so se auto-limpa em `res.on('end')` (linha 741), que nao dispara porque `req.abort()`/`req.destroy()` cortam a resposta sem 'end' limpo. No cancelamento o ramo e ainda pior: `entry.file.destroy()` nao emite 'finish', e se a resposta nao emitir 'error' a promise `done` nunca resolve e `startTransfer` fica pendurado para sempre segurando res/file/req.",
+      "impact": "Vazamento de recurso acumulativo: cada pausa/cancelamento deixa um `setInterval` de 2000 ms rodando ate o fim do processo (2 wakeups/s por download parado), com a closure segurando o response stream e o write stream. Apos um resume, o timer antigo deixa de dar early-return (`entry.paused === false`) e no proximo tique aborta o `req` e destroi o `file` da transferencia ANTERIOR — resolve() em promise ja resolvida, entao o dano fica nos objetos. Multiplos ciclos pausa/retomar acumulam N timers ativos ao mesmo tempo. Alem disso, no caminho em que `done` nunca resolve, a `startTransfer` pendurada nunca chega a `pumpQueue()`, e um slot de MAX_CONCURRENT fica ocupado para sempre — a fila de downloads trava.",
+      "severity": "high",
+      "category": "bug",
+      "evidence": "electron/downloads.cjs:746-757\n      file.on('finish', () => {\n        if (entry.paused) {\n          resolve('paused')\n          return\n        }\n        clearStall()\n        ...\n      })\nelectron/downloads.cjs:674-703\n      const fail = (message) => {\n        if (entry.paused) {\n          resolve('paused')\n          return\n        }\n        clearStall()\n        ...\n      }\n      stallTimer = setInterval(() => {\n        if (entry.paused) return\n        ...\n      }, 2000)\nelectron/downloads.cjs:741-744\n      res.on('end', () => {\n        clearStall()\n        file.end()\n      })",
+      "confidence": "high"
+    },
+    {
+      "id": "HE-3",
+      "file": "electron/downloads.cjs",
+      "line": 405,
+      "title": "Nenhum shutdown de downloads: o mpv.exe de `runMpvDump` fica orfao quando o app fecha",
+      "trigger": "Baixar um episodio (`/series/` cai em `runMpvDump`, linha 566-569) e fechar o app antes de terminar. `main.cjs:674-708` (`before-quit`) chama apenas `playerHost.shutdownSync()` — que so conhece os motores de player — e depois `app.exit(0)`. `downloads.cjs` nao registra `app.on('before-quit')`, `will-quit` nem `process.on('exit')` (verificado por grep no arquivo inteiro), e `module.exports` (linha 1032) nao exporta nada de teardown. No Windows, `app.exit(0)` nao mata processos filhos: o `spawn(mpv, args, {stdio:['ignore','ignore','pipe']})` da linha 405 (sem `detached`, sem job object) continua vivo.",
+      "impact": "mpv.exe orfao continua baixando o episodio para dentro do arquivo depois do app fechar, segurando a conexao com o CDN do painel e a conta do usuario, sem nenhuma janela visivel nem forma de o usuario saber. So morre quando a transferencia acaba ou a maquina reinicia. Isso tambem vale para qualquer entrada em `active` que ainda esteja com `entry.proc` quando o app e fechado.",
+      "severity": "medium",
+      "category": "bug",
+      "evidence": "electron/downloads.cjs:403-415\n    let proc\n    try {\n      proc = spawn(mpv, args, {\n        cwd: path.dirname(mpv),\n        windowsHide: true,\n        stdio: ['ignore', 'ignore', 'pipe'],\n      })\n    } catch (error) { finish('unavailable'); return }\n    entry.proc = proc\nelectron/main.cjs:690-707\n    if (quitting) return\n    event.preventDefault()\n    quitting = true\n    try { playerHost.shutdownSync() } catch {}\n    try { logWriter.closeAll() } catch {}\n    app.exit(0)\nelectron/downloads.cjs:1032\n  module.exports = { registerDownloadsIpc, getDownloadFolder }",
+      "confidence": "high"
+    },
+    {
+      "id": "HE-4",
+      "file": "electron/stream-proxy.cjs",
+      "line": 141,
+      "title": "`res.once('drain')` nunca dispara se o cliente abortar durante backpressure: o handler async fica pendurado para sempre, retendo o reader do upstream",
+      "trigger": "Cliente desconecta (`res` destruido) no instante em que o pipe esta sob backpressure — o caso comum de trocar de canal rapido: `res.write()` devolve `false` (linha 140) e o `await new Promise((r) => res.once('drain', r))` (linha 141) fica esperando. Em Node, um Writable destruido nunca emite 'drain'; o unico handler registrado (`abort`, linha 133-134) so cancela o `reader`, nao o await.",
+      "impact": "O laco `for(;;)` de `pipeUpstream` nunca volta a rodar: o handler HTTP fica com uma promise pendurada para sempre, segurando o reader do `net.fetch` (conexao com o painel), o `PassThrough` de dados e as referencias de `req`/`res`. Cada desconexao durante backpressure vaza um stream inteiro — com o proxy respondendo ao trafego de live e VOD simultaneamente,}zapas rapidos acumulam vazamento de memoria e de sockets no processo principal ate o fim da sessao.",
+      "severity": "medium",
+      "category": "bug",
+      "evidence": "electron/stream-proxy.cjs:125-142\n  const reader = upstream.body.getReader()\n  const abort = () => { try { void reader.cancel() } catch {} }\n  req.on('close', abort)\n  res.on('close', abort)\n\n  for (;;) {\n    const { done, value } = await reader.read()\n    if (done) break\n    if (!value) continue\n    const ok = res.write(Buffer.from(value))\n    if (!ok) await new Promise((r) => res.once('drain', r))\n  }",
+      "confidence": "high"
+    },
+    {
+      "id": "HE-5",
+      "file": "electron/players/stur-player.cjs",
+      "line": 4429,
+      "title": "`mpvProc` nao tem listener de 'error': falha assincrona de spawn vira uncaughtException engolida e o motivo real nunca chega ao `failSpawn`",
+      "trigger": "`spawn(mpvPath, args, ...)` (linha 4429) com caminho que existe no momento do `findSturMpv()` mas falha na hora de criar o processo — mpv.exe removido/quarentenado pelo antivirus, EACCES, arquivo truncado, `IPC`/exec bloqueado. Node nao lanca em `spawn()` nesse caso: emite 'error' de forma assincrona no ChildProcess. O unico listener registrado no processo e `mpvProc.on('exit', ...)` (linha 4464) — nenhum 'error'.",
+      "impact": "O 'error' de um EventEmitter sem listener e lançado no processo principal e cai no handler global de main.cjs:25, que so registra e engole. O `spawnMpvCore` segue aguardando `Promise.all([connectIpc(), adoptMpv(pid, parent)])` — 50x200 ms + 100x100 ms ≈ 20 s — e so entao devolve `failSpawn('ipc or adopt failed')` (linha 4475). O usuario ve 'Falha ao iniciar STUR (mpv)' depois de ~20 segundos de spinner, e o diagnostico real (ENOENT/EACCES do binario) nunca chega nem ao log nem a UI — que era exatamente o proposito do stderr do mpv piped na linha 4436.",
+      "severity": "medium",
+      "category": "bug",
+      "evidence": "electron/players/stur-player.cjs:4428-4440\n  try {\n    mpvProc = spawn(mpvPath, args, {\n      cwd: path.dirname(mpvPath),\n      windowsHide: true,\n      stdio: ['ignore', 'ignore', 'pipe'],\n    })\n  } catch (error) {\n    return failSpawn(`spawn threw: ...`)\n  }\nelectron/players/stur-player.cjs:4464 (unico listener do processo)\n  mpvProc.on('exit', () => { ... })\nelectron/main.cjs:25-37 (handler global que engole)\n  process.on('uncaughtException', (error) => { ... plog.warn('main','uncaughtException',...); console.error(...) })",
+      "confidence": "medium"
+    },
+    {
+      "id": "HE-6",
+      "file": "electron/main.cjs",
+      "line": 156,
+      "title": "handleCoverCache grava em cache permanente qualquer resposta 2xx do painel — inclusive pagina HTML de erro — e a escrita nao e at nem serializada por URL",
+      "trigger": "Painel responde 200 com HTML de erro/login (em vez de 404) para a URL de logo/poster de um canal. `handleCoverCache` so rejeita `!response.ok` (linha 146), entao o HTML passa, e `fs.promises.writeFile(file, buffer)` (linha 156) grava em `%APPDATA%\\ST PLAY\\cover-cache\\<sha1>.img`; as respostas sao devolvidas com `'Cache-Control': 'public, max-age=31536000, immutable'` (linhas 114/131/167). O mesmo arquivo pode ser escrito por duas requisicoes concorrentes do MESMO url: `acquireCoverFetch` (linha 56-65) limita a 8 o total, nao serializa por URL, e o `existsSync` de guarda (linha 125) e seguido de `await`.",
+      "impact": "Um erro transitorio do painel vira poster quebrado PERMANENTE: o HTML fica cacheado por 1 ano com `immutable`, entao nem um recarregar da pagina, nem `covers:clear` por engano, nem a volta da rede conserta aquele canal — o usuario ve imagem quebrada para sempre. Na corrida de escrita, `fs.promises.writeFile` (aberta com 'w', trunca) pode truncar o arquivo enquanto outro `readFile` (linha 109/126) o le: o cover e servido pela metade, tambem cacheado como imutavel.",
+      "severity": "medium",
+      "category": "bug",
+      "evidence": "electron/main.cjs:146-169\n    if (!response.ok) { ... }\n    const buffer = Buffer.from(await response.arrayBuffer())\n    try {\n      fs.mkdirSync(coverCacheDir, { recursive: true })\n      await fs.promises.writeFile(file, buffer)\n    } catch { }\n    const contentType = sanitizeHeaderValue(rawType.split(';')[0].trim()) || guessMime(file)\n    return new Response(buffer, { status: 200, headers: {\n      'Content-Type': contentType,\n      'Cache-Control': 'public, max-age=31536000, immutable' } })\nelectron/main.cjs:56-65 (limita total, nao por url)\n  function acquireCoverFetch() { ... if (coverFetchesActive < COVER_FETCH_MAX) { ... } coverFetchWait.push(resolve) }",
+      "confidence": "high"
+    },
+    {
+      "id": "HE-7",
+      "file": "electron/players/player-host.cjs",
+      "line": 639,
+      "title": "10 handlers IPC registrados que nenhum renderer consegue invocar (morta depois do cruzamento com src/)",
+      "trigger": "Qualquer chamada da UI a esses caminhos. Cruzei cada `ipcMain.handle/on` com `src/**` (recursivo) e com o preload: nao existe nenhum `invoke`/`send`/`sendSync` do renderer para nenhum deles. Detalhe por canal: `player:open` (player-host.cjs:631, exposto no preload mas `player?.open` = 0 hits em src), `player:hide-sync` (:573, `player?.hideSync` = 0), `player:restore-shell` (:576, `player?.restoreShell` = 0), `overlay:sync-bounds` (:647, `player?.syncOverlay` = 0), `overlay:show` (:639), `overlay:hide` (:645), `overlay:ui-key` (:782) — estes tres nem estao no preload, entao sao inalcancaveis por construcao —, `native-player:detect` (:809, o `nativePlayer.detect` do preload aponta para `player:detect`), `native-player:stop` (:811, o `nativePlayer.stop` do preload aponta para `player:stop`), `native-player:focus` (:818, `nativePlayer?.focus` = 0) e `native-player:open` (electron/main.cjs:199, `nativePlayer?.open` = 0).",
+      "impact": "Codigo morto que finge estar vivo: `overlay:ui-key` tem um bloco inteiro de comentario/log sobre 'F11 vindo do overlay' que nunca executa (o overlay manda tecla por `overlay:ui`), e `native-player:open` faz `stopAll()` + `startEngine()` sem passar pelo `runHostOp` — se alguem religar a ponte, o start nao passa pela serializacao de stop/start que protege o resto. Custo: ~90 linhas de handler + log de diagnostico que ninguem nunca produz, e uma armadilha para quem for mudar o caminho do F11 ou do fullscreen achando que o `overlay:ui-key` e o dono.",
+      "severity": "medium",
+      "category": "dead-code",
+      "evidence": "electron/players/player-host.cjs:573-578, 631, 639-650, 782-807, 809-822\n  ipcMain.on('player:hide-sync', () => { hideSurfacesFast() })\n  ipcMain.on('player:restore-shell', () => { hideSurfaces() })\n  ipcMain.handle('player:open', async (_event, payload) => openFile(payload))\n  ipcMain.handle('overlay:show', async (_event, rect, meta) => { ... })\n  ipcMain.handle('overlay:hide', async () => overlay.hide())\n  ipcMain.handle('overlay:sync-bounds', async (_event, rect) => { ... })\n  ipcMain.handle('overlay:ui-key', (_event, payload) => { ... })\n  ipcMain.handle('native-player:detect', () => detect())\n  ipcMain.handle('native-player:stop', async () => stopAll())\n  ipcMain.handle('native-player:focus', () => { ... })\nelectron/main.cjs:199\n  ipcMain.handle('native-player:open', async (_event, url, startTime, preferred) => { ... })",
+      "confidence": "high"
+    },
+    {
+      "id": "HE-8",
+      "file": "electron/main.cjs",
+      "line": 402,
+      "title": "handleProxy grava a URL completa do painel (com username e password) no player.log em texto claro",
+      "trigger": "O proxy de stream (`stream-proxy.cjs`) e quem atende o trafego normal; `handleProxy` so e acionado pelo caminho de fallback: quando `proxyBaseUrl()` devolve '' no boot (o `ensureStreamProxy()` de main.cjs:664 caiu no `.catch` da linha 668), o preload expoe `proxyBase = 'sturplay://proxy'` e src/lib/proxy.ts:14-24 (`buildProxied`/`viaProxy`) manda TODA chamada de API — incluindo `player_api.php?username=...&password=...` — para `sturplay://proxy?url=...`, que cai em `handleProxy`. Ali `shortUrl = dest.href.slice(0, 160)` (linha 392) e `plog.info('net', 'proxy upstream ok', { url: shortUrl, ... })` grava a URL inteira.",
+      "impact": "Credencial do painel em texto claro em `%APPDATA%\\ST PLAY\\player.log`, arquivo de texto plano que o usuario manda para suporte/forum em caso de bug. Uma URL Xtream tipica (`http://panel/player_api.php?username=joao&password=secreto`) cabe inteira nos 160 chars, e a linha e reescrita a cada chamada de API e a cada refresh de catalogo. Alem disso o arquivo so rotaciona uma vez por processo (log-writer.cjs:57-69), entao as credenciais ficam ali ate o proximo boot com o arquivo acima de 2 MB.",
+      "severity": "medium",
+      "category": "security",
+      "evidence": "electron/main.cjs:391-408\n  const t0 = Date.now()\n  const shortUrl = dest.href.slice(0, 160)\n  try {\n    const upstream = await net.fetch(dest.href, { ... })\n    plog.info('net', 'proxy upstream ok', {\n      url: shortUrl,\n      status: upstream.status,\n      contentLength: len ? Number(len) : null,\n      contentType: upstream.headers.get('content-type'),\n      ms: Date.now() - t0,\n    })\nelectron/main.cjs:662-670 (fallback que cria o caminho)\n    protocol.handle('sturplay', handleSturplay)\n    void ensureStreamProxy().then(() => createWindow()).catch(() => createWindow())\nelectron/preload.cjs:3-11\n    const base = ipcRenderer.sendSync('sturplay:get-proxy-base')\n    if (typeof base === 'string' && base.startsWith('http://127.0.0.1:')) return base\n    return 'sturplay://proxy'",
+      "confidence": "medium"
+    },
+    {
+      "id": "HE-9",
+      "file": "electron/main.cjs",
+      "line": 581,
+      "title": "Listener `render-process-gone` registrado duas vezes com corpo identico: toda queda do renderer loga a mesma linha em dobro",
+      "trigger": "Qualquer queda do processo de render (crash de JS, OOM, GPU reset) na janela principal. `createWindow` registra o mesmo handler em main.cjs:581-583 e de novo em main.cjs:607-609, com o corpo byte-a-byte igual (`plog.warn('app','render-process-gone',{reason, exitCode})`).",
+      "impact": "Cada evento de renderer morto gera 2 linhas identicas no player.log e 2 escritas no console. Quem diagnostica 'o app travou' por log ve o evento duplicado e perde tempo procurando duas causas distintas onde houve uma. Duas linhas extras por queda nao custam performance, mas o mesmo padrao aplicado a um listener caro (ou que registra shortcut/IPC) seria bug de verdade — aqui e' ruido de log.",
+      "severity": "low",
+      "category": "dead-code",
+      "evidence": "electron/main.cjs:581-583\n  win.webContents.on('render-process-gone', (_e, details) =>\n    plog.warn('app', 'render-process-gone', { reason: details?.reason, exitCode: details?.exitCode }),\n  )\nelectron/main.cjs:607-609\n  win.webContents.on('render-process-gone', (_e, details) => {\n    plog.warn('app', 'render-process-gone', { reason: details?.reason, exitCode: details?.exitCode })\n  })",
+      "confidence": "high"
+    },
+    {
+      "id": "HE-10",
+      "file": "electron/log-writer.cjs",
+      "line": 142,
+      "title": "Exports e metodos da ponte sem nenhum consumidor: `logWriter.flush`, `ffmpegProxy.ensureStarted/isAvailable`, `updaterHost.instalar`, `preload.openDownloadsFolder`, `nativePlayer.embed`",
+      "trigger": "Uso de qualquer um desses nomes. Verificado por grep em electron/, src/ (recursivo) e scripts/: `logWriter.flush` so aparece na propria linha de export; `ffmpegProxy.ensureStarted` e `ffmpegProxy.isAvailable` so no export (o caminho real passa por `ffmpegProxy.wrapUrl`, main.cjs:234, e o teardown por `sturProxy.stop()`, player-host.cjs:304/1336); `updaterHost.instalar` e `updaterHost.checar` como export — `checar` e usado em main.cjs:504 mas `instalar` nao (so o handler IPC updater.cjs:580 chama `instalar()`); `preload.openDownloadsFolder` (preload.cjs:86) nao e chamado em src/ (so existe a declaracao de tipo em src/global.d.ts:191) e duplica `downloads.openFolder`; `nativePlayer.embed` esta declarado em src/global.d.ts mas nao existe no preload — qualquer chamada seria no-op silencioso por optional chaining.",
+      "impact": "Superficie morta que sugere capacidades que nao existem: `nativePlayer.embed` em especial — um `window.sturplay?.nativePlayer?.embed?.(url)` no renderer passaria a `undefined` e o caller acharia que rodou. `flush` sem consumer significa que o unico caminho de descarga e o timer de 400 ms e o `closeAll` de `before-quit`.",
+      "severity": "low",
+      "category": "dead-code",
+      "evidence": "electron/log-writer.cjs:142\n  module.exports = { append, flush, closeAll }\nelectron/stur-ffmpeg-proxy.cjs:513-520\n  module.exports = { ensureStarted, wrapUrl, stop, isAvailable, encodeTarget, closeFfmpegForUrl }\nelectron/updater.cjs:588-594\n  module.exports = { registerUpdaterIpc, setJanelaPrincipal, isInstalando, checar, instalar }\nelectron/preload.cjs:86\n    openDownloadsFolder: (folder) => ipcRenderer.invoke('downloads:open-folder', folder),\nsrc/global.d.ts:186-188\n        embed?: (url: string, startTime?: number) => Promise<{ ok: boolean; error?: string }>",
+      "confidence": "high"
+    },
+    {
+      "id": "HE-11",
+      "file": "electron/stur-ffmpeg-proxy.cjs",
+      "line": 389,
+      "title": "Listener `res.on('close', ...)` com corpo vazio em startFfmpegStream: codigo morto que sugere um cleanup que nao existe",
+      "trigger": "Todo request a `/f/<base64>` dispara `startFfmpegStream`, que registra um listener de `close` que nao faz nada (so um comentario). O cleanup real esta em `attachRes` (linha 232-256, o `onClose`), que ja foi registrado antes.",
+      "impact": "Sem efeito em runtime. O risco e de leitura: quem for depurar 'por que o ffmpeg continua vivo depois que o cliente fecha' le esse bloco, ve um `res.on('close', ...)` e conclui que o cleanup existe ali. Pior, o comentario ('aqui so garante fim do pipe se proc morreu') descreve um comportamento que o corpo vazio nao implementa — e o `onProcEnd`/`sluit` de verdade so roda por `ffmpeg.on('error'|'close')`.",
+      "severity": "low",
+      "category": "dead-code",
+      "evidence": "electron/stur-ffmpeg-proxy.cjs:385-392\n  const onClose = () => {\n    onProcEnd()\n    sluit()\n  }\n  res.on('close', () => {\n    // attachRes ja trata o desanexo; aqui so garante fim do pipe se proc morreu\n  })\n  ffmpeg.on('error', onClose)",
+      "confidence": "high"
+    }
+  ],
+  "coverage": {
+    "filesScanned": [
+      "electron/main.cjs",
+      "electron/downloads.cjs",
+      "electron/updater.cjs",
+      "electron/preload.cjs",
+      "electron/stream-proxy.cjs",
+      "electron/stur-ffmpeg-proxy.cjs",
+      "electron/find-player.cjs",
+      "electron/log-writer.cjs",
+      "electron/latin1-headers.cjs",
+      "electron/harden-web-contents.cjs",
+      "electron/players/player-host.cjs",
+      "electron/players/stur-player.cjs"
+    ],
+    "partialScan": [
+      "electron/players/stur-player.cjs — lido por inteiro na estrutura (grep de 200+ simbolos) e em profundidade nas regioes de spawn/adocao HWND (2085-2260), kill/ensure (2440-2719), loadState, spawnMpvCore/start/stop/exports (4380-5120). As regioes de live-edge/underrun/governor NAO foram auditadas por serem areas ja cobertas pela sessao anterior (live-*.cjs/playback-profile)."
+    ],
+    "filesSkipped": [
+      "electron/players/live-*.cjs, playback-profile.cjs, live-buffer-limits.cjs, live-load-policy.cjs (escopo do agente anterior)"
+    ],
+    "crossRefOnly": [
+      "src/** (recursivo) — usado so para confirmar consumidor de IPC/bridge, nunca reportado",
+      "electron/players/overlay-window.cjs, hwnd-helper.cjs, mpv-kill.cjs, player-log.cjs, ipc-write.cjs — citados como evidencia, sem achados proprios (fora do escopo atribuido)"
+    ],
+    "checksPerformed": [
+      "grep de todos os ipcMain.handle/on vs. src/ (recursivo): nenhum invoke do renderer sem handler (0 crashes de IPC); 10 handlers sem invocador",
+      "todos os metodos de preload.cjs vs. src/: openDownloadsFolder, player.open, player.hideSync, player.restoreShell, player.syncOverlay, nativePlayer.open, nativePlayer.focus sem consumidor",
+      "path traversal no nome de download: sanitizeName (downloads.cjs:176-184) remove / e \\\\ e uniquePath nao concatena entrada do renderer — sem traversal",
+      "exec/spawn com argumento do renderer: unico spawn com dado externo e app:open-external (main.cjs:319), com exe vindo do registro do Windows, argv unico e URL forcada https: — sem injecao",
+      "retry sem limite: followDownload limitado a 8 redirects e followDownloadWithRetry a 2 tentativas — sem retry infinito"
+    ]
+  }
+}

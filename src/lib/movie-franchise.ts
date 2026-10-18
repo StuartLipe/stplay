@@ -119,9 +119,11 @@ export function filmesDaMesmaFranquia(
   catalogo.forEach((c, i) => ordem.set(c.id, i))
 
   return relacionados.sort((a, b) => {
-    const aa = a.releasedate || ''
-    const bb = b.releasedate || ''
-    if (aa !== bb) return aa.localeCompare(bb)
+    const da = a.releasedate ? new Date(a.releasedate).getTime() : NaN
+    const db = b.releasedate ? new Date(b.releasedate).getTime() : NaN
+    if (!isNaN(da) && !isNaN(db)) return da - db
+    if (!isNaN(da)) return -1
+    if (!isNaN(db)) return 1
     return (ordem.get(a.id) ?? 0) - (ordem.get(b.id) ?? 0)
   })
 }

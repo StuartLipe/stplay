@@ -104,11 +104,17 @@ describe('perfil de playback: tabela por modo', () => {
     assert.equal(pick(profileFor(false, false), 'cache-pause-initial'), false)
   })
 
-  test('readahead acompanha cache-secs (cache-secs manda, o manual avisa)', () => {
+  test('readahead e cache-secs sao valores independentes (readahead cobre segmento, cache-secs e limiar de pausa)', () => {
     const pick = (p, k) => p.find(([key]) => key === k)[1]
     assert.equal(
       pick(profileFor(true, false), 'demuxer-readahead-secs'),
+      LIVE_READAHEAD_SECS,
+      'readahead deve ser LIVE_READAHEAD_SECS (cobre segmento de 10-11s)'
+    )
+    assert.equal(
       pick(profileFor(true, false), 'cache-secs'),
+      LIVE_CACHE_SECS,
+      'cache-secs deve ser LIVE_CACHE_SECS (limiar de pausa do mpv)'
     )
   })
 

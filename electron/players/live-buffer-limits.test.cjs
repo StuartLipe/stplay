@@ -43,7 +43,7 @@ test('sem env, o padrao e 4MiB — o valor que o dono testou', () => {
    * rodar e dizer que o gaguejo continuou ausente.
    */
   assert.equal(liveMaxBytes({}), LIVE_MAX_BYTES_PADRAO)
-  assert.equal(liveMaxBytes({}), 4 * MiB)
+  assert.equal(liveMaxBytes({}), 16 * MiB)
 })
 
 test('o padrao nao volta sozinho para 96MiB', () => {
@@ -91,11 +91,60 @@ test('descreverLiveBuffer diz se veio do padrao ou do portao', () => {
   assert.equal(override.fonte, 'portao STPLAY_LIVE_MAX_BYTES')
 })
 
+/*
+ * O QUE ESTE TESTE PEGA.
+ *
+ * O teto em BYTES escala com o bitrate; o `demuxer-readahead-secs` nao. Sao
+ * dimensoes diferentes do mesmo buffer, e uma delas so faz sentido junto com a
+ * outra. O sweep que fixou 4 MiB rodou num painel de ~240 kbps, onde 4 MiB davam
+ * 139 s de runway. Medido no painel do dono em 16/out, a MESMA classe de canal
+ * entrega 1920x1080 a ~4000 kbps — onde 4 MiB dabem 8,4 s.
+ *
+ * E o segmento do painel dura 10-11 s. O teto, portanto, nao cabia UM
+ * segmento: o demuxer encostava na borda em cada publicacao.
+ *
+ * Pior, e silencioso: o governador de underrun sobe `demuxer-readahead-secs` de 8
+ * para 16 s quando a folga seca, e a 4 Mbps esse reparo e NEUTRALIZADO pelo teto —
+ * 16 s de readahead pediriam 8 MB, e so havia 4. O Climbing funcionava, o teto
+ * cortava de volta, e nada no log dizia que os dois estavam brigando.
+ *
+ * Nenhum teste anterior comparava o teto com o bitrate. Todos conferiam o numero
+ * contra outro numero. Esta e a guarda que faltava.
+ */
+const SEGMENTO_S = 11
+const BITRATE_KBPS_MAIS_ALTO_MEDIDO = 4000
+const READAHEAD_ALTO_S = 16
+
+test('o teto em bytes cabe dois segmentos no bitrate mais alto ja medido', () => {
+  const teto = liveMaxBytes({})
+  const runwayS = ((teto * 8) / 1000) / BITRATE_KBPS_MAIS_ALTO_MEDIDO
+
+  assert.ok(
+    runwayS >= SEGMENTO_S * 2,
+    `teto de ${formatBytes(teto)} segura ${runwayS.toFixed(1)}s a ` +
+      `${BITRATE_KBPS_MAIS_ALTO_MEDIDO} kbps — menos de dois segmentos de ` +
+      `${SEGMENTO_S}s. O demuxer volta a encostar na borda a cada publicacao.`
+  )
+})
+
+test('o teto em bytes nao anula o readahead que o governador sobe', () => {
+  // Este e o teste que teria pegado o achado. O governador sobe o readahead para
+  // 16 s ao ver a folga secar; se o teto em bytes nao der conta desse readahead,
+  // o reparo acontece e nao tem efeito nenhum.
+  const teto = liveMaxBytes({})
+  const runwayS = ((teto * 8) / 1000) / BITRATE_KBPS_MAIS_ALTO_MEDIDO
+
+  assert.ok(
+    runwayS >= READAHEAD_ALTO_S,
+    `o teto permite ${runwayS.toFixed(1)}s, e o governador quer ` +
+      `${READAHEAD_ALTO_S}s de readahead: o reparo seria silenciosamente cortado.`
+  )
+})
 test('formatBytes volta exportado, e e o que o log do boot escreve', () => {
   // Divisao exata em MiB vira `4MiB` (sem decimal). O log do boot mostra
   // `teto de buffer do LIVE { maxBytes: 4194304 }` com o numero cru ao lado, e
   // e esse par que o dono le para conferir o teto sem abrir codigo.
-  assert.equal(formatBytes(LIVE_MAX_BYTES_PADRAO), '4MiB')
+  assert.equal(formatBytes(LIVE_MAX_BYTES_PADRAO), '16MiB')
   assert.equal(formatBytes(1 * MiB), '1MiB')
   assert.equal(formatBytes(96 * MiB), '96MiB')
   // Valor que nao fecha em MiB sai cru, e nao inventando unidade.

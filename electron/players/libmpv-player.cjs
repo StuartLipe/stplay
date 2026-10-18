@@ -9,6 +9,7 @@ const log = require('./player-log.cjs')
 const overlay = require('./overlay-window.cjs')
 const hwndHelper = require('./hwnd-helper.cjs')
 const { isPlayableUrl } = require('./play-url.cjs')
+const { volumePerceptual100 } = require('./volume-curve.cjs')
 
 const MPV_FORMAT_FLAG = 3
 const MPV_FORMAT_INT64 = 4
@@ -635,7 +636,7 @@ function command(op, value) {
     else if (op === 'seek' && typeof value === 'number') mpv.commandString(ctx, `seek ${value} absolute`)
     else if (op === 'skip' && typeof value === 'number') mpv.commandString(ctx, `seek ${value} relative`)
     else if (op === 'volume' && typeof value === 'number') {
-      mpv.setPropertyString(ctx, 'volume', String(Math.round(Math.max(0, Math.min(100, value * 100)))))
+      mpv.setPropertyString(ctx, 'volume', String(volumePerceptual100(value)))
     } else if (op === 'reload') {
       if (!playUrl) return { ok: false }
       const safe = playUrl.replace(/"/g, '\\"')

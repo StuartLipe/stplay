@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "role": "hunter",
+  "runId": "scan-2026-10-16-live-buffer",
+  "target": "electron/players",
+  "hypothesis": "Frozen/stalling live playback on panel gmaster1.shop (639563670/334918348)",
+  "filesScanned": [
+    "electron/players/stur-player.cjs",
+    "electron/players/live-buffer-limits.cjs",
+    "electron/players/playback-profile.cjs",
+    "electron/players/live-load-policy.cjs",
+    "electron/players/hls-window.cjs",
+    "electron/players/live-underrun-governor.cjs"
+  ],
+  "filesSkipped": ["*.test.cjs (context only)"],
+  "runtimeEvidence": {
+    "sourceDimensions": "1920x1080 DAR=1.7778 H.264 (bare mpv, 3 distinct channel URLs, no app profile, no VO)",
+    "measuredThroughput": "~4000 kbps sustained, cache filling from zero",
+    "appPauseLog": "live pausou por falta de byte { folgaSecs: 0.124, cacheSecs: 49.06, tempoPos: 48.94, colchao: 8 }",
+    "segmentInterval": "TARGETDURATION 10-11s (documented in hls-window.cjs and live-load-policy.cjs)"
+  },
+  "findings": [
+    {
+      "bugId": "BUG-1",
+      "severity": "High",
+      "file": "electron/players/playback-profile.cjs",
+      "line": 83,
+      "claim": "The live demuxer byte ceiling (4 MiB) was calibrated on a panel measured at ~240 kbps, and on a higher-bitrate panel it caps runway below one HLS segment, making the freeze structural rather than tunable.",
+      "evidence": "live-buffer-limits.cjs header records the derivation: '4 MiB = 138,9 s -> bitrate real ~ 30 KB/s ~ 240 kbps'. Live probe on the target panel measured ~4000 kbps sustained at 1920x1080. 4 MiB at 4000 kbps = 8.4 s of runway; the panel publishes a segment every 10-11 s. Runtime log shows folgaSecs 0.124 with colchao: 8.",
+      "runtimeTrigger": "Play any live channel on a panel whose bitrate exceeds ~2.5 Mbps. The demuxer cannot buffer a whole segment, so paused-for-cache fires on each publication boundary.",
+      "crossRefs": [
+        "electron/players/live-buffer-limits.cjs:68 (LIVE_MAX_BYTES_PADRAO = 4 MiB)",
+        "electron/players/stur-player.cjs:4287 (live readahead 8s)",
+        "electron/players/live-load-policy.cjs:129 (TARGETDURATION=10 publication interval)"
+      ],
+      "confidence": 92,
+      "classification": "live-upstream-underrun / miscalibrated-buffer-ceiling"
+    },
+    {
+      "bugId": "BUG-2",
+      "severity": "Medium",
+      "file": "electron/players/playback-profile.cjs",
+      "line": 83,
+      "claim": "demuxer-max-bytes reaches mpv over IPC after loadfile, while the sibling setting cache-pause-initial was deliberately moved to the command line for exactly that reason. The file documents the rule and then violates it.",
+      "evidence": "stur-player.cjs:4296-4299 states 'O perfil chega por IPC DEPOIS do loadfile ... O que vale e o que esta na linha de comando', and cache-pause-initial=yes was moved to argv for that reason. demuxer-max-bytes was left in the profile at line 83. Comment at stur-player.cjs:4272-4284 also names 'tres literais iguais sao tres chances de divergirem em silencio'.",
+      "runtimeTrigger": "Any playback whose correct max-bytes differs from the argv literal. The process runs with the argv value until the profile lands, then switches mid-stream.",
+      "crossRefs": [
+        "electron/players/stur-player.cjs:4286 ('--demuxer-max-bytes=96MiB')",
+        "electron/players/stur-player.cjs:4296-4299 (documented rationale)"
+      ],
+      "confidence": 85,
+      "classification": "configuration-coherence"
+    },
+    {
+      "bugId": "BUG-3",
+      "severity": "Medium",
+      "file": "electron/players/stur-player.cjs",
+      "line": 4286,
+      "claim": "The live process starts with a 96 MiB demuxer ceiling, 24x the intended live value, so the first moments of every playback run under a constraint the project explicitly rejects.",
+      "evidence": "'--demuxer-max-bytes=96MiB' is unconditional in buildMpvArgs. live-buffer-limits.test.cjs:52 asserts LIVE_MAX_BYTES_PADRAO must not equal 96 MiB because 'o padrao antigo produz o gaguejo'.",
+      "runtimeTrigger": "Every live loadfile, before the profile IPC lands.",
+      "crossRefs": ["electron/players/live-buffer-limits.test.cjs:52"],
+      "confidence": 88,
+      "classification": "stale-argv-literal"
+    },
+    {
+      "bugId": "BUG-4",
+      "severity": "Low",
+      "file": "electron/players/hls-window.cjs",
+      "line": 247,
+      "claim": "escreverManifesto reads state.targetDuration, which is never assigned anywhere in the module; the emitted TARGETDURATION is derived only from segment durations.",
+      "evidence": "createWindowState (line 94-117) does not define targetDuration. alinhar (line 152-232) never assigns painel.targetDuration to state. Line 247 reads state.targetDuration || 0, so the panel's declared value is silently discarded.",
+      "runtimeTrigger": "Any panel whose declared TARGETDURATION exceeds the longest EXTINF duration.",
+      "crossRefs": ["electron/players/hls-window.cjs:62-87 (parseManifest returns targetDuration)"],
+      "confidence": 80,
+      "classification": "dead-field / silent-data-loss"
+    },
+    {
+      "bugId": "BUG-5",
+      "severity": "Low",
+      "file": "electron/players/stur-player.cjs",
+      "line": 0,
+      "claim": "The runtime log field mode reports a value ('raw') that is not in loadModeOrder's output, so the log does not identify which load path actually ran.",
+      "evidence": "live-load-policy.cjs:203 returns ['normalize','direct','ffmpeg'] for live. currentLoadMode is only ever assigned 'direct', 'direct-ts', 'http', 'ffmpeg' (lines 2504, 4006, 4017, 4025, 4071, 4082, 4098, 4104, 4111). The log line emits mode: 'raw', a value absent from both sets.",
+      "runtimeTrigger": "Every live playback; the emitted mode field is not comparable to the policy that produced it.",
+      "crossRefs": ["electron/players/live-load-policy.cjs:202-205"],
+      "confidence": 70,
+      "classification": "misleading-instrumentation"
+    }
+  ],
+  "notes": "BUG-1 is the one that matches the reported symptom. BUG-2/BUG-3 are the same configuration-coherence defect seen from two sides. BUG-5 is recorded because instrumentation that misreports state has already cost this project one wrong diagnosis (demuxer-cache-time read as runway)."
+}

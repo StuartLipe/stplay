@@ -81,6 +81,29 @@ const CACHE_SECS_FIXO = 8
  */
 const PAUSAS_PARA_SUBIR = 3
 
+/**
+ * ABAIXO DESTA FOLGA, O RUNWAY SECOU — E UMA PAUSA SO JA PROVA QUE ELE E PEQUENO.
+ *
+ * `PAUSAS_PARA_SUBIR = 3` foi calibrado para uma origem que entrega em rajada:
+ * ai tres pausas em 30 s Provam que o colchao e curto. Numa origem que publica
+ * um segmento de 10 s enquanto o `demuxer-readahead-secs` e 8 — o readahead MENOR
+ * que o proprio segmento, medido neste painel em 16/out — o runway nao e curto
+ * por margem, ele SECA.
+ *
+ * Medido, tres sessoes iguais:
+ *
+ *   load   folga=40,3 s  (o demuxer le a janela HLS inteira antes do playhead)
+ *   +12 s  folga=0,176 s e pausa
+ *
+ * O buffer drena de 40 s para 150 ms em 12 segundos. Nao ha "quase": o colchao
+ * de 8 s nao cabe um segmento de 10 s, entao o demuxer encosta na borda e espera.
+ *
+ * Esperar a segunda e a terceira pausa dava o gaguejo inteiro — do primeiro
+ * underrun ate o degrau novo — sem que nada fosse feito. Uma pausa com folga de
+ * 0,12 s ja e prova: e o proprio degrau atual falhando, nao uma amostra.
+ */
+const FOME_URGENTE_SECS = 1
+
 /** Janela da contagem. */
 const JANELA_MS = 30_000
 
@@ -92,12 +115,12 @@ const JANELA_MS = 30_000
  */
 const ENTRE_MUDANCAS_MS = 15_000
 
-/**
+/**.
  * Decide se o readahead sobe um degrau. Puro: recebe o historico e devolve a
  * resposta, sem tocar em mpv nem no tempo do processo.
  *
  * @param {object} estado
- * @param {number[]} estado.pausas      timestamps (ms) dos underruns
+ * @param {object[]} estado.pausas      historico de underruns: { t: ms, folgaSecs: segundos de reserva na pausa }
  * @param {number}   estado.degrau      indice em DEGRAUS
  * @param {number}   estado.agoraMs
  * @returns {{degrau: number, readaheadSecs: number, cacheSecs: number, subiu: boolean, motivo: string, naJanela: number}}
@@ -105,7 +128,38 @@ const ENTRE_MUDANCAS_MS = 15_000
 function decidir({ pausas = [], degrau = 0, agoraMs = 0 }) {
   const teto = DEGRAUS.length - 1
   const atual = Math.min(Math.max(degrau, 0), teto)
-  const naJanela = pausas.filter((t) => agoraMs - t <= JANELA_MS)
+  const naJanela = pausas.filter((p) => agoraMs - p.t <= JANELA_MS)
+
+  /*
+   * A FOLGA JA COBRE O DEGRAU: subir nao compra nada e ainda acumula.
+   *
+   * Quando a folga (cache-time - time-pos) na instante da pausa e maior
+   * ou igual ao readahead atual, o problema nao e o tamanho do colchao e
+   * sim o demuxer nao estar consumindo. Qualquer degrau a mais e acumulacao
+   * sem correcao.
+   *
+   * Esse guard usa a folga absoluta no instante da pausa porque quando o
+   * demuxer para de consumir, cache-time e time-pos travam juntos e a
+   * folga vira zero mesmo com buffer grande. O carimbo absoluto de cache-time
+   * cresce sem parar e nao serve para comparar com o readahead (que e uma
+   * duracao, nao um carimbo).
+   *
+   * A folga usada e a da pausa mais recente na janela — e o que desencadeou a
+   * decisao de subir ou nao.
+   */
+  const maisRecente = naJanela[naJanela.length - 1]
+  if (maisRecente && maisRecente.folgaSecs >= 0 && maisRecente.folgaSecs >= DEGRAUS[atual]) {
+    return {
+      degrau: atual,
+      readaheadSecs: DEGRAUS[atual],
+      cacheSecs: CACHE_SECS_FIXO,
+      subiu: false,
+      motivo:
+        "folga em " + maisRecente.folgaSecs.toFixed(1) + "s cobre o degrau de " + DEGRAUS[atual] + "s " +
+        "- o runway nao e o gargalo; mais colchao so acumula",
+      naJanela: naJanela.length,
+    }
+  }
 
   if (atual >= teto) {
     return {
@@ -113,18 +167,26 @@ function decidir({ pausas = [], degrau = 0, agoraMs = 0 }) {
       readaheadSecs: DEGRAUS[atual],
       cacheSecs: CACHE_SECS_FIXO,
       subiu: false,
-      motivo: `ja no degrau maximo (${DEGRAUS[atual]}s)`,
+      motivo: "ja no degrau maximo (" + DEGRAUS[atual] + "s)",
       naJanela: naJanela.length,
     }
   }
 
-  if (naJanela.length < PAUSAS_PARA_SUBIR) {
+  // O runway secou? A entao a espera das tres pausas e o que entrega o
+  // gaguejo ao usuario. Ver `FOME_URGENTE_SECS`.
+  //
+  // NEGATIVO E "NAO SEI", e nao "SECOU": quando o dado nao chega, -1 entra
+  // aqui como "desconhecido" e o governador espera as tres pausas normalmente.
+  const semColchao =
+    maisRecente && maisRecente.folgaSecs >= 0 && maisRecente.folgaSecs < FOME_URGENTE_SECS
+
+  if (naJanela.length < PAUSAS_PARA_SUBIR && !semColchao) {
     return {
       degrau: atual,
       readaheadSecs: DEGRAUS[atual],
       cacheSecs: CACHE_SECS_FIXO,
       subiu: false,
-      motivo: `underruns na janela: ${naJanela.length}/${PAUSAS_PARA_SUBIR}`,
+      motivo: "underruns na janela: " + naJanela.length + "/" + PAUSAS_PARA_SUBIR,
       naJanela: naJanela.length,
     }
   }
@@ -135,7 +197,7 @@ function decidir({ pausas = [], degrau = 0, agoraMs = 0 }) {
     readaheadSecs: DEGRAUS[proximo],
     cacheSecs: CACHE_SECS_FIXO,
     subiu: true,
-    motivo: `${naJanela.length} underruns em ${JANELA_MS / 1000}s — origem nao esta alimentando; readahead ${DEGRAUS[atual]}s -> ${DEGRAUS[proximo]}s`,
+    motivo: naJanela.length + " underruns em " + (JANELA_MS / 1000) + "s — origem nao esta alimentando; readahead " + DEGRAUS[atual] + "s -> " + DEGRAUS[proximo] + "s",
     naJanela: naJanela.length,
   }
 }
@@ -148,18 +210,39 @@ function criarGovernador() {
 /**
  * Registra um underrun. `agoraMs` entra explícito para o teste poder avançar o
  * relógio sem `Date.now()` — o histórico de pausas é a única entrada do cálculo.
+ * `folgaSecs` é a reserva (cache-time - time-pos) no instante da pausa.
  */
-function registrarUnderrun(gov, agoraMs) {
-  gov.pausas.push(agoraMs)
+function registrarUnderrun(gov, agoraMs, folgaSecs = -1) {
+  gov.pausas.push({ t: agoraMs, folgaSecs })
   // Janela deslizante: descartar o que ja saiu evita o array crescer a sessao toda.
-  gov.pausas = gov.pausas.filter((t) => agoraMs - t <= JANELA_MS)
+  gov.pausas = gov.pausas.filter((p) => agoraMs - p.t <= JANELA_MS)
   return gov
 }
 
 /**
  * Consulta o governador e, se ele mandar subir, devolve o comando a mandar.
- * Devolve `null` quando nao ha mudanca — que e o caso comum, e nao deve gerar
- * trafego no pipe do mpv.
+ * Devolve `null` quando nao ha mudanca
+ *
+ * `cacheSecs` e o MAIOR runway que o demuxer chegou a ter desde o
+ * `loadfile`. E o que separa as duas causas que produzem a MESMA linha no log:
+ *
+ *   cache era pequeno quando pausou  -> faltava colchao. Subir o readahead e a
+ *                                      resposta certa, e e o que este governador
+ *                                      sempre fez.
+ *   cache ja estava em 80 s e pausou -> o runway NUNCA foi o gargalo. Nenhum
+ *                                      degrau a mais resolve, porque o demuxer
+ *                                      parou de CONSUMIR, nao de ter onde ler.
+ *                                      Encher mais e so acumulacao: o proprio
+ *                                      `stur-player.cjs` registra o pico de
+ *                                      887 s que isso produz, e o atraso que
+ *                                      ele cria so um reload zera.
+ *
+ * Medido no painel do dono (16/out, 524850.m3u8): 5 pausas em 60 s com
+ * `cacheSecs` de 39 s, 48 s, 72 s, 75 s e 80 s. O governador respondeu
+ * "readahead 8s -> 16s" - justo o que nao podia resolver aquela origem.
+ *
+ * Quando o cache ja cobre o degrau atual, o governador NAO sobe e diz por que.
+ * A evidencia continua no log: a linha de pausa ja carrega o `folgaSecs`.
  */
 function proximaAcao(gov, agoraMs) {
   if (agoraMs - gov.ultimaMudancaMs < ENTRE_MUDANCAS_MS) return null

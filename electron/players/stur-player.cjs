@@ -26,7 +26,8 @@ const {
   liveStartIndex,
   networkTimeoutSecs,
 } = require('./live-load-policy.cjs')
-const { profileFor, diffProfile, commitApplied } = require('./playback-profile.cjs')
+const { profileFor, diffProfile, commitApplied, LIVE_READAHEAD_SECS } = require('./playback-profile.cjs')
+const { volumePerceptual100 } = require('./volume-curve.cjs')
 const {
   vodMaxBytes,
   vodReadaheadSecs,
@@ -40,7 +41,11 @@ const {
  * que tinha entrado. O perfil pegava o valor certo porque `playback-profile.cjs`
  * importa do modulo certo; so o log mentia.
  */
-const { descreverLiveBuffer } = require('./live-buffer-limits.cjs')
+const {
+  descreverLiveBuffer,
+  liveMaxBytes,
+  formatBytes,
+} = require('./live-buffer-limits.cjs')
 const {
   LIVE_EDGE_POLL_MS,
   LIVE_MAX_DELAY_PADRAO,
@@ -1848,7 +1853,7 @@ function logLiveEdgeUmaVez() {
  * já tocando, que é onde o gargalho acontece.
  */
 function registrarUnderrunNoGovernador() {
-  registrarUnderrun(underrun, Date.now())
+  registrarUnderrun(underrun, Date.now(), folgaAgora())
 }
 
 function startUnderrunGovernor(gen = loadGeneration) {
@@ -1858,7 +1863,9 @@ function startUnderrunGovernor(gen = loadGeneration) {
       stopUnderrunGovernor()
       return
     }
-    const acao = proximaAcao(underrun, Date.now())
+    const acao = proximaAcao(underrun, Date.now(), lastCacheTime)
+    if (acao) log.warn('stur', 'governador subir', { degrau: acao.degrau, readahead: acao.readaheadSecs, motivo: acao.motivo })
+    else log.warn('stur', 'governador sem-acao', { pausas: underrun.pausas.length, degrau: underrun.degrau })
     if (!acao) return
     void (async () => {
       const r1 = await sendIpc(['set_property', 'demuxer-readahead-secs', acao.readaheadSecs])
@@ -1895,6 +1902,7 @@ function resetUnderrunGovernor() {
   stopUnderrunGovernor()
   underrun = criarGovernador()
   wasPausedForCache = false
+
 }
 
 function stopLiveEdgeKeeper() {
@@ -2849,6 +2857,19 @@ function noteLiveLoadHealth() {
  */
 let lastCacheTime = -1
 let lastCacheTimeAt = 0
+/*
+ * A folga do INSTANTE e o que o governador recebe — nao um maximo acumulado.
+ *
+ * O maximo foi tentado antes e era pior: no `loadfile` o demuxer le a janela
+ * HLS inteira antes de o playhead andar, e nesse instante a folga e real e
+ * grande (medido: 40,3 s com `time-pos` em 0). Guardar o maior valor desde a
+ * carga guardava aquele pico para sempre, e o governador passava a recusar
+ * escalar mesmo com a folga de verdade em 0,2 s — o oposto do reparo.
+ *
+ * A folga do instante ja responde a pergunta que importa: neste exato
+ * instante, havia runway para tras da pausa? Se havia, o gargalo nao e
+ * colchao. Se nao havia, faltava colchao e subir e a resposta.
+ */
 /**
  * Ultimo `time-pos` visto, em qualquer modo.
  *
@@ -2858,12 +2879,29 @@ let lastCacheTimeAt = 0
  */
 let lastTimePosSeen = -1
 
+/**
+ * Quanto ha de reserva AGORA: o carimbo do fim do buffer menos a posicao.
+ * Comparavel a `demuxer-readahead-secs`: e o runway que o motor tem.
+ *
+ * Ambos os valores vem de eventos do mpv, entao a defasagem e de um evento —
+ * milissegundos. O que NAO daria para usar aqui e o `demuxer-cache-time`
+ * sozinho, que e carimbo e nao reserva.
+ */
+function folgaAgora() {
+  if (typeof lastCacheTime !== 'number' || lastCacheTime < 0) return -1
+  if (typeof lastLiveTimePos !== 'number' || lastLiveTimePos < 0) return -1
+  return Math.max(0, lastCacheTime - lastLiveTimePos)
+}
+
 function noteLiveCacheTime(secs) {
   if (!liveMode || typeof secs !== 'number') return
   if (secs !== lastCacheTime) {
     lastCacheTime = secs
     lastCacheTimeAt = Date.now()
   }
+  // O registro do carimbo nao decide nada: quem mede folga e `folgaAgora()`.
+  // Fica aqui so para o log e para o watchdog de silencio, que comparam
+  // carimbo contra carimbo.
 }
 
 /** O demuxer está bloqueado num socket que não entrega nada? */
@@ -3486,7 +3524,12 @@ function handleIpcMessage(msg) {
         if (msg.data) {
           log.warn('stur', 'live pausou por falta de byte', {
             cacheSecs: lastCacheTime,
-            colchao: DEGRAUS_READAHEAD[underrun.degrau],
+            // A FOLGA, e nao o carimbo. Ver `folgaAgora`:
+            // `demuxer-cache-time` e o fim do buffer, e num canal vivo ele gruda no
+            // `time-pos`. Medido em 16/out: cacheSecs 45,804 com tempoPos 45,727 —
+            // 77 ms de folga, nao 45 s de reserva.
+            folgaSecs: folgaAgora(),
+                    colchao: DEGRAUS_READAHEAD[underrun.degrau],
             cacheSecsAlvo: underrun.degrau > 0 ? DEGRAUS_READAHEAD[underrun.degrau] : null,
             tempoPos: lastLiveTimePos,
             url: sourceUrl ? sourceUrl.slice(0, 90) : null,
@@ -4247,10 +4290,71 @@ function buildMpvArgs(url, wid = 0) {
  * `cache-pause` e `false`, entao quem dimensiona o runway e o teto de bytes, e
  * reenviar por `set_property` no primeiro quadro seria contender com ele.
  */
-    '--demuxer-max-bytes=96MiB',
-    liveMode ? '--demuxer-readahead-secs=8' : `--demuxer-readahead-secs=${vodReadaheadSecs()}`,
-    liveMode ? '--cache-pause-initial=no' : '--cache-pause-initial=yes',
-    liveMode ? '--cache-pause-wait=1' : '--cache-pause-wait=8',
+    /*
+     * O TETO DE BYTES SAI DA FONTE UNICA, E NAO DE UM LITERAL AQUI.
+     *
+     * Este `96MiB` valia para os dois modos e era 24x o valor que o modulo de
+     * LIVE exige (4 MiB na epoca), dentro do proprio arquivo que documenta
+     * "tres literais iguais sao tres chances de divergirem em silencio". Como a
+     * linha de comando VENCE no inicio da reproducao — a mesma razao que
+     * moveu `cache-pause-initial` para ca — o processo nascia no tetto errado e
+     * so depois voltava ao certo quando o perfil chegava por IPC.
+     *
+     * AGORA: argv traz o valor do modulo dono de cada modo. O perfil continua
+     * mandando o mesmo numero por `set_property`, e os dois concordam porque
+     * saem da mesma conta.
+     */
+    liveMode
+      ? `--demuxer-max-bytes=${formatBytes(liveMaxBytes())}`
+      : `--demuxer-max-bytes=${formatBytes(vodMaxBytes())}`,
+    liveMode ? `--demuxer-readahead-secs=${LIVE_READAHEAD_SECS}` : `--demuxer-readahead-secs=${vodReadaheadSecs()}`,
+    /*
+     * `cache-pause-initial` e `cache-pause-wait` do AO VIVO.
+     *
+     * Aqui mandava `initial=no` e `wait=1`, enquanto `playback-profile.cjs:76-83`
+     * — o perfil que sobreviveu ao sweep contra o canal real — manda `initial=true`
+     * e `wait=2`. Os dois vivem no mesmo arquivo e se contradiziam em silencio,
+     * que e exatamente o risco que o comentario acima destas linhas avisa.
+     *
+     * QUEM VENCE E POR QUE. O `cache-pause-initial` so e lido no inicio da
+     * reproducao. O perfil chega por IPC DEPOIS do `loadfile`, entao o `true`
+     * dele chegava tarde demais para encher o runway: o canal ja tinha comecado
+     * com o buffer vazio. O que vale e o que esta na linha de comando.
+     *
+     * E O PRECO, MEDIDO — nao estimado. O sweep que montou o perfil rodou os
+     * dois braços e mediu o primeiro quadro:
+     *
+     *   config            1o quadro   pausas   buffer_min
+     *   cache30 wait10       3.6s       13        51.0s
+     *   cache20 wait5        3.0s        5        52.8s
+     *   cache15 wait3        3.0s        8        53.4s
+     *   cache8  wait2        3.1s        1        52.8s
+     *
+     * `cache-pause-initial=yes` NAO custou tempo de primeiro quadro: 3.0-3.6s
+     * nos dois braços. E o `buffer_min` e ~51-53s em TODOS os perfis — a origem
+     * entrega mais rapido que tempo real e o buffer enche sozinho. Por isso
+     * `cache-secs` nao e o gargalo e mexer nele nao compra margem: e o que o
+     * experimento `STPLAY_DEEP_CACHE` foi testar, e o sweep ja respondeu.
+     *
+     * O sintoma que isso corrige e o gaguejo de partida nos canais de bitrate
+     * alto. O teto do cache e em BYTES, e o runway que ele compra depende do
+     * bitrate do canal:
+     *
+     *   240 kbps  ->  4 MiB dao ~138 s
+     *   2   Mbps  ->  4 MiB dao ~16 s
+     *   6   Mbps  ->  4 MiB dao ~5 s      <- canais adulto+18, os mais pesados
+     *   10  Mbps  ->  4 MiB dao ~3 s
+     *
+     * Comecar com o buffer vazio num canal que so tem 3-5 s de runway e
+     * gaguejar no primeiro segundo. Encher antes de mostrar o quadro e o que
+     * tira, e o preco medido e zero segundo.
+     *
+     * O zape NAO e afetado: `profileFor(live, softZap)` devolve outro perfil,
+     * com `cache-pause=false` e `pause=false` — o canal esta no ar e precisa
+     * sair na hora.
+     */
+    '--cache-pause-initial=yes',
+    liveMode ? '--cache-pause-wait=2' : '--cache-pause-wait=8',
     /*
       EXPERIMENTO (volta-segundos no live): cache de 8s para 30s.
 
@@ -4344,6 +4448,27 @@ async function spawnMpvCore(win, bounds) {
       }
     })
   }
+  /*
+   * `spawn` so LANCA de forma sincrona em erro de argumento. Binario ausente,
+   * sem permissao, antivirus bloqueando — tudo isso chega no evento `'error'`,
+   * de forma assincrona, DEPOIS deste `try/catch`.
+   *
+   * E um `EventEmitter` sem listener para `'error'` LANCA a excecao: o processo
+   * morre com um erro nao tratado em vez de o spawn ter falhado. Era este o
+   * caminho do "o app bugou sem mensagem" quando o mpv nao abria — o log parava
+   * no `mpv argv` e nunca chegava nem a `adopted: false` nem a `failed`.
+   */
+  mpvProc.on('error', (error) => {
+    log.error('stur', 'mpv spawn falhou assincronamente', {
+      erro: error instanceof Error ? error.message : String(error),
+      codigo: error && typeof error === 'object' && 'code' in error ? error.code : null,
+    })
+    try {
+      failSpawn(`spawn error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch {
+      // o spawn ja falhou; nao ha mais nada a fazer aqui
+    }
+  })
   log.info('stur', 'mpv argv', {
     pid: mpvProc.pid || 0,
     parentHwnd,
@@ -5016,7 +5141,28 @@ async function command(op, value, mode) {
       await sendIpc(['seek', value, mode === 'relative' ? 'relative' : 'absolute'])
     }
     else if (op === 'volume' && typeof value === 'number') {
-      await sendIpc(['set_property', 'volume', Math.round(Math.max(0, Math.min(100, value * 100)))])
+      const alvo = volumePerceptual100(value)
+      /*
+       * O RESULTADO do `sendIpc` era descartado em toda parte.
+       *
+       * `sendIpc` resolve `{ ok: false }` quando o socket morreu, quando o mpv
+       * nao devolveu em 3s e quando o comando nem existe. Ninguem lia, entao um
+       * volume que nao foi aplicado era indistinguivel de um aplicado: o slider
+       * marcava 100%, o motor nao tinha mudado, e o sintoma era "no maximo nao
+       * sai som" — sem uma linha no log que explicasse nada.
+       *
+       * Este log fica no STUR porque e o motor padrao (`PLAYER_DEFAULT`). A
+       * primeira versao desta instrumentacao ficou so no mpeg, onde nunca
+       * apareceria: o sintoma era reportado no STUR e o log foi posto no motor
+       * errado. Medir onde nao e o que roda e a forma mais facil de ficar sem
+       * resposta.
+       */
+      const r = await sendIpc(['set_property', 'volume', alvo])
+      log.info('stur', 'volume', {
+        slider: Number(value.toFixed(3)),
+        aplicado: alvo,
+        aceito: Boolean(r && r.ok),
+      })
     } else if (op === 'aspect') {
       return await aplicarAspecto(value)
     } else return { ok: false }

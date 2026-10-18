@@ -151,7 +151,19 @@ test('nenhum overlay que cobre tudo tem fundo opaco', () => {
   //
   // A excecao e o video do player, que PRECISA ser preto, e o overlay de erro,
   // que precisa ser opaco para nao dar a entender que o video continua.
-  const EXCECOES = ['player-wrap', 'player-error-overlay', 'detail-tint-scrim']
+  //
+  // `po-loading` e `player-spinner-wrap` entram pelo mesmo motivo, com uma
+  // ressalva: so o BOOT e opaco. O `buffering` do `<video>` nativo continua
+  // transparente de proposito — la o quadro anterior e o ultimo quadro bom e
+  // mostra-lo atras do spinner e o comportamento normal de qualquer player.
+  // A divergencia esta isolada em `.is-boot`, entao mexer num nao mexe no outro.
+  const EXCECOES = [
+    'player-wrap',
+    'player-error-overlay',
+    'detail-tint-scrim',
+    'po-loading',
+    'player-spinner-wrap',
+  ]
 
   const opaco = (valor: string) => {
     if (!valor) return false

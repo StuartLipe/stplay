@@ -521,7 +521,41 @@ function instalar() {
      * antes do instalador assumir.
      */
     plog.info('updater', 'quitAndInstall silencioso')
-    setImmediate(() => up.quitAndInstall(true, true))
+    setImmediate(() => {
+      /*
+       * `instalando` so volta a `false` se o `catch` pegar algo — e o
+       * electron-updater nao lanca.
+       *
+       * Medido em `node_modules/electron-updater/out/BaseUpdater.js:42-68`:
+       * `install()` devolve `false` e so chama `dispatchError` (que nao lanca)
+       * em tres casos — `quitAndInstallCalled` ja marcado, `installerPath == null`
+       * ou `downloadedFileInfo == null`, e ainda o `catch` interno em volta do
+       * `doInstall`. O `catch` deste `instalar()` nunca era alcancado.
+       *
+       * Consequencia: `instalando` ficava travado em `true` para o resto da
+       * sessao. O botao "Reiniciar agora" devolvia `alreadyRunning` para sempre,
+       * e o `before-quit` do main (`main.cjs`, `isInstalando()`) encerrava
+       * cedo — `playerHost.shutdownSync()` e `logWriter.closeAll()` deixavam de
+       * rodar em TODO fechamento seguinte. O mpv e o log ficavam orfaos.
+       *
+       * So `false` estrito e falha: no caminho feliz `install()` devolve o que
+       * `doInstall` devolve, que e `undefined`.
+       */
+      let ok
+      try {
+        ok = up.quitAndInstall(true, true)
+      } catch (error) {
+        instalando = false
+        plog.error('updater', 'quitAndInstall lancou', { erro: String(error && error.message ? error.message : error) })
+        return
+      }
+      if (ok === false) {
+        instalando = false
+        plog.error('updater', 'quitAndInstall recusado sem lancar; liberando a flag', {
+          motivo: 'installerPath/downloadedFileInfo ausente, ou ja habia quitAndInstallCalled',
+        })
+      }
+    })
     return { ok: true }
   } catch (error) {
     instalando = false

@@ -386,9 +386,12 @@ function startFfmpegStream(targetUrl, startSec, res, fresh, opts = {}) {
     onProcEnd()
     sluit()
   }
-  res.on('close', () => {
-    // attachRes já trata o desanexo; aqui só garante fim do pipe se proc morreu
-  })
+  /*
+   * Registrado aqui: `res.on('close', fn)` VAZIO, so com um comentario dizendo
+   * que o desanexo ja e tratado pelo `attachRes`. Um listener sem corpo nao
+   * observa nada — ele so ocupa espaco no emitter e sugere um cleanup que nao
+   * existe. A nota virou comentario de bloco, que e o que ela e de fato.
+   */
   ffmpeg.on('error', onClose)
   ffmpeg.on('close', (code) => {
     // SEMPRE fecha a resposta: code 0 = fim de arquivo normal (filme acabou),

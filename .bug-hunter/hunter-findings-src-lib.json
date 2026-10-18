@@ -1,0 +1,136 @@
+{
+  "findings": [
+    {
+      "id": "HL-1",
+      "file": "src/lib/proxy.ts",
+      "line": 177,
+      "title": "logNet grava usuario e senha do painel em texto puro no internal-debug.log do disco",
+      "trigger": "Qualquer requisicao ao painel. xtream.ts:305 monta a URL como `${base}/player_api.php?username=${u}&password=${p}&action=...` e proxy.ts:154 chama logNet('panel ok', url, ...) para CADA resposta de painel (fetchText/fetchJson chamam de novo em 236/246/255). O truncamento e so em 160 caracteres, e `http://host:8080/player_api.php?username=x&password=y&action=get_live_streams` tem ~105 — credenciais inteiras dentro do corte.",
+      "impact": "A senha do painel vai para `%APPDATA%\\ST PLAY\\internal-debug.log` (electron/main.cjs:213-219, handler ipc sem gate de DEV: electron/preload.cjs:96 expoe dev.internalDebug incondicionalmente) e tambem para o console do renderer. O arquivo persiste entre sessoes e tem rotacao para .1. Qualquer um com acesso ao disco do usuario le a senha; alem disso o log e enviado pelo usuario ao suporte em bug reports. CWE-532/CWE-312.",
+      "severity": "high",
+      "category": "security",
+      "evidence": "function logNet(message: string, url: string, data: Record<string, unknown>) {\n  const short = url.length > 160 ? url.slice(0, 160) + '...' : url\n  console.debug('[net]', message, short, data)\n  try {\n    const api = (window as unknown as { sturplay?: { dev?: { internalDebug?: (p: unknown) => unknown } } }).sturplay\n    if (api?.dev?.internalDebug) {\n      void Promise.resolve(\n        api.dev.internalDebug({ scope: 'renderer', level: 'info', tag: '[net]', message, data: { url: short, ...data } }),\n      ).catch(() => undefined)\n    }\n  } catch { /* ignore */ }\n}",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-2",
+      "file": "src/lib/vod-info-cache.ts",
+      "line": 29,
+      "title": "Cache de metadata nao inclui host/credencial na chave e nunca e limpo ao corrigir credencial: conta nova herda dados da conta antiga",
+      "trigger": "1) Abrir um filme/serie na conta A (preenche o cache com `playlist.id:vodId`). 2) Em Configuracoes, editar a MESMA playlist trocando usuario/senha (App.tsx:1216 updatePlaylist) — `changedIdentity` detecta host/username/password diferentes e chama clearCatalog + clearXtreamM3uCache, mas NAO clearVodInfoCache/clearSeriesInfoCache (essas duas so sao chamadas de teste). 3) Abrir de novo um titulo com o mesmo id: xtream.ts:1265/1150 faz `peekVodInfoCache(key)` e devolve o objeto antigo sem consultar o painel.",
+      "impact": "Por ate 24h (TTL_MS) a ficha do filme/serie mostra nome, capa, sinopse, elenco e diretor da conta anterior enquanto os streams/episodios vem da conta nova. O comentario da linha 30 ('O host entra na chave') e falso: playlist.id e um crypto.randomUUID() (App.tsx:3428/3445), nao o host. Vazamento de dados entre contas + UI errada.",
+      "severity": "medium",
+      "category": "bug",
+      "evidence": "export function vodInfoCacheKey(playlistId: string, vodId: string) {\n  // O host entra na chave: trocar de host com o mesmo id tem que ser miss.\n  return `${playlistId}:${vodId}`\n}\n// idem em series-info-cache.ts:20-22 -> `${playlistId}:${seriesId}`\n// App.tsx:1224-1239: const changedIdentity = !before || before.xtream?.host !== updated.xtream?.host || ... ; if (changedIdentity) { clearCatalog(updated.id); clearXtreamM3uCache(updated.id) }  <- sem clear de info-cache",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-3",
+      "file": "src/lib/storage.ts",
+      "line": 219,
+      "title": "savePlaylists (e mais 5 savers) descarta o retorno de write(): estouro de cota engole a persistencia em silencio",
+      "trigger": "Importar um M3U local grande: App.tsx:3445 faz `onAdd({ ..., m3uText: text })` com o arquivo inteiro, e savePlaylists serializa o array TODO (incluindo m3uText) em localStorage. Acima da cota (~5-10MB/origem no Chromium) o setItem lanca QuotaExceededError, write() devolve false e o valor e descartado. Pior: a cota e por origem e cada gravacao seguinte re-serializa o mesmo array gigante, entao TODA mudanca de playlist posterior (adicionar, renomear, corrigir credencial de outra conta) tambem falha sem aviso. Ao reiniciar, tudo volta ao ultimo estado gravado com sucesso.",
+      "impact": "Perda silenciosa de configuracao: o usuario re-importa o arquivo e redigita host/usuario/senha a cada reinicio, sem nenhuma mensagem. O proprio arquivo ja trata esse caso em saveContinueWatching (251-282, degrada e regrava) e saveProfiles (302-307) — a omissao aqui e inconsistencia, nao escolha de design.",
+      "severity": "medium",
+      "category": "bug",
+      "evidence": "function write(key: string, value: string) {\n  try {\n    localStorage.setItem(key, value)\n    return true\n  } catch {\n    return false\n  }\n}\n...\nexport function savePlaylists(playlists: Playlist[]) {\n  write(KEY, JSON.stringify(playlists))\n}\n// mesmo padrao em saveFavorites(227), saveActiveId(233), saveSettings(294), saveRecentLiveChannels(323), saveSortModes(354), saveHiddenItems(434)",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-4",
+      "file": "src/lib/stream-compat.ts",
+      "line": 1,
+      "title": "Modulo inteiro (166 linhas) e codigo morto: nenhum importador em todo o repo, nem teste",
+      "trigger": "Grep repo-wide (src/, electron/, scripts/, *.tsx) por 'stream-compat', 'StreamCompat', 'probeStream', 'getStreamCompat' retorna 21 ocorrencias e TODAS estao dentro do proprio stream-compat.ts (as demais sao artefatos .bug-hunter/*.json). Nao existe stream-compat.test.ts. Logo classifyStreamByUrl, probeStreamHeaders, getStreamCompatCached, STREAM_COMPAT_LABELS, StreamCompat, StreamCompatInfo nunca sao chamados em producao.",
+      "impact": "166 linhas de classificacao de formato, semaforo de 4 sondas HTTP (activeProbes/probeQueue), Map de cache e todos os regex de deteccao estao no bundle e nunca executam. A sonda de headers com `Range: bytes=0-0` — que era a unica forma de descobrir o content-type real — nunca rodou. Divida de manutencao: quem mexer em player.ts espera que isto existir.",
+      "severity": "medium",
+      "category": "dead-code",
+      "evidence": "// stream-compat.ts:23-28\nconst cache = new Map<string, StreamCompatInfo>()\nconst inflight = new Map<string, Promise<StreamCompatInfo>>()\nlet activeProbes = 0\nconst MAX_PROBES = 4\nconst probeQueue: Array<() => void> = []\n// unica referencia externa no arquivo e `import { playSrc } from './proxy'` (linha 2), usada so por probeStreamHeaders (linha 124) — que ninguem chama.",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-5",
+      "file": "src/lib/storage.ts",
+      "line": 93,
+      "title": "O loop que marca as migrate-keys torna a cadeia v8..v13 INTEIRA inalcancavel em migratePlayer",
+      "trigger": "Qualquer instalacao em que uma das chaves `sturplay.player-engine-v8..v13` falte (ex.: usuario vindo de uma build que so tinha v8..v10). O laco 93-101 escreve '1' em TODAS as chaves ausentes; logo na sequencia (103-106) `jaRodou: (versao) => Boolean(readRaw(PLAYER_MIGRATE_KEYS[versao]))` devolve true para as 6 versoes. Todos os `if (!jaRodou(v))` de player-default.ts ficam com a negacao falsa — nenhum passo da migracao roda, nunca.",
+      "impact": "A migracao nunca aplica: quem tinha `player: 'internal'`/'auto'/'mpeg' gravado continua com esse valor em vez do 'stur' que a cadeia produziria (player-default.test.ts:43 fixa `rawPlayer:'internal'` + `jaRodou: nenhumaRodou` => 'stur', um cenario que storage.ts torna inalcancavel). O comentario da linha 89-92 justifica a ordem, mas o efeito e o oposto do que ele descreve.",
+      "severity": "medium",
+      "category": "logic",
+      "evidence": "for (const versao of PLAYER_MIGRATE_VERSOES) {\n  try {\n    if (!localStorage.getItem(PLAYER_MIGRATE_KEYS[versao])) {\n      localStorage.setItem(PLAYER_MIGRATE_KEYS[versao], '1')\n    }\n  } catch { /* ignore */ }\n}\n\nconst player = migratePlayer({\n  rawPlayer,\n  jaRodou: (versao) => Boolean(readRaw(PLAYER_MIGRATE_KEYS[versao])),\n})",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-6",
+      "file": "src/lib/proxy.ts",
+      "line": 121,
+      "title": "retryWaitMs aceita espera 0 no ramo de data HTTP: Retry-After no passado vira retry imediato em rajada",
+      "trigger": "O painel responde 429 com `Retry-After: <HTTP-date>` cuja data ja passou. `Date.parse(raw)` → asDate < Date.now() → `Math.max(0, asDate - Date.now())` = 0 → `Math.min(0, 60000)` = 0. Em fetchRaw (204-213) isso vira `rateLimitUntil = now` e `await sleep(0)`: as 6 tentativas disparam em ~6ms, todas batem no mesmo 429 e o caller leva `Falha ao baixar (429)`. O ramo vizinho (linha 119, valor numerico) prende em 5000 ms — o piso 0 aqui e assimetrico e nao intencionado.",
+      "impact": "Six requests consecutivas contra um painel que pediu explicitamente para recuar, em vez de esperar. Com o painel ja no limite, worsena o 429 e produz falha rapida onde uma espera de 5s teria resolvido. Painel PHP que monta o Retry-After com `date()` local em vez de `gmdate(... GMT)` produz exatamente essa data no passado.",
+      "severity": "low",
+      "category": "logic",
+      "evidence": "function retryWaitMs(response: Response, attempt: number) {\n  const raw = response.headers.get('retry-after')\n  if (raw) {\n    const asInt = Number(raw)\n    if (!Number.isNaN(asInt) && asInt >= 0) return Math.min(Math.max(asInt * 1000, 5000), 60000)\n    const asDate = Date.parse(raw)\n    if (!Number.isNaN(asDate)) return Math.min(Math.max(0, asDate - Date.now()), 60000)\n  }",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-7",
+      "file": "src/lib/proxy.ts",
+      "line": 59,
+      "title": "mediaSrc: branch data:/blob: identico ao fallthrough — nao pode mudar o resultado",
+      "trigger": "Qualquer chamada com data:/blob: (App.tsx:7970 `mediaSrc(member.photo)`). Os dois lados do if retornam a MESMA variavel `clean` (linhas 60 e 61 sao literalmente `return clean`), e normalizeLogo ja devolve data:/blob: intocado na linha 51. O if nunca altera nada.",
+      "impact": "Code morto que sugere um tratamento especial que nao existe. Quem mexer no data:/blob: believing there's a branch to change will edit the wrong place. Baixo impacto em runtime (comportamento identico ao esperado), mas e o tipo de coisa que vira bug na proxima edicao.",
+      "severity": "low",
+      "category": "logic",
+      "evidence": "export function mediaSrc(url?: string) {\n  const clean = normalizeLogo(url)\n  if (!clean) return undefined\n  if (clean.startsWith('data:') || clean.startsWith('blob:')) return clean\n  return clean\n}",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-8",
+      "file": "src/lib/proxy.ts",
+      "line": 67,
+      "title": "coverSrc: teste de prefixo 'sturplay:' inalcancavel — normalizeLogo ja devolveu undefined",
+      "trigger": "coverSrc('<logo>') com qualquer valor. normalizeLogo so devolve string para `^https?://` (linha 52) ou data:/blob: (linha 51); um `sturplay://...` cai no `return undefined` da linha 52. Portanto `clean.startsWith('sturplay:')` nao pode ser verdadeiro e a linha 67 nunca retorna.",
+      "impact": "Branch morto. O efeito pratico e o inverso do que o codigo sugere: uma URL de logo `sturplay://cover?url=...` vira undefined (capa some) em vez de passar direto. Sem impacto em producao alem do branch inalcancavel.",
+      "severity": "low",
+      "category": "logic",
+      "evidence": "export function coverSrc(url?: string) {\n  const clean = mediaSrc(url)\n  if (!clean) return undefined\n  if (clean.startsWith('sturplay:')) return clean\n  const base = typeof window !== 'undefined' ? window.sturplay?.coverBase : undefined\n  if (base && /^https?:\\/\\//i.test(clean)) {\n    return `${base}?url=${encodeURIComponent(clean)}`\n  }\n  return clean\n}",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-9",
+      "file": "src/lib/vod-info-cache.ts",
+      "line": 22,
+      "title": "evict() trata a ordem do Map como 'mais antigo primeiro', mas re-set nao move a entrada: FIFO, nao LRU",
+      "trigger": "store.set() em chave JA EXISTENTE mantem a posicao de insercao original no Map. O caminho quente re-seta a mesma chave: xtream.ts:1232 e 1327 fazem setSeriesInfoCache/setVodInfoCache(key, {...prev, plot}) para mesclar a sinopse depois. Depois de navegar por 501 titulos distintos numa sessao (MAX_ENTRIES=500), evict() pode remover justamente a entrada que acabou de ser atualizada, enquanto entradas velhas inseridas antes sobrevivem.",
+      "impact": "Cache miss indesejado: um refetch ao painel para um titulo recem-guardado. Nao corrompe dado (o valor foi re-lido do painel), mas o teto deixa de proteger o que o comentario da linha 21 promete ('Insercao em ordem: o Map itera do mais antigo pro mais novo' — verdade so na primeira insercao). Mesma copia do codigo em series-info-cache.ts:13-17.",
+      "severity": "low",
+      "category": "logic",
+      "evidence": "  // Inserção em ordem: o Map itera do mais antigo pro mais novo.\n  while (store.size > MAX_ENTRIES) {\n    const oldest = store.keys().next()\n    if (oldest.done) break\n    store.delete(oldest.value)\n  }\n// ... setVodInfoCache(key, value) { store.set(key, { value, at: Date.now() }) } — re-set nao reordena.",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-10",
+      "file": "src/lib/proxy.ts",
+      "line": 138,
+      "title": "Exports nunca importados por nenhum arquivo (FetchOpts, DEFAULT_SETTINGS, LiveStreamLike/LiveChannelLike)",
+      "trigger": "Grep repo-wide por cada simbolo: FetchOpts so aparece nas assinaturas internas de proxy.ts (140/192/232/240); DEFAULT_SETTINGS so e usado dentro de storage.ts (109-162) e citado em comentario de accent.ts:41 e player-default.test.ts:9; LiveStreamLike/LiveChannelLike so aparecem dentro de live-stream-match.ts. Nenhum `import { ... }` em src/ ou electron/.",
+      "impact": "Superficie publica menor que a real: quem ler a assinatura `fetchJson<T>(url, opts?: FetchOpts)` pode supor que o tipo e reaproveitado e FIRMAR um contrato que ninguem consome. Ruido baixo, mas os 3 simbolos sao a unica categoria de dead-code isolada fora do modulo stream-compat.",
+      "severity": "low",
+      "category": "dead-code",
+      "evidence": "export type FetchOpts = { timeoutMs?: number; priority?: boolean }\nasync function fetchOnce(url: string, opts?: FetchOpts): Promise<Response> {   // proxy.ts:138\n\nexport const DEFAULT_SETTINGS: AppSettings = { /* storage.ts:52 */\n\nexport type LiveStreamLike = { stream_id: number; ... }   // live-stream-match.ts:16\nexport type LiveChannelLike = { name?: string; streamId?: string; tvgId?: string }   // live-stream-match.ts:22",
+      "confidence": "high"
+    },
+    {
+      "id": "HL-11",
+      "file": "src/lib/download-id.ts",
+      "line": 55,
+      "title": "KIND_SEGMENT[kind] ?? kind: fallback inalcancavel (Record cobre a uniao inteira)",
+      "trigger": "downloadIdFor e chamado so com literais 'movie'/'series' (App.tsx:8124 e 9111). KIND_SEGMENT e `Record<DownloadedItem['kind'], string>` com as DUAS chaves mapeadas (33-36), entao `KIND_SEGMENT[kind]` nunca e undefined e o `?? kind` nunca dispara.",
+      "impact": "Nenhum. Registrado porque e dead-branch verificavel: o `?? kind` sugere que existe um `kind` fora da uniao, e nao existe — o id canonico nunca cairia no fallback cru.",
+      "severity": "low",
+      "category": "dead-code",
+      "evidence": "const KIND_SEGMENT: Record<DownloadedItem['kind'], string> = {\n  movie: 'movie',\n  series: 'series',\n}\n...\n  return `dl:${pid}:${KIND_SEGMENT[kind] ?? kind}:${rid}`",
+      "confidence": "high"
+    }
+  ]
+}

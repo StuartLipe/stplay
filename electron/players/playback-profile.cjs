@@ -56,8 +56,14 @@ const { liveMaxBytes, descreverLiveBuffer } = require('./live-buffer-limits.cjs'
  */
 const LIVE_CACHE_SECS = 8
 const LIVE_CACHE_PAUSE_WAIT = 2
-const LIVE_READAHEAD_SECS = 8
-const LIVE_MAX_BYTES = '96MiB'
+const LIVE_READAHEAD_SECS = 16
+/*
+ * `LIVE_MAX_BYTES` foi REMOVIDO de proposito. Era um literal `96MiB` que nao
+ * era usado por nada: o perfil manda `formatBytes(liveMaxBytes())`, que vem do
+ * modulo dono. Este `96MiB` era justamente o valor que a medicao de 05/10
+ * julgado causador do pico de 887 s de latencia - e ele continuava exportado
+ *aqui, a um import de distancia de onde a decisao foi documentada.
+ */
 
 /** Perfil completo por modo. Ordem importa: vira a ordem dos comandos no wire. */
 function profileFor(live, softZap) {
@@ -147,7 +153,7 @@ module.exports = {
   LIVE_CACHE_SECS,
   LIVE_CACHE_PAUSE_WAIT,
   LIVE_READAHEAD_SECS,
-  LIVE_MAX_BYTES,
+  // (sem LIVE_MAX_BYTES: literal morto removido, ver acima)
   descreverVodBuffer,
   descreverLiveBuffer,
 }

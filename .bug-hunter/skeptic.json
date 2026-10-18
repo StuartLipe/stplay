@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "role": "skeptic",
+  "runId": "scan-2026-10-16-live-buffer",
+  "challenges": [
+    {
+      "bugId": "BUG-1",
+      "disproved": false,
+      "strengthened": false,
+      "challenge": "Is the 4 MiB ceiling the binding constraint, or does demuxer-readahead-secs=8 bind first? Both land near 8 s, so attributing the freeze to the byte ceiling may be attribution without a discriminating measurement.",
+      "counterEvidence": "live-load-policy.cjs:170-200 documents a different and better-evidenced root cause: the panel publishes non-canonical playlists, the ffmpeg HLS demuxer identifies segments by sequence number, and therefore stops fetching. Measured directly on mpv with no app involvement: time-pos and demuxer-cache-time freeze together at 59.97 with the buffer 100% full. A frozen demuxer is NOT a starved buffer, and a byte ceiling cannot cause a full buffer to stop growing.",
+      "resolution": "Challenge stands as a scope correction, not a refutation. The 4 MiB ceiling is genuinely bitrate-miscalibrated and genuinely too small to hold one segment on this panel. But the app's own documentation identifies demuxer starvation as the measured cause, and that is not fixed by resizing the ceiling."
+    },
+    {
+      "bugId": "BUG-2",
+      "disproved": false,
+      "challenge": "Does an oversized startup ceiling cause harm? A larger max-bytes is permissive. It cannot starve anything; it only delays the clamp.",
+      "counterEvidence": "Conceded. The startup window at 96 MiB is permissive, not harmful. The documented rationale for moving cache-pause-initial to argv was that a small value arriving late causes a bad start; a large value arriving late does not.",
+      "resolution": "Real defect, downgraded severity. This is configuration incoherence, not a freeze cause."
+    },
+    {
+      "bugId": "BUG-3",
+      "disproved": false,
+      "challenge": "Could the 96 MiB argv be a deliberate permissive-then-clamp pattern?",
+      "counterEvidence": "If it were deliberate it would be documented as such. Instead live-buffer-limits.test.cjs:52 asserts the default must not equal 96 MiB because 'o padrao antigo produz o gaguejo', and the header records 96 MiB as the value that produced the 887 s accumulation. The argv literal is unreconciled with the module that owns the setting.",
+      "resolution": "Real. Same defect as BUG-2 seen from the other side."
+    },
+    {
+      "bugId": "BUG-4",
+      "disproved": true,
+      "challenge": "Deriving TARGETDURATION from segment durations instead of the panel's declared value may be deliberate and more correct, not a dead field. RFC 8216 requires TARGETDURATION to be at least the longest EXTINF, and this panel has documented evidence of lying about its sequence numbers.",
+      "counterEvidence": "escreverManifesto computes Math.max(1, ceil(max segment duration, state.targetDuration || 0)). Because state.targetDuration is always undefined, the emitted value is derived purely from EXTINF values the module itself parsed. That satisfies the spec requirement. Additionally, this module exists precisely because the panel's declared metadata cannot be trusted: hls-window.cjs:14-18 records that 24 consecutive responses shared zero segments and that the same sequence number returns different content.",
+      "resolution": "DISPROVED. Reading the panel's TARGETDURATION here would import untrusted metadata into a manifest whose entire purpose is to be canonical. The derived value is the safer choice. state.targetDuration reads as a vestigial field, not a defect."
+    },
+    {
+      "bugId": "BUG-5",
+      "disproved": false,
+      "challenge": "Incomplete trace. The emitted mode field may come from a different variable than currentLoadMode, and the Hunter did not finish following the write site of the 'loadfile ok' log line.",
+      "counterEvidence": "None available. The claim that 'raw' is absent from both sets is verified; the claim about which variable the log reads is not.",
+      "resolution": "Cannot be settled from what was read. Requires completing the trace of the loadfile log site."
+    }
+  ]
+}

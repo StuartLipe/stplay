@@ -5,6 +5,7 @@ const logWriter = require('./log-writer.cjs')
 const crypto = require('crypto')
 const { ipcMain } = require('electron')
 const { hardenWebContents } = require('./harden-web-contents.cjs')
+const { redactUrlForLog } = require('./lib/redact-url.cjs')
 const { registerDownloadsIpc } = require('./downloads.cjs')
 const updaterHost = require('./updater.cjs')
 const { ensureStreamProxy, proxyBaseUrl } = require('./stream-proxy.cjs')
@@ -151,20 +152,47 @@ async function handleCoverCache(request) {
     }
 
     const buffer = Buffer.from(await response.arrayBuffer())
-    try {
-      fs.mkdirSync(coverCacheDir, { recursive: true })
-      await fs.promises.writeFile(file, buffer)
-    } catch {
-      // still return the image even if disk write fails
-    }
-
     const rawType = response.headers.get('content-type') || guessMime(file)
     const contentType = sanitizeHeaderValue(rawType.split(';')[0].trim()) || guessMime(file)
+
+    /*
+     * So grava em disco se o que chegou e mesmo imagem.
+     *
+     * A regra antes era "grava qualquer 2xx". Isso congela em disco, para
+     * sempre e com `immutable`, a pagina de erro do painel: imgur e CDN de
+     * painel devolvem 200 com um HTML de "imagem removida" ou de manutencao
+     * justamente na hora em que a thumb some. O arquivo ficava com o HTML
+     * dentro, o `guessMime` devolvia `image/jpeg` pelo nome, e o card mostrava
+     * um retangulo quebrado para sempre — inclusive depois que a imagem voltava
+     * na origem, porque o hit do cache nem chegava a consultar a rede.
+     *
+     * A resposta segue indo ao renderer (o `onError` do `Cover` cai no
+     * placeholder e, quando a origem voltar, o proximo fetch pega a imagem).
+     */
+    const pareceImagem = /^image\//i.test(contentType)
+    if (pareceImagem) {
+      try {
+        fs.mkdirSync(coverCacheDir, { recursive: true })
+        await fs.promises.writeFile(file, buffer)
+      } catch {
+        // still return the image even if disk write fails
+      }
+    } else {
+      // Uma capa que veio errada nao pode contaminar o cache permanente.
+      try {
+        if (fs.existsSync(file)) fs.unlinkSync(file)
+      } catch {
+        // ignore
+      }
+    }
+
     return new Response(buffer, {
       status: 200,
       headers: {
         'Content-Type': contentType,
-        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Cache-Control': pareceImagem
+          ? 'public, max-age=31536000, immutable'
+          : 'no-store',
       },
     })
   } catch (error) {
@@ -389,7 +417,7 @@ async function handleProxy(request) {
   }
 
   const t0 = Date.now()
-  const shortUrl = dest.href.slice(0, 160)
+  const shortUrl = redactUrlForLog(dest.href).slice(0, 160)
   try {
     const upstream = await net.fetch(dest.href, {
       method: 'GET',
@@ -604,9 +632,12 @@ function createWindow() {
       // best effort
     }
   }
-  win.webContents.on('render-process-gone', (_e, details) => {
-    plog.warn('app', 'render-process-gone', { reason: details?.reason, exitCode: details?.exitCode })
-  })
+  /*
+   * `render-process-gone` JA foi registrado acima, antes do `hardenWebContents`,
+   * com o MESMO corpo. O segundo registro aqui duplicava a linha no log a cada
+   * crash do renderer — dois `plog.warn` identicos para um evento so, o que
+   * faz o log parecer ter dois problemas quando houve um.
+   */
   win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     if (level >= 2) stamp('error', 'console', `${message} (${sourceId}:${line})`)
   })

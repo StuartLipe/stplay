@@ -429,6 +429,15 @@ export function attachPlayerEx(video: HTMLVideoElement, url: string, opts: Playe
   let hls: Hls | null = null
   let destroyed = false
   let hlsRetry = 0
+/*
+ * Quantos `networkError` NÃO-fatais a corrente aceita antes de ser tratada como
+ * trava. Medido no painel do dono: 38 em 35s, ~1,3s de intervalo, todos
+ * `aborted`, e o `MANIFEST_PARSED` nunca veio. Um `aborted` isolado é o
+ * hls.js trocando de segmento e não deve incomodar; 12 seguidos sem nenhum
+ * progresso é o spinning infinito.
+ */
+const HLS_SOFT_FAIL_MAX = 12
+let hlsSoftFail = 0
 
   try {
     video.pause()
@@ -817,6 +826,7 @@ export function attachPlayerEx(video: HTMLVideoElement, url: string, opts: Playe
     hlsRetry = 0
     let audioSwapDone = false
     hls = createHls(live, heavy, elapsed)
+    hlsSoftFail = 0
     hls.attachMedia(video)
     hls.loadSource(src)
     // Se o manifest travar sem parse (hang), o blank estoura e troca de candidato.
@@ -824,6 +834,9 @@ export function attachPlayerEx(video: HTMLVideoElement, url: string, opts: Playe
     scheduleBlankCheck(live ? 10_000 : 10_000)
     hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
       if (destroyed || !hls) return
+      // Progresso real: o circuito de erro não-fatal volta a zero. A partir
+      // daqui o `aborted` isolado é o hls.js trocando de segmento.
+      hlsSoftFail = 0
       try {
         dbg('manifest', {
           t: elapsed(),
@@ -847,9 +860,12 @@ export function attachPlayerEx(video: HTMLVideoElement, url: string, opts: Playe
     })
     hls.on(Hls.Events.FRAG_LOADED, () => {
       if (destroyed) return
+      // Segmento baixado é progresso: o circuito de não-fatal volta a zero.
+      hlsSoftFail = 0
     })
     hls.on(Hls.Events.FRAG_BUFFERED, () => {
       window.clearTimeout(blankTimer)
+      hlsSoftFail = 0
       // Live: hls.js só leva o currentTime pra borda no refresh do playlist
       // (até 20s parado no 0.0 — issue #4950). Se o 0.0 tá longe da janela,
       // pula na hora pra borda igual o mpv (live_start_index=-1), sem mpv.
@@ -896,6 +912,42 @@ export function attachPlayerEx(video: HTMLVideoElement, url: string, opts: Playe
             console.warn('[stplay][hls]', data.type, data.details, data.response?.code || data.networkDetails || '')
           } catch {
             // ignore
+          }
+          /*
+           * DISJUNTOR de erro não-fatal repetido.
+           *
+           * O caminho de retry contava SO erro fatal: `hlsRetry` so sobe no
+           * `NETWORK_ERROR` fatal e no `MEDIA_ERROR`. Um `aborted` não-fatal não
+           * entra em nenhuma das duas contagens — e era o que o painel deste
+           * dono produzia, sem parar.
+           *
+           * Medido no log: 38 `networkError / aborted` em 35s, ritmo de ~1,3s,
+           * e `MANIFEST_PARSED` nunca chegou. `hls.js` aborta a requisição quando
+           * reinicia o load; ele fazia isso, o contador nao subia, o `scheduleBlankCheck`
+           * de 10s era rearmado a cada `startHls`, e a tela ficava em spinner
+           * para sempre sem nunca cair no proximo candidato nem no proximo motor.
+           *
+           * `aborted` sozinho é normal em live (troca de segmento, `startLoad`).
+           * O que é patológico é a RAJADA sem nenhum progresso: por isso o contador
+           * sobe no não-fatal e ZERA em qualquer sinal de vida (manifest parsed,
+           * fragmento bufferizado, tempo correndo). Nesses casos o circuito fica
+           * fechado e o streaming normal nunca é interrompido.
+           */
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            hlsSoftFail += 1
+            if (hlsSoftFail >= HLS_SOFT_FAIL_MAX && !isVideoRendering(video)) {
+              dbg('hls-soft-trip', {
+                t: elapsed(),
+                erros: hlsSoftFail,
+                details: String(data.details || ''),
+              })
+              hlsSoftFail = 0
+              removeStall()
+              failHls(
+                live ? 'Live não carregou — tentando próximo motor' : 'Demorou para abrir o stream',
+                `networkError repetido (${data.details || 'sem detalhe'})`,
+              )
+            }
           }
         }
         return
