@@ -1,17 +1,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { List, X } from 'lucide-react'
+import { Heart, List, X } from 'lucide-react'
+import { coverSrc } from './lib/proxy'
+import { ehCategoriaAdulta } from './lib/adulto'
 import {
   findSeasonForEpisode,
   formatSeasonOptionLabel,
   groupEpisodesBySeason,
   resolveEpisodeSeason,
 } from './lib/episode-seasons'
-import { SeasonSelect } from './lib/SeasonSelect'
+/*
+ * `SeasonSelect` saiu daqui. Era um `<select>` solto acima do filtro da gavota,
+ * e a informacao de temporada virou uma ABA com contagem, no mesmo visual das
+ * outras. O componente continua existindo para outros usos — o lugar dele aqui
+ * era redundante com a aba.
+ */
 import type { VideoFit } from './lib/players/types'
 import { aspectHint, nextAspect, normalizeAspect } from './lib/players/video-aspect'
 
-type OverlayItem = { id: string; name: string; group?: string }
+type OverlayItem = {
+  id: string
+  name: string
+  group?: string
+  /*
+   * A logo vinha cortada do payload: `App.tsx` mandava so `id`/`name`/`group`.
+   * Sem ela a lista do overlay era uma coluna de texto e a do motor nativo era
+   * uma lista de canais — duas coisas diferentes usando o mesmo nome de
+   * "gavota". Agora os dois lados mostram a mesma anatomia.
+   */
+  logo?: string
+}
 
 type OverlayMeta = {
   engine?: string
@@ -20,10 +38,24 @@ type OverlayMeta = {
   kind?: string
   list?: OverlayItem[]
   currentId?: string
+  /*
+   * Favoritos do perfil, por id. O overlay nao tinha NENHUM estado de favorito:
+   * a lista nativa mostra o coracao em cada canal e a do motor nao mostrava
+   * nada. Sem este campo o coracao aqui seria decoracao, entao o App manda o
+   * conjunto e o clique devolve uma acao de volta.
+   */
+  favorites?: string[]
   volume?: number
   muted?: boolean
   durationHint?: number
   fullscreen?: boolean
+  /*
+   * Filmes da mesma franquia que o que esta tocando (ex: Matrix, Rambo),
+   * calculado pelo App a partir do catalogo completo de filmes. So para
+   * `kind === 'movie'`. O overlay exibe na aba "Continuacao", com o filme em
+   * reproducao no topo como "Assistindo agora".
+   */
+  franquia?: OverlayItem[]
 }
 
 const VOLUME_KEY = 'stplay.volume'
@@ -131,9 +163,9 @@ function Seek10Icon({ dir }: { dir: 'back' | 'fwd' }) {
 /** Overlay Windows — layout compacto, com seek vermelho. */
 function readAspect(): VideoFit {
   try {
-    return normalizeAspect(localStorage.getItem('stplay.video-aspect'))
+    return normalizeAspect()
   } catch {
-    return 'fill'
+    return 'fit'
   }
 }
 export function PlayerOverlayApp() {
@@ -185,7 +217,36 @@ export function PlayerOverlayApp() {
   const [listOpen, setListOpen] = useState(false)
   const [listFilter, setListFilter] = useState('')
   const [listSeason, setListSeason] = useState<string | null>(null)
+  /*
+   * Aba da gavota e categoria escolhida.
+   *
+   * "Categorias" lista os grupos com contagem; "Canais" lista os canais. São as
+   * mesmas duas abas da gavota do motor nativo — sem elas, quem usava o motor
+   * nativo para pular de categoria tinha que sair do player e voltar na coluna,
+   * e quem usa STUR/MPEG simplesmente nao tinha o recurso.
+   */
+  const [listTab, setListTab] = useState<
+    | 'categorias'
+    | 'canais'
+    | 'temporadas'
+    | 'episodios'
+    | 'todos'
+    | 'dublado'
+    | 'legendado'
+    | 'franquia'
+  >('canais')
+  const [drawerCategoria, setDrawerCategoria] = useState<string | null>(null)
   const [scrubPos, setScrubPos] = useState<number | null>(null)
+
+  /**
+   * Janela em que o overlay se cala no zape de live.
+   *
+   * Mesmo numero de `LIVE_ZAP_FEEDBACK_MS` no `App.tsx`: um zape que abre em
+   * 450 ms nao acende nada, e um que demora mostra o indicador. Os dois lados
+   * precisam do mesmo valor — se divergirem, o spinner do App e o do overlay
+   * piscam em tempos diferentes no mesmo zape.
+   */
+  const LIVE_ZAP_FEEDBACK_MS = 450
 
   /*
    * AJUSTE DE IMAGEM, no overlay. O mesmo estado que a `player-topbar` do
@@ -213,6 +274,22 @@ export function PlayerOverlayApp() {
   const listOpenRef = useRef(false)
   const metaKindRef = useRef<string | undefined>(undefined)
   const lastContentIdRef = useRef<string | undefined>(undefined)
+  /*
+   * Espera do zape de live, o mesmo papel de `LIVE_ZAP_FEEDBACK_MS` no App.
+   *
+   * O App ja tem esse mecanismo desde que o dono reclamou de "15 segundos de
+   * video congelado, sem nenhuma indicacao". O overlay NAO tinha: ele desligava
+   * o spinner incondicionalmente a cada troca de canal ao vivo, e nada o reabria
+   * ate o `failed`. No STUR quem manda no loading e o overlay, entao a correcao
+   * do App nunca chegava ao caminho que ele mais usa.
+   */
+  const liveZapWaitRef = useRef(0)
+  const clearLiveZapWait = useCallback(() => {
+    if (liveZapWaitRef.current) {
+      window.clearTimeout(liveZapWaitRef.current)
+      liveZapWaitRef.current = 0
+    }
+  }, [])
   const catalogDurationRef = useRef(0)
   const volumeRef = useRef(volume)
   const mutedRef = useRef(muted)
@@ -384,6 +461,7 @@ export function PlayerOverlayApp() {
         setCurrent(event.current)
         if (event.current > 0.05) {
           hasPlayedRef.current = true
+          clearLiveZapWait()
           setBooting(false)
           setPlaying(true)
         }
@@ -392,6 +470,7 @@ export function PlayerOverlayApp() {
     const offUi = api?.onOverlayUi?.((payload) => {
       if (payload?.action === 'boot') {
         hasPlayedRef.current = false
+        clearLiveZapWait()
         setFailed(false)
         setRetryInfo(null)
         setBooting(true)
@@ -399,6 +478,7 @@ export function PlayerOverlayApp() {
       }
       if (payload?.action === 'playback-ready' || payload?.action === 'hide-loading') {
         hasPlayedRef.current = true
+        clearLiveZapWait()
         setBooting(false)
         setPlaying(true)
       }
@@ -407,8 +487,9 @@ export function PlayerOverlayApp() {
       offMeta?.()
       offEvent?.()
       offUi?.()
+      clearLiveZapWait()
     }
-  }, [])
+  }, [clearLiveZapWait])
 
   // Troca de conteúdo: só reinicia spinner se o id mudou de verdade.
   // Meta que chega depois do 1º frame (mesmo id) não pode reabrir a bolinha.
@@ -422,12 +503,37 @@ export function PlayerOverlayApp() {
     if (prev === undefined && (hasPlayedRef.current || playingRef.current)) {
       return
     }
-    // Ao vivo: zap não reabre bolinha e limpa filtro da lista
+    /*
+     * ZAPE DE LIVE: o spinner nao acende na hora, mas TAMPAO nao e apagado.
+     *
+     * Antesisto aqui era `setBooting(false)` + `setPlaying(true)` incondicional,
+     * com a premissa de que zape e instantaneo. Nao e: neste painel o
+     * `LIGA FUTSAL` respondeu 404 em 8 de 12 canais e o resto demorou ate 8
+     * segundos so no primeiro byte. Durante esse tempo o mpv segura o ULTIMO
+     * quadro do canal anterior — e o dono via um video congelado, com o icone
+     * de pause, sem nenhuma pista de que algo estava acontecendo. O `failed`
+     * so chegava 20 s depois, quando o fallback de `.ts` ja tinha falhado.
+     *
+     * Agora: zape que abre em 450 ms nao acende nada (a janela do App, o mesmo
+     * `LIVE_ZAP_FEEDBACK_MS`), e zape que demora mostra o indicador.
+     */
     if (meta.kind === 'live' && prev !== undefined) {
       setListFilter('')
-      setBooting(false)
-      setPlaying(true)
+      clearLiveZapWait()
+      // Mostrar carregando imediatamente ao trocar de canal ao vivo.
+      // O quadro antigo fica na tela enquanto o mpv abre o novo — sem isso o
+      // dono via uma imagem congelada sem nenhuma pista de que algo estava
+      // acontecendo.
+      setPlaying(false)
+      hasPlayedRef.current = false
+      setBooting(true)
       setControlsVisible(true)
+      // Se o playing chegar antes dos LIVE_ZAP_FEEDBACK_MS, o proprio `playing`
+      // desliga o booting. Se não chegar, o spinner fica na tela até o canal
+      // subir ou falhar.
+      liveZapWaitRef.current = window.setTimeout(() => {
+        liveZapWaitRef.current = 0
+      }, LIVE_ZAP_FEEDBACK_MS)
       return
     }
     hasPlayedRef.current = false
@@ -441,7 +547,7 @@ export function PlayerOverlayApp() {
       typeof meta.durationHint === 'number' && meta.durationHint > 0 ? meta.durationHint : 0
     if (hint > 0) catalogDurationRef.current = hint
     setDuration(meta.kind === 'live' ? 0 : hint)
-  }, [meta.currentId, meta.kind, meta.durationHint])
+  }, [meta.currentId, meta.kind, meta.durationHint, clearLiveZapWait])
 
   useEffect(() => {
     if (meta.kind === 'live') {
@@ -651,9 +757,53 @@ export function PlayerOverlayApp() {
     })
   }, [meta.kind, meta.currentId, allItems, seriesSeasonGroups])
 
+  /*
+   * Favoritos do perfil chegam no `meta` (o overlay e uma janela separada e nao
+   * compartilha estado com o App). Viram Set para a consulta por linha ser O(1) —
+   * a lista chega com ate 400 itens e a busca linear por item em cada render
+   * custava 400 comparacoes vezes o numero de linhas.
+   */
+  const favoritos = useMemo(() => new Set(meta.favorites || []), [meta.favorites])
+
+  /*
+   * Categorias da gavota, com a MESMA ordenacao da gavota do motor nativo.
+   *
+   * Alfabetico cru enterrava a categoria adulta: "ADULTOS +18 | CANAIS" comeca
+   * com A e ia pro topo, enquanto a coluna lateral pegas adultas no FIM de
+   * proposito. Aqui a ordem e a mesma da coluna — normais em ordem, adultas no
+   * final — para os dois lugares apontarem para a mesma categoria no mesmo lugar.
+   */
+  const drawerCategorias = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const item of allItems) {
+      const group = item.group?.trim() || 'Outros'
+      counts.set(group, (counts.get(group) || 0) + 1)
+    }
+    const entradas = [...counts.entries()]
+    const normais = entradas
+      .filter(([group]) => !ehCategoriaAdulta(group))
+      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'))
+    const adultas = entradas
+      .filter(([group]) => ehCategoriaAdulta(group))
+      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'))
+    return [...normais, ...adultas]
+  }, [allItems])
+
   const items = allItems.filter((item) => {
     const q = listFilter.trim().toLowerCase()
     if (meta.kind === 'series' && !q && listSeason && resolveEpisodeSeason(item) !== listSeason) {
+      return false
+    }
+    /*
+     * Aba de categoria: escolher uma categoria estreita a lista de canais.
+     *
+     * O filtro de texto NAO pode zerar a categoria escolhida. Com os dois ativos,
+     * digitar "a" dentro de "ADULTOS +18 | CANAIS" deixava a lista vazia sem
+     * saida visivel, porque o unico jeito de limpar era limpar o texto — e o
+     * texto continua cheio. A gavota do motor nativo faz o mesmo, entao aqui
+     * segue a mesma regra.
+     */
+    if (!q && drawerCategoria && item.group?.trim() !== drawerCategoria) {
       return false
     }
     if (!q) return true
@@ -661,7 +811,58 @@ export function PlayerOverlayApp() {
       item.name?.toLowerCase().includes(q) || resolveEpisodeSeason(item).toLowerCase().includes(q)
     )
   })
-  const showListBtn = (meta.kind === 'series' || meta.kind === 'live') && (meta.list?.length || 0) > 1
+
+  /*
+   * Abas do drawer de FILME: Todos | Dublado | Legendado | Continuacao.
+   * Tudo deriva da MESMA FRANQUIA do filme que esta tocando (ex: Matrix),
+   * nunca do catálogo inteiro. O servidor marca o legendado com [L].
+   */
+  const franquiaRelacionada = meta.franquia || [] // ja exclui o filme de referencia
+  const filmeAgora = useMemo(() => {
+    if (meta.kind !== 'movie') return null
+    return meta.list?.find((item) => item.id === meta.currentId) ?? null
+  }, [meta.kind, meta.list, meta.currentId])
+
+  const movieBins = useMemo(() => {
+    if (meta.kind !== 'movie') return { todos: [], dublado: [], legendado: [], franquia: [] }
+    const completa = [filmeAgora, ...franquiaRelacionada].filter(
+      (item): item is OverlayItem => item != null,
+    )
+    return {
+      todos: completa,
+      dublado: completa.filter((item) => !/\[L\]/i.test(item.name)),
+      legendado: completa.filter((item) => /\[L\]/i.test(item.name)),
+      franquia: franquiaRelacionada,
+    }
+  }, [meta.kind, meta.list, meta.currentId, meta.franquia, filmeAgora])
+
+  useEffect(() => {
+    if (meta.kind !== 'movie') return
+    setListTab((prev) => (prev === 'canais' || prev === 'categorias' ? 'todos' : prev))
+  }, [meta.kind])
+
+  /*
+   * Itens que ficam visiveis na lista do drawer, ja aplicando o filtro de busca
+   * e a aba escolhida (todos / dublado / legendado / franquia).
+   */
+  const drawerItems = useMemo(() => {
+    if (meta.kind !== 'movie') return items
+    const q = listFilter.trim().toLowerCase()
+    const base =
+      listTab === 'dublado'
+        ? movieBins.dublado
+        : listTab === 'legendado'
+          ? movieBins.legendado
+          : listTab === 'franquia'
+            ? movieBins.franquia
+            : movieBins.todos
+    if (!q) return base
+    return base.filter(
+      (item) => item.name?.toLowerCase().includes(q) || resolveEpisodeSeason(item).toLowerCase().includes(q),
+    )
+  }, [meta.kind, listTab, listFilter, items, movieBins])
+
+  const showListBtn = (meta.kind === 'series' || meta.kind === 'live' || meta.kind === 'movie') && (meta.list?.length || 0) > 1
 
   useEffect(() => {
     setListOpen(false)
@@ -961,7 +1162,25 @@ export function PlayerOverlayApp() {
       */}
       <button
         type="button"
-        className={`po-btn po-back${dockVisible ? '' : ' is-hidden'}`}
+        className={`po-btn po-back${
+          /*
+            O dock some por DOIS motivos: o temporizador de auto-hide E o
+            `booting`. So usar o temporizador deixava o voltar sozinho na tela
+            durante o buffering — o "Buffering 15%" com o dock inteiro fora e o
+            voltar parado no canto.
+            
+            Nao volta para `dockVisible`: aquele deriva de `uiVisible`, que tem
+            `|| !playing`. Canal que nunca chega a tocar deixa `!playing`
+            permanentemente verdadeiro, `uiVisible` trava em true e o voltar
+            nunca some — que era o defeito original.
+            
+            Aqui e a interseccao das duas, sem `playing`: some quando o relogio
+            venceu E nao esta carregando. `listOpen` e `failed` seguram porque
+            sao os estados em que a pessoa PRECISA ver o voltar — gavota aberta
+            ou player quebrado sem saida e beco sem saida.
+          */
+          (controlsVisible && !booting) || listOpen || failed ? '' : ' is-hidden'
+        }`}
         title="Voltar"
         aria-label="Voltar"
         onClick={(e) => {
@@ -1095,7 +1314,7 @@ export function PlayerOverlayApp() {
               </svg>
             </IconBtn>
           )}
-
+
           <IconBtn title={showMutedIcon ? 'Ativar som' : 'Mudo'} onClick={toggleMute}>
             <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
               <path d="M2 6v4h3l4 3.5v-11L5 6H2z" />
@@ -1134,27 +1353,29 @@ export function PlayerOverlayApp() {
             </IconBtn>
           )}
 
-          {!isLive && (
-            /*
-             * O ciclo e o mesmo do renderer principal: `fill -> fit -> wide`.
-             * O icone muda no terceiro clique para dizer "esticar", que e o
-             * unico modo que perde a proporcao da imagem.
-             */
-            <IconBtn
-              title={aspectHint(aspect)}
-              onClick={(e) => { e.stopPropagation(); applyAspect(nextAspect(aspect)) }}
-            >
-              {aspect === 'wide' ? (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              ) : (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-                  <path d="M6 2v4a2 2 0 0 1-2 2H2M18 2v4a2 2 0 0 0 2 2h2M6 22v-4a2 2 0 0 0-2-2H2M18 22v-4a2 2 0 0 1 2-2h2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              )}
-            </IconBtn>
-          )}
+          {/*
+           * O ciclo e o mesmo do renderer principal: `fit -> fill -> wide`.
+           * O icone muda no terceiro clique para dizer "esticar", que e o
+           * unico modo que perde a proporcao da imagem.
+           *
+           * Aparece no live tambem: o dono abre canal ao vivo em janela
+           * often e o corte/panscan dele e por canal, nao por tipo de conteudo.
+           * A chave e a mesma nos dois players, entao alternar aqui vale la.
+           */}
+          <IconBtn
+            title={aspectHint(aspect)}
+            onClick={(e) => { e.stopPropagation(); applyAspect(nextAspect(aspect)) }}
+          >
+            {aspect === 'wide' ? (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                <path d="M6 2v4a2 2 0 0 1-2 2H2M18 2v4a2 2 0 0 0 2 2h2M6 22v-4a2 2 0 0 0-2-2H2M18 22v-4a2 2 0 0 1 2-2h2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+          </IconBtn>
 
           <IconBtn title={fullscreen ? 'Sair da tela cheia' : 'Tela cheia'} onClick={toggleFullscreen}>
             <svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
@@ -1171,42 +1392,288 @@ export function PlayerOverlayApp() {
       {listOpen && (
         <aside className="po-drawer" onClick={(e) => e.stopPropagation()}>
           <div className="po-drawer-top">
-            <strong>{meta.kind === 'series' ? 'Episódios' : 'Lista'}</strong>
+            <strong>
+              {meta.kind === 'series'
+                ? 'Episódios'
+                : meta.kind === 'live'
+                  ? 'AO VIVO'
+                  : listTab === 'franquia'
+                    ? 'Continuacao'
+                    : 'Lista'}
+            </strong>
             <button type="button" className="po-btn ghost" onClick={() => setListOpen(false)} aria-label="Fechar">
               <X size={14} />
             </button>
           </div>
-          {meta.kind === 'series' && seriesSeasonGroups.length > 0 && (
-            <SeasonSelect
-              value={listSeason || seriesSeasonGroups[0][0]}
-              onChange={setListSeason}
-              options={seriesSeasonGroups.map(([season, episodes]) => ({
-                value: season,
-                label: formatSeasonOptionLabel(season, episodes.length),
-              }))}
-            />
+          {/*
+            Abas da gavota, por tipo de conteudo.
+
+            LIVE/FILME -> Categorias | Canais. SERIE -> Temporadas | Episodios.
+
+            Serie tem grupo de serie, nao categoria de canal, entao "Categorias"
+            ali seria sempre a mesma linha. E o que a pessoa precisa ver em serie
+            sao as temporadas — que antes so existiam num `<select>` solto acima
+            do filtro, sem contagem e sem a mesma leitura das abas.
+
+            As duas listas sao IRMÃS: escolher uma temporada joga para Episodios,
+            que é a aba que mostra o conteudo dela.
+          */}
+          {(meta.kind === 'series' ? seriesSeasonGroups.length > 0 : drawerCategorias.length > 1) && (
+            <div className="po-drawer-tabs">
+              {meta.kind === 'series' ? (
+                <>
+                  <button
+                    type="button"
+                    className={listTab === 'temporadas' ? 'active' : ''}
+                    onClick={() => setListTab('temporadas')}
+                  >
+                    Temporadas
+                  </button>
+                  <button
+                    type="button"
+                    className={listTab === 'episodios' ? 'active' : ''}
+                    onClick={() => setListTab('episodios')}
+                  >
+                    Episódios
+                  </button>
+                </>
+              ) : meta.kind === 'movie' ? (
+                <>
+                  <button
+                    type="button"
+                    className={listTab === 'todos' ? 'active' : ''}
+                    onClick={() => setListTab('todos')}
+                  >
+                    Todos
+                  </button>
+                  <button
+                    type="button"
+                    className={listTab === 'dublado' ? 'active' : ''}
+                    onClick={() => setListTab('dublado')}
+                  >
+                    Dublado
+                  </button>
+                  <button
+                    type="button"
+                    className={listTab === 'legendado' ? 'active' : ''}
+                    onClick={() => setListTab('legendado')}
+                  >
+                    Legendado
+                  </button>
+                  {movieBins.franquia.length > 0 && (
+                    <button
+                      type="button"
+                      className={listTab === 'franquia' ? 'active' : ''}
+                      onClick={() => setListTab('franquia')}
+                    >
+                      Continuação
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className={listTab === 'categorias' ? 'active' : ''}
+                    onClick={() => setListTab('categorias')}
+                  >
+                    Categorias
+                  </button>
+                  <button
+                    type="button"
+                    className={listTab === 'canais' ? 'active' : ''}
+                    onClick={() => setListTab('canais')}
+                  >
+                    Canais
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+          {/* Aba TEMPORADAS: a lista de temporadas com contagem, no mesmo visual da lista de categorias. */}
+          {meta.kind === 'series' && listTab === 'temporadas' && (
+            <div className="po-drawer-list">
+              {seriesSeasonGroups.map(([season, episodes]) => {
+                const ativa = (listSeason || seriesSeasonGroups[0]?.[0]) === season
+                return (
+                  <button
+                    key={season}
+                    type="button"
+                    className={`po-drawer-category${ativa ? ' active' : ''}`}
+                    onClick={() => {
+                      setListSeason(season)
+                      setListTab('episodios')
+                      showControls()
+                    }}
+                  >
+                    <span className="po-drawer-category-name">{formatSeasonOptionLabel(season, episodes.length)}</span>
+                    <span className="po-drawer-category-count">{episodes.length}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          {/* Serie nao tem grupo para filtrar: o chip de categoria e so de live. */}
+          {meta.kind === 'live' && drawerCategoria && listTab === 'canais' && (
+            <div className="po-drawer-chiprow">
+              <button
+                type="button"
+                className="po-drawer-chip is-on"
+                onClick={() => setDrawerCategoria(null)}
+                title="Limpar filtro de categoria"
+              >
+                {drawerCategoria}
+                <X size={12} />
+              </button>
+            </div>
           )}
           <input
             className="po-drawer-search"
-            placeholder="Filtrar…"
+            placeholder="Filtrar canais…"
             value={listFilter}
             onChange={(e) => setListFilter(e.target.value)}
           />
-          <div className="po-drawer-list">
-            {items.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={`po-drawer-item${item.id === meta.currentId ? ' active' : ''}`}
-                onClick={() => {
-                  sendAction({ type: 'select', id: item.id })
-                  setListOpen(false)
-                  showControls()
-                }}
-              >
-                <span>{item.name}</span>
-              </button>
-            ))}
+          {meta.kind === 'live' && listTab === 'categorias' && (
+            <div className="po-drawer-list">
+              {drawerCategorias.map(([group, count]) => (
+                <button
+                  key={group}
+                  type="button"
+                  className={`po-drawer-category${drawerCategoria === group ? ' active' : ''}`}
+                  onClick={() => {
+                    setDrawerCategoria(group)
+                    setListTab('canais')
+                    showControls()
+                  }}
+                >
+                  <span className="po-drawer-category-name">{group}</span>
+                  <span className="po-drawer-category-count">{count}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div
+            className="po-drawer-list"
+            /*
+             * `hidden` nao servia aqui: o atributo vem do stylesheet do agente do
+             * usuario como `[hidden] { display: none }`, e a regra de autor
+             * `.po-drawer-list { display: flex }` tem a MESMA especificidade e
+             * vence por cascade. Resultado: aba "Categorias" marcada, categorias
+             * na tela e a lista de canais COLADA embaixo, sem sumir.
+             *
+             * Render condicional nao sofre disso: nao existe elemento, nao ha
+             * regra que possa mantê-lo.
+             */
+            style={
+              (meta.kind !== 'series' && listTab === 'categorias') ||
+              (meta.kind === 'series' && listTab === 'temporadas')
+                ? { display: 'none' }
+                : undefined
+            }
+          >
+            {/*
+              Em filme na aba Continuacao, mostra o filme em reproducao no topo
+              ("Assistindo agora") seguido dos demais da mesma franquia. Nas
+              outras abas/outros conteudos usa drawerItems (todos/dublado/
+              legendado ou categorias/canais/temporadas/episodios).
+            */}
+            {(
+              meta.kind === 'movie' && listTab === 'franquia'
+                ? [filmeAgora, ...movieBins.franquia].filter(
+                    (item): item is OverlayItem => item != null,
+                  )
+                : drawerItems
+            ).map((item, idx) => {
+              const ativo = item.id === meta.currentId
+              const favorito = favoritos.has(item.id)
+              const ehAGora =
+                meta.kind === 'movie' &&
+                listTab === 'franquia' &&
+                !!filmeAgora &&
+                item.id === filmeAgora.id
+              return (
+                <div
+                  key={item.id}
+                  className={`po-drawer-row${ativo ? ' active' : ''}${ehAGora ? ' po-drawer-agora' : ''}`}
+                >
+                  <button
+                    type="button"
+                    className="po-drawer-item"
+                    onClick={() => {
+                      sendAction({ type: 'select', id: item.id })
+                      setListOpen(false)
+                      showControls()
+                    }}
+                    disabled={ehAGora}
+                  >
+                    <span className="po-drawer-idx">{ehAGora ? '—' : idx + 1}</span>
+                    <span className="po-drawer-logo" aria-hidden>
+                      {item.logo ? (
+                        <img
+                          src={coverSrc(item.logo)}
+                          alt=""
+                          loading="lazy"
+                          decoding="async"
+                          draggable={false}
+                        />
+                      ) : null}
+                    </span>
+                    <span className="po-drawer-name">{item.name}</span>
+                    {ehAGora && <span className="po-drawer-now">Assistindo agora</span>}
+                  </button>
+                  {/*
+                    O coracao e um botao SEPARADO da linha, e nao dentro dela.
+                    Dentro, clicar no coracao dispararia tambem o `select` — o
+                    favorito piscaria e o canal trocaria junto, que e o opposite
+                    do que se espera de um botao de favorito.
+                  */}
+                  <button
+                    type="button"
+                    className={`po-drawer-fav${favorito ? ' is-on' : ''}`}
+                    aria-label={favorito ? 'Remover dos favoritos' : 'Favoritar'}
+                    title={favorito ? 'Remover dos favoritos' : 'Favoritar'}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      sendAction({ type: 'toggle-favorite', id: item.id })
+                      showControls()
+                    }}
+                  >
+                    <Heart
+                      size={14}
+                      fill={favorito ? 'currentColor' : 'none'}
+                      strokeWidth={2.1}
+                    />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+          {/*
+            Rodape com a contagem e o "Fechar", como na gavota do motor nativo.
+            Sem a contagem nao ha leitura de "o filtro cortou isto de 200 para 12"
+            — a lista encurta em silencio e a pessoa conclui que o canal sumiu.
+          */}
+          <div className="po-drawer-foot">
+            <span>
+              {/*
+                O rodape conta O QUE ESTA NA TELA, como na gavota do motor
+                nativo. Fixo em "canais" ele escrevia "400 canais" com a lista
+                de categorias na frente — uma contagem que nao corresponde a nada
+                que a pessoa estivesse vendo.
+              */}
+              {meta.kind === 'movie'
+                ? listTab === 'franquia'
+                  ? `${movieBins.franquia.length} continuaçoes`
+                  : `${drawerItems.length} filmes`
+                : listTab === 'categorias'
+                  ? `${drawerCategorias.length} categorias`
+                  : listTab === 'temporadas'
+                    ? `${seriesSeasonGroups.length} temporadas`
+                    : `${items.length} ${meta.kind === 'series' ? 'episódios' : 'canais'}`}
+            </span>
+            <button type="button" className="po-drawer-close-text" onClick={() => setListOpen(false)}>
+              Fechar
+            </button>
           </div>
         </aside>
       )}

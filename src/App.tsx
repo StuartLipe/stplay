@@ -78,7 +78,12 @@ import {
   readability,
   textDefaultFor,
 } from './lib/theme-tokens'
-import { peekVodInfoCache, vodInfoCacheKey } from './lib/vod-info-cache'
+import { clearSeriesInfoCache } from './lib/series-info-cache'
+import {
+  clearVodInfoCache,
+  peekVodInfoCache,
+  vodInfoCacheKey,
+} from './lib/vod-info-cache'
 import hamster from './assets/hamster.jpg'
 import { VirtualWindow } from './lib/virtual'
 import { filterGamesAreaLiveChannels, isGamesAreaGroup } from './lib/games-area'
@@ -88,6 +93,7 @@ import {
   groupEpisodesBySeason,
   resolveEpisodeSeason,
 } from './lib/episode-seasons'
+import { filmesDaMesmaFranquia } from './lib/movie-franchise'
 import { SeasonSelect } from './lib/SeasonSelect'
 import { DetailTintView } from './DetailTintView'
 import { withoutContinueItem } from './lib/continue-matching'
@@ -157,6 +163,27 @@ const DEMO: Channel[] = [{ id: 'demo-hls', name: 'Demo HLS (Mux)', group: 'Teste
 const EMPTY: Record<ContentKind, Channel[]> = { live: [], movie: [], series: [] }
 const PROFILE_COLORS = ['#2dd4bf', '#3b82f6', '#f59e0b', '#e879f9', '#fb7185']
 function uid() { return crypto.randomUUID() }
+/**
+ * Imagem de reserva de um card de capa.
+ *
+ * Antes esta expressao vivia DUPLICADA — uma no render (linha do `backup`) e
+ * outra dentro do `useEffect` (linha do `nextBackup`) — e o `onError` do `<img>`
+ * usava a versao do render. Tres copias do mesmo conceito em dois lugares: o
+ * `setCurrent` do efeito e o `setCurrent` do `onError` escreviam valores
+ * parentescos, e quando eles divergiam o card alternava entre os dois sem
+ * parar. O `backup` agora tem UM dono so.
+ *
+ * O ternario tambem era repetido nas duas copias e as duas pernas chamavam
+ * `coverSrc(fallback)`: a unica diferenca era o `|| hamster`, que so se aplica
+ * fora do live. `live` nao ganha placeholder de desenho — canal sem logo fica
+ * com o retangulo, nao com um hamster.
+ */
+function coverBackup(raw: string | undefined, isLive: boolean): string | undefined {
+  const limpo = coverSrc(raw)
+  if (isLive) return limpo
+  return limpo || hamster
+}
+
 function Cover({
   src,
   fallback,
@@ -169,16 +196,26 @@ function Cover({
   live?: boolean
 }) {
   const primary = coverSrc(src)
-  const backup = live ? coverSrc(fallback) : coverSrc(fallback) || hamster
+  const backup = coverBackup(fallback, Boolean(live))
   const [current, setCurrent] = useState(primary || backup)
   const [ready, setReady] = useState(!primary)
   const [broken, setBroken] = useState(false)
+  /*
+   * `quebrou` e um espelho de `broken` para handlers. Um `useState` dentro do
+   * `<img onError>` nao segura o valor dentro do mesmo tick: o React agrupa o
+   * update, o `<img>` continua montado com a mesma `src` quebrada e dispara o
+   * `onError` de novo no commit seguinte. Como o `broken` do estado ja leria
+   * "true" no segundo disparo, o guarda no `onError` abaixo segura — mas o
+   * espelho deixa a intencao explicita e nao depende da ordem de commit.
+   */
+  const quebrou = useRef(false)
 
   useEffect(() => {
     let cancelled = false
     const nextPrimary = coverSrc(src)
-    const nextBackup = live ? coverSrc(fallback) : coverSrc(fallback) || hamster
+    const nextBackup = coverBackup(fallback, Boolean(live))
     setBroken(false)
+    quebrou.current = false
 
     if (!nextPrimary) {
       setCurrent(nextBackup)
@@ -255,6 +292,14 @@ function Cover({
       decoding="async"
       draggable={false}
       onError={() => {
+        /*
+         * Terminal. Sem este guarda o `<img>` continua montado com a mesma `src`
+         * quebrada e o navegador dispara `onError` de novo no proximo commit —
+         * e se `backup` for tambem uma URL quebrada, isso vira o ciclo que
+         * encerrou o renderer em "Maximum update depth exceeded".
+         */
+        if (quebrou.current) return
+        quebrou.current = true
         if (live) {
           setBroken(true)
           setReady(true)
@@ -1194,6 +1239,18 @@ export default function App() {
       // App nem refazia a busca.
       clearCatalog(updated.id)
       clearXtreamM3uCache(updated.id)
+      /*
+       * E os caches de METADATA: `clearVodInfoCache` e `clearSeriesInfoCache`
+       * estavam declarados e nunca chamados por ninguem.
+       *
+       * A chave deles e `${playlistId}:${vodId}` — nao tem host nem credencial
+       * dentro. Trocar usuario/senha mantinha o mesmo `playlistId`, entao o
+       * synopsis, a nota e a capa do filme vinham da conta ANTERIOR, ate o TTL
+       * de 24 h expirar sozinho. Trocar de conta e continuar vendo o catalogo
+       * antigo na tela de detalhe e vazamento entre contas, nao so cache sujo.
+       */
+      clearVodInfoCache()
+      clearSeriesInfoCache()
       setCatalogs({ live: [], movie: [], series: [] })
       setServerCategories({ movie: [], series: [] })
       setSelectedGroups({ live: 'Todos', movie: 'Todos', series: 'Todos' })
@@ -1796,11 +1853,24 @@ export default function App() {
       const openMovie = () => {
         resetPlayerChrome()
         void window.sturplay?.player?.hide?.()
+        /*
+         * Mesmo motivo do live: a gavota de zape agrupa por `group` e precisa
+         * do catalogo inteiro. Com a lista da categoria selecionada ela aparecia
+         * com "1 categoria" e nao deixava pular para nenhum outro filme.
+         * O bloqueio parental entra aqui pelo mesmo motivo — o `list` antigo
+         * vinha filtrado do `browseList`.
+         */
+        const zapList =
+          catalogs.movie.length > 1
+            ? Boolean(settings.parentalPin) && !parentalUnlocked
+              ? catalogs.movie.filter((c) => !ehCanalAdulto(c))
+              : catalogs.movie
+            : list
         startTransition(() =>
           setView({
             name: 'movie',
             movie: fresh,
-            list,
+            list: zapList,
             startTime: autoPlay ? startTime : undefined,
             autoPlay,
           }),
@@ -1815,7 +1885,33 @@ export default function App() {
       setView({
         name: 'player',
         channel: { ...channel, kind: channel.kind || 'live' },
-        list,
+        /*
+         * O zape do player recebe o CATALOGO INTEIRO, nao a lista de onde o
+         * canal foi aberto.
+         *
+         * O `list` que chegava aqui era o da categoria selecionada: abrir pelo
+         * grupo "NBA League Pass" entregava so aqueles 23 canais, e a gavota de
+         * lista do player — que agrupa por `group` — aparecia com "1 categoria".
+         * Uma pessoa que abriu um canal pelo grupo nao deve ficar presa no
+         * grupo: a gavota existe justamente para pular para QUALQUER canal.
+         *
+         * `catalogs.live` e a fonte completa. O `list` continua como reserva
+         * para quando o catalogo ainda nao carregou (a gavota pode abrir antes
+         * do catalogo terminar), e para o caso de o item nao ser do catalogo
+         * maior (demo, canal local).
+         *
+         * E o filtro do bloqueio parental entra AQUI, porque o `list` antigo
+         * vinha do `browseList`, que ja filtrava. Trocar pela lista crua
+         * devolveria as categorias adultas para a gavota de quem esta com a
+         * protecao trancada — o nome "ADULTOS +18 | CANAIS" no rodape da gavota
+         * seria o vazamento, mesmo sem nenhum canal cliquavel.
+         */
+        list:
+          catalogs.live.length > 1
+            ? Boolean(settings.parentalPin) && !parentalUnlocked
+              ? catalogs.live.filter((c) => !ehCanalAdulto(c))
+              : catalogs.live
+            : list,
         startTime,
         fromLive: view.name === 'browse' ? 'browse' : 'home',
         autoFullscreen: opts?.autoFullscreen,
@@ -10070,9 +10166,9 @@ function readStoredVolume() {
  */
 function readStoredAspect(): VideoFit {
   try {
-    return normalizeAspect(localStorage.getItem('stplay.video-aspect'))
+    return normalizeAspect()
   } catch {
-    return 'fill'
+    return 'fit'
   }
 }
 
@@ -10120,7 +10216,7 @@ function Player({
   const [overlay, setOverlay] = useState(true)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [drawerSearch, setDrawerSearch] = useState('')
-  const [drawerTab, setDrawerTab] = useState<'channels' | 'categories'>('channels')
+  const [drawerTab, setDrawerTab] = useState<'channels' | 'categories' | 'temporadas' | 'episodios'>('channels')
   const [drawerCategory, setDrawerCategory] = useState<string | null>(null)
   const [drawerSeason, setDrawerSeason] = useState<string | null>(null)
   const drawerOpenRef = useRef(false)
@@ -10357,7 +10453,28 @@ function Player({
       const group = item.group?.trim() || 'Outros'
       counts.set(group, (counts.get(group) || 0) + 1)
     }
-    return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'))
+    const entradas = [...counts.entries()]
+    /*
+     * Ordena como a coluna lateral, e nao alfabeticamente cru.
+     *
+     * Aqui era `sort(localeCompare)`, que e o que enterrava a categoria adulta:
+     * "ADULTOS +18 | CANAIS" comeca com A, entao ia para o TOPO absoluto da lista,
+     * enquanto a coluna lateral pegas adultas no FINAL de proposito (o
+     * `groups` faz `[...top, ...priorityGroups, ...regular, ...adult]`). O drawer
+     * abria no fim, onde a pessoa esta, e as duas categorias adultas ficavam
+     * acima do alcance — parecendo nao existir. A contagem do rodape
+     * ("36 categorias") confirmava: eram as duas unicas faltando.
+     *
+     * Aqui o drawer e a lista zapeando. Adulta la embaixo e onde a pessoa a
+     * espera, e e onde ela ja procurava na coluna.
+     */
+    const normais = entradas
+      .filter(([group]) => !ehCategoriaAdulta(group))
+      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'))
+    const adultas = entradas
+      .filter(([group]) => ehCategoriaAdulta(group))
+      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'))
+    return [...normais, ...adultas]
   }, [list])
 
   const seriesSeasonGroups = useMemo(() => {
@@ -11533,13 +11650,27 @@ const manager = new PlayerManager({
       id: item.id,
       name: item.name,
       group: item.group,
+      logo: item.logo,
     }))
+    // Mesmo franquia so para filme, calculada a partir do catalogo completo
+    // (list ja e zapList = catalogs.movie para o modo movie).
+    const franquia =
+      channel.kind === 'movie'
+        ? filmesDaMesmaFranquia(channel, list).map((item) => ({
+            id: item.id,
+            name: item.name,
+            group: item.group,
+            logo: item.logo,
+          }))
+        : []
     void window.sturplay?.player?.setOverlayMeta?.({
       engine: engineLabel,
       title: channel.name,
       kind: channel.kind,
       currentId: channel.id,
       list: items,
+      favorites,
+      franquia,
       durationHint:
         channel.kind === 'live' ? 0 : parseVodDurationSec(channel, progress),
     })
@@ -11553,12 +11684,29 @@ const manager = new PlayerManager({
     channel.duration,
     list,
     progress,
+    // O overlay mostra o coracao de favorito em cada linha. Sem `favorites` na
+    // dependencia, favouritar um canal pela gaveta nao atualizava nada la — o
+    // coracao ficaria marcado errado ate o proximo boot.
+    favorites,
   ])
 
   useEffect(() => {
     if (!useBufferedNative) return
     const off = window.sturplay?.player?.onOverlayAction?.((action) => {
       const type = String(action?.type || '')
+      /*
+       * Coracao de favorito na gavota do overlay.
+       *
+       * O overlay e uma janela SEPARADA e nao alcanca o estado do App, entao
+       * favoritar por la precisa voltar por acao. `onToggleFavorite` e o mesmo
+       * caminho que o botao da coluna usa — um caminho so para favoritar, sem
+       * uma segunda versao que divergiria do perfil.
+       */
+      if (type === 'toggle-favorite') {
+        const favId = String(action?.id || '')
+        if (favId) onToggleFavorite(favId)
+        return
+      }
       if (type === 'back') {
         /*
           Voltar = o que o botao da barra faz.
@@ -11710,6 +11858,24 @@ const manager = new PlayerManager({
   const isVod = channel.kind !== 'live'
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0
 
+  /* Continuação da franquia (Matrix → Reloaded → Revolutions → Resurrections) */
+  const [franquiaListOpen, setFranquiaListOpen] = useState(false)
+  const [franquiaAbaPlayer, setFranquiaAbaPlayer] = useState<'dublado' | 'legendado'>('dublado')
+  const filmesFranquia = useMemo(() => {
+    const todos = filmesDaMesmaFranquia(channel, list)
+    // Exclui versões [L] quando já existe a versão dublada do mesmo filme base
+    const nomesDublados = new Set(
+      todos
+        .filter((c) => !/\[L\]/i.test(c.name))
+        .map((c) => c.name.replace(/[\[\]()]/g, '').trim())
+    )
+    return todos.filter((c) => {
+      const temL = /\[L\]/i.test(c.name)
+      if (temL && nomesDublados.has(c.name.replace(/[\[\]()]/g, '').trim())) return false
+      return true
+    })
+  }, [channel, list])
+
   // Overlay (STUR/MPEG) é o dono do loading — UMA tela de
   // loading só. O spinner do App aparecia junto com o véu do overlay
   // (texto duplo empilhado). A partir do 1º evento nativo o overlay assume.
@@ -11746,7 +11912,7 @@ const manager = new PlayerManager({
       />
 
       {showNativeBoot && !playbackError && (
-        <div className="player-spinner-wrap">
+        <div className="player-spinner-wrap is-boot">
           <div className="player-spinner" />
           <p className="player-buffer-label">
             Enchendo o buffer para reprodução fluida…
@@ -12060,6 +12226,21 @@ const manager = new PlayerManager({
                   <List size={18} />
                 </button>
               )}
+              {/* Continuação da franquia: só para filmes (VOD), ao lado da lista de episódios */}
+              {isVod && (
+                <button
+                  className="player-btn-clean"
+                  onClick={() => {
+                    setFranquiaListOpen((value) => !value)
+                    bumpOverlay()
+                  }}
+                  title="Continuação da franquia"
+                  aria-label="Continuação da franquia"
+                >
+                  <List size={18} />
+                </button>
+              )}
+              {/* ICONE_LISTA_FORCE */}
               <button
                 className={`player-btn-clean${isFs ? ' is-active' : ''}`}
                 onClick={toggleFullscreen}
@@ -12081,14 +12262,26 @@ const manager = new PlayerManager({
                 {channel.kind === 'series' ? 'Episódios' : 'Ao vivo'}
               </span>
               {channel.kind === 'series' && seriesSeasonGroups.length > 0 && (
-                <SeasonSelect
-                  value={drawerSeason || seriesSeasonGroups[0][0]}
-                  onChange={setDrawerSeason}
-                  options={seriesSeasonGroups.map(([season, episodes]) => ({
-                    value: season,
-                    label: formatSeasonOptionLabel(season, episodes.length),
-                  }))}
-                />
+                <div className="channel-drawer-tabs" role="tablist" aria-label="Visão da lista">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={drawerTab === 'temporadas'}
+                    className={drawerTab === 'temporadas' ? 'active' : ''}
+                    onClick={() => setDrawerTab('temporadas')}
+                  >
+                    Temporadas
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={drawerTab === 'episodios'}
+                    className={drawerTab === 'episodios' ? 'active' : ''}
+                    onClick={() => setDrawerTab('episodios')}
+                  >
+                    Episódios
+                  </button>
+                </div>
               )}
               <div className="channel-drawer-search">
                 <Search size={14} className="channel-drawer-search-icon" strokeWidth={2.2} aria-hidden />
@@ -12147,7 +12340,25 @@ const manager = new PlayerManager({
             </div>
 
             <div className="channel-drawer-list">
-              {channel.kind === 'live' && drawerTab === 'categories' ? (
+              {channel.kind === 'series' && drawerTab === 'temporadas' ? (
+                seriesSeasonGroups.map(([season, episodes]) => {
+                  const ativa = (drawerSeason || seriesSeasonGroups[0]?.[0]) === season
+                  return (
+                    <button
+                      key={season}
+                      type="button"
+                      className={`channel-drawer-category${ativa ? ' active' : ''}`}
+                      onClick={() => {
+                        setDrawerSeason(season)
+                        setDrawerTab('episodios')
+                      }}
+                    >
+                      <span className="channel-drawer-name">{formatSeasonOptionLabel(season, episodes.length)}</span>
+                      <span className="channel-drawer-count">{episodes.length}</span>
+                    </button>
+                  )
+                })
+              ) : channel.kind === 'live' && drawerTab === 'categories' ? (
                 drawerCategories.map(([group, count]) => (
                   <button
                     key={group}
@@ -12211,9 +12422,11 @@ const manager = new PlayerManager({
 
             <div className="channel-drawer-footer">
               <span>
-                {drawerTab === 'categories'
-                  ? `${drawerCategories.length} categorias`
-                  : `${filteredZap.length} ${channel.kind === 'series' ? 'episódios' : 'canais'}`}
+                {channel.kind === 'series' && drawerTab === 'temporadas'
+                  ? `${seriesSeasonGroups.length} temporadas`
+                  : drawerTab === 'categories'
+                    ? `${drawerCategories.length} categorias`
+                    : `${filteredZap.length} ${channel.kind === 'series' ? 'episódios' : 'canais'}`}
               </span>
               <button
                 type="button"
@@ -12225,7 +12438,79 @@ const manager = new PlayerManager({
             </div>
           </aside>
         )}
+
+        {/* Continuação da franquia: flutuante sobre o vídeo (STUR e MPEG/mpv nativo) */}
+        {franquiaListOpen && (
+          <aside className="channel-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="channel-drawer-top">
+              <span className="channel-drawer-title">Continuação da franquia</span>
+              <button type="button" className="channel-drawer-close-text" onClick={() => setFranquiaListOpen(false)}>
+                Fechar
+              </button>
+            </div>
+            <div className="channel-drawer-tabs" role="tablist" aria-label="Continuação da franquia">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={franquiaAbaPlayer === 'dublado'}
+                className={franquiaAbaPlayer === 'dublado' ? 'active' : ''}
+                onClick={() => setFranquiaAbaPlayer('dublado')}
+              >
+                Dublado
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={franquiaAbaPlayer === 'legendado'}
+                className={franquiaAbaPlayer === 'legendado' ? 'active' : ''}
+                onClick={() => setFranquiaAbaPlayer('legendado')}
+              >
+                Legendado
+              </button>
+            </div>
+            <div className="channel-drawer-list">
+              {filmesFranquia
+                .filter((c) => (franquiaAbaPlayer === 'dublado' ? !/\[L\]/i.test(c.name) : /\[L\]/i.test(c.name)))
+                .map((c) => {
+                  const isActive = c.id === channel.id
+                  return (
+                    <div key={c.id} className={`channel-drawer-item${isActive ? ' active' : ''}`}>
+                      <button
+                        type="button"
+                        className="channel-drawer-item-main"
+                        onClick={() => {
+                          onChange(c)
+                          setFranquiaListOpen(false)
+                        }}
+                      >
+                        {channel.kind !== 'series' && (
+                          <span className="channel-drawer-num">{channelIndexMap.get(c.id) ?? '—'}</span>
+                        )}
+                        {channel.kind !== 'series' && (
+                          <span className="channel-drawer-logo">
+                            <Cover src={c.logo} small live={false} />
+                          </span>
+                        )}
+                        <span className="channel-drawer-name">{c.name}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`channel-drawer-fav${favorites.includes(c.id) ? ' is-fav' : ''}`}
+                        title={favorites.includes(c.id) ? 'Remover dos favoritos' : 'Favoritar'}
+                        aria-label={favorites.includes(c.id) ? 'Remover dos favoritos' : 'Favoritar'}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onToggleFavorite(c.id)
+                        }}
+                      >
+                        <Heart size={14} fill={favorites.includes(c.id) ? 'currentColor' : 'none'} strokeWidth={2.1} />
+                      </button>
+                    </div>
+                  )
+                })}
+            </div>
+          </aside>
+        )}
     </div>
   )
 }
-
