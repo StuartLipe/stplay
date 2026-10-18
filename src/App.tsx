@@ -93,7 +93,7 @@ import {
   groupEpisodesBySeason,
   resolveEpisodeSeason,
 } from './lib/episode-seasons'
-import { filmesDaMesmaFranquia } from './lib/movie-franchise'
+import { sagasDaFranquia, getItemReleaseTime } from './lib/movie-franchise'
 import { SeasonSelect } from './lib/SeasonSelect'
 import { DetailTintView } from './DetailTintView'
 import { withoutContinueItem } from './lib/continue-matching'
@@ -2420,6 +2420,7 @@ export default function App() {
           startTime={view.startTime}
           autoFullscreen={view.autoFullscreen}
           playbackEngine={settings.player}
+          parentalLocked={Boolean(settings.parentalPin) && !parentalUnlocked}
           onFav={() => toggleFav(view.channel.id)}
           onToggleFavorite={toggleFav}
           onProgress={(currentTime, duration) => updateProgress(view.channel, currentTime, duration)}
@@ -2863,6 +2864,20 @@ function HomeDiscover({
     () =>
       continueWatching
         .filter((item) => item.channel.kind === 'movie' || item.channel.kind === 'series')
+        /*
+         * MAIS RECENTE PRIMEIRO.
+         *
+         * `updateProgress` reescreve o item no FIM do array (`[...next, item]`),
+         * e o `slice(0, 14)` corta pelo fim. Quemacabava de assistir ficava
+         * no ultimo lugar da linha: o Episodio II, recem-terminado, aparecia
+         * depois de Star Trek e Rambo.
+         *
+         * Ordenar por `updatedAt` deixa a linha em "acabou de assistir" sem
+         * depender da ordem de insercao — e vale tambem para o que veio do
+         * armazenamento, que ja entra ordenado.
+         */
+        .slice()
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
         .slice(0, 14),
     [continueWatching],
   )
@@ -5962,7 +5977,15 @@ function searchWordMatches(hay: string, word: string): boolean {
   if (hay.includes(word)) return true
   const parts = hay.split(/\s+/).filter(Boolean)
   for (const part of parts) {
-    if (part.startsWith(word) || word.startsWith(part)) return true
+    if (part.startsWith(word)) return true
+    /*
+     * `word.startsWith(part)` casa com QUALQUER artigo: "shurek".startsWith("a")
+     * e verdadeiro, entao toda obra com um "a" solto no titulo — quase todas —
+     * entrava no resultado. Aqui so vale quando `part` e palavra de conteudo:
+     * a comparacao tem de ser por PALAVRA, nunca por prefixo de caractere de
+     * uma letra.
+     */
+    if (part.length >= 3 && word.startsWith(part)) return true
     if (word.length >= 4 && part.length >= 4 && levenshtein(part, word) <= 1) return true
   }
   return false
@@ -6256,14 +6279,6 @@ function extractYearFromText(...sources: Array<string | number | undefined | nul
   return undefined
 }
 
-function extractParentheticalYear(name?: string): string | undefined {
-  if (!name) return undefined
-  const matches = [...String(name).matchAll(/\(\s*((?:19|20)\d{2})\s*\)/g)]
-  if (matches.length === 0) return undefined
-  const year = parseInt(matches[matches.length - 1][1], 10)
-  return yearIsPlausible(year) ? String(year) : undefined
-}
-
 /** Replay de F1/GP no catálogo de filmes — não deve ocupar o topo do Padrão. */
 function isVodSportsDump(channel: Channel): boolean {
   const hay = normalizeForMatching(`${channel.name || ''} ${channel.group || ''}`)
@@ -6310,27 +6325,7 @@ function getItemAddedTime(channel?: Channel): number {
   return 0
 }
 
-function getItemReleaseTime(channel?: Channel): number {
-  if (!channel) return 0
-  // 1. Campo Lançamento completo (ano-mês-dia)
-  if (channel.releasedate) {
-    const raw = String(channel.releasedate).trim()
-    const parsed = Date.parse(raw)
-    if (!isNaN(parsed) && parsed > 0) {
-      const year = new Date(parsed).getUTCFullYear()
-      if (yearIsPlausible(year)) return parsed
-    }
-    const yearMatch = raw.match(/\b(19\d\d|20\d\d)\b/)
-    if (yearMatch) {
-      const year = parseInt(yearMatch[1], 10)
-      if (yearIsPlausible(year)) return Date.UTC(year, 0, 1)
-    }
-  }
-  // 2. Só ano entre parênteses no nome — "2049" / "Formula 1 2025" no meio do título não conta
-  const fromName = extractParentheticalYear(channel.name)
-  if (fromName) return Date.UTC(parseInt(fromName, 10), 0, 1)
-  return 0
-}
+
 
 /** Nome limpo pra A-Z (ignora "...", "+", "007 -" / "007 Título" no começo — igual leitura das séries). */
 function sortCleanName(name?: string): string {
@@ -6736,6 +6731,19 @@ function Browse({
       ? selectedGroup
       : 'Todos'
 
+  /*
+   * A busca so pode filtrar por categoria quando a selecionada e uma categoria
+   * REAL do catalogo. As primeiras entradas da coluna — "Todos", "Continuar
+   * Assistindo", "Adicionado Recentemente", "TREND FILMES" — sao visoes
+   * calculadas: comparar `channel.group` com esses nomes por igualdade nao
+   * casaria com nada e a busca voltaria vazia.
+   */
+  const buscaPreservaCategoria = useMemo(() => {
+    if (!group) return false
+    for (const c of channels) if (c.group === group) return true
+    return false
+  }, [channels, group])
+
   useEffect(() => {
     if (groupsRef.current && savedScroll?.groups) {
       groupsRef.current.scrollTop = savedScroll.groups
@@ -7069,6 +7077,16 @@ function Browse({
     for (const channel of channels) {
       if (hiddenChannelSet.has(channel.id) || hiddenGroupSet.has(channel.group)) continue
       if (!allowAdult && ehCanalAdulto(channel)) continue
+      /*
+       * A BUSCA RESPETA A CATEGORIA ESCOLHIDA.
+       *
+       * O laco acima varre `channels`, o catalogo INTEIRO, e nao comparava o
+       * grupo. Com "Animacao" selecionada, buscar "shurek" devolvia
+       * "A Father's Legacy", "Baywatch" e "Bobi Wine" — filmes de acao e
+       * comedia. Quem escolheu uma categoria espera results DENTRO dela; sem
+       * isto o clique na categoria nao tinha efeito nenhum durante a busca.
+       */
+      if (buscaPreservaCategoria && channel.group !== group) continue
       const score = searchMatchScore(channel, search, searchHaystack?.get(channel.id))
       if (score <= 0) continue
       matched.push(channel)
@@ -7084,6 +7102,8 @@ function Browse({
     searchHaystack,
     hiddenChannelSet,
     hiddenGroupSet,
+    buscaPreservaCategoria,
+    group,
   ])
 
   useEffect(() => {
@@ -7101,10 +7121,56 @@ function Browse({
   // ainda chega e `list.length` muda, curando sozinho; com as duas listas já em
   // cache, `list.length` é idêntico e o restore ficava morto para sempre.
   const restoredKeyRef = useRef('')
+  /*
+   * Scroll guardado na abertura do detalhe.
+   *
+   * `showGrid` DESMONTA a grade inteira enquanto o detalhe esta aberto (App.tsx
+   * ~7394). O nó do container vai junto, e o `scrollTop` com ele — ao voltar, o
+   * navegador reancora o offset antigo numa altura que ja mudou e a grade abre
+   * no meio. Guardar o valor no `onScroll` e devolver no `useLayoutEffect`
+   * (que roda antes do paint) mantem a volta exatamente onde a pessoa estava.
+   */
+  const scrollAntesDoDetalhe = useRef(0)
+  const restoreContextoRef = useRef<{ kind: string; group: string } | null>(null)
+
   useLayoutEffect(() => {
-    const key = `${playlist?.id ?? 'none'}:${kind}`
-    if (restoredKeyRef.current === key) return
+    if (detailPane || !scrollAntesDoDetalhe.current) return
+    const alvo = scrollAntesDoDetalhe.current
+    scrollAntesDoDetalhe.current = 0
     const el = scrollRef.current
+    if (!el) return
+    // Duas escritas: a primeira pode ser limitada se os cards ainda nao
+    // renderizaram, a segunda depois do espaco ter crescido.
+    el.scrollTop = alvo
+    const id = window.setTimeout(() => {
+      if (scrollRef.current) scrollRef.current.scrollTop = alvo
+    }, 120)
+    return () => window.clearTimeout(id)
+  }, [detailPane])
+
+  useLayoutEffect(() => {
+    const key = `${playlist?.id ?? 'none'}:${kind}:${group}`
+    if (restoredKeyRef.current === key) return
+
+    /*
+     * TROCA DE CATEGORIA DENTRO DO MESMO TIPO VOLTA AO TOPO.
+     *
+     * A chave de restauração carregava `playlist` e `kind`, mas nao `group`.
+     * `savedScroll.channels` e um valor so, compartilhado por todas as
+     * categorias: ao ir de "Acao" (rolada no fim) para "Animacao", o offset da
+     * Acao era aplicado na Animacao e a grade pulava sozinha.
+     */
+    const anterior = restoreContextoRef.current
+    const mudouCategoria = anterior?.kind === kind && anterior.group !== group
+    restoreContextoRef.current = { kind, group }
+
+    const el = scrollRef.current
+    if (mudouCategoria) {
+      if (el) el.scrollTop = 0
+      restoredKeyRef.current = key
+      return
+    }
+
     const target = Number(savedScroll?.channels)
     // Sem container, sem offset salvo, ou catálogo ainda sem altura de rolagem:
     // não marca como feito, para tentar de novo quando a lista chegar.
@@ -9378,7 +9444,18 @@ function SeriesView({
       {playSession ? (
         <aside className="movie-embedded-panel vod-windowed-panel live-preview-panel live-preview-player">
           <Player
-            key={`${playSession.channel.id}-${playSession.startTime}`}
+            /*
+             * A key e IDENTIDADE, e identidade nao muda de valor: aqui so o
+             * canal. `startTime` no mesmo lugar da key fazia o React desmontar
+             * e remontar o Player quando a posicao de retomada era ajustada
+             * (934.725456 -> 934), e cada remontagem roda o efeito de play de
+             * novo — o log mostrava o MESMO arquivo com `start` repetido 4x,
+             * inclusive depois de `file-loaded` e `first frame`.
+             *
+             * `startTime` continua sendo passado como prop; o Player le uma vez
+             * no boot.
+             */
+            key={playSession.channel.id}
             embedded
             channel={playSession.channel}
             list={playSession.list}
@@ -10186,6 +10263,12 @@ function Player({
   embedded = false,
   fullscreenRequest = 0,
   playbackEngine = 'internal',
+  /*
+   * Protecao parental ligada: existe PIN e ainda nao foi destravado. O Player
+   * usa para NAO listar conteudo adulto na gaveta de continuacao — sem isto,
+   * a serie de um desenho infantil vinha com os "[XXX]" da mesma "franquia".
+   */
+  parentalLocked: parentalLockedProp = false,
   onFav,
   onToggleFavorite,
   onChange,
@@ -10203,6 +10286,8 @@ function Player({
   embedded?: boolean
   fullscreenRequest?: number
   playbackEngine?: PlaybackEngine
+  /** Protecao parental ligada: esconde conteudo adulto da gaveta de saga. */
+  parentalLocked?: boolean
   onFav: () => void
   onToggleFavorite: (id: string) => void
   onChange: (channel: Channel) => void
@@ -11365,8 +11450,27 @@ const manager = new PlayerManager({
 
   const isAudioMuted = muted || volume <= 0
 
+  /*
+   * Origem do ultimo volume: 'overlay' quando veio da janela do player.
+   *
+   * O overlay JA aplicou o volume no motor antes de avisar o App. Sem esta
+   * marca, o `setVolume` do App disparava este efeito e o mesmo volume chegava
+   * ao mpv de novo — cada ajuste saia duplicado no log. O App so reenvia o que
+   * ele proprio mudou (o slider do painel, um atalho de teclado).
+   */
+  const volumeRefFromOverlay = useRef(false)
+
   useEffect(() => {
+    /*
+     * Consome a marca ANTES dos guards. Se ficasse depois, o STUR (que usa
+     * `useBufferedNative` e sai no guard) nunca limparia a marca, e ela
+     * silenciaria o proximo volume mudado pelo proprio App.
+     */
+    const veioDoOverlay = volumeRefFromOverlay.current
+    volumeRefFromOverlay.current = false
+
     if (!useNativePlayer || useBufferedNative) return
+    if (veioDoOverlay) return
     void managerRef.current?.command({ op: 'volume', value: muted ? 0 : volume })
   }, [useNativePlayer, useBufferedNative, volume, muted])
 
@@ -11654,15 +11758,36 @@ const manager = new PlayerManager({
     }))
     // Mesmo franquia so para filme, calculada a partir do catalogo completo
     // (list ja e zapList = catalogs.movie para o modo movie).
-    const franquia =
+    const sagas =
       channel.kind === 'movie'
-        ? filmesDaMesmaFranquia(channel, list).map((item) => ({
-            id: item.id,
-            name: item.name,
-            group: item.group,
-            logo: item.logo,
+        ? sagasDaFranquia(channel, list)
+            /*
+             * Sem isto, a gaveta de um filme infantil listava os filmes adultos
+             * da mesma "franquia": em Barbie vinham "[XXX] Barbie Cunnings" e
+             * "Barbie Omg The Latest Ch..." no meio da serie. O agrupamento
+             * ignora o conteudo — ele so olha o nome — entao quem filtra e o
+             * App, que e onde mora a regra de protecao.
+             *
+             * Segue a MESMA regra da grade: com a protecao trancada, adulto nao
+             * aparece. Com ela desligada, aparece (e a pessoa pediu para ver).
+             */
+            .map((s) => ({
+              ...s,
+              filmes: parentalLockedProp ? s.filmes.filter((item) => !ehCanalAdulto(item)) : s.filmes,
+            }))
+            // Bloco que ficou vazio depois do filtro nao tem o que mostrar.
+            .filter((s) => s.filmes.length > 0)
+            .map((s) => ({
+            principal: s.principal,
+            filmes: s.filmes.map((item) => ({
+              id: item.id,
+              name: item.name,
+              group: item.group,
+              logo: item.logo,
+            })),
           }))
         : []
+    const franquia = sagas.flatMap((s) => s.filmes)
     void window.sturplay?.player?.setOverlayMeta?.({
       engine: engineLabel,
       title: channel.name,
@@ -11671,6 +11796,7 @@ const manager = new PlayerManager({
       list: items,
       favorites,
       franquia,
+      sagas,
       durationHint:
         channel.kind === 'live' ? 0 : parseVodDurationSec(channel, progress),
     })
@@ -11688,6 +11814,9 @@ const manager = new PlayerManager({
     // dependencia, favouritar um canal pela gaveta nao atualizava nada la — o
     // coracao ficaria marcado errado ate o proximo boot.
     favorites,
+    // A filtragem de adulto acima depende do cadeado. Sem isto, destravar a
+    // protecao nao trazia os filmes adultos de volta para a gaveta.
+    parentalLockedProp,
   ])
 
   useEffect(() => {
@@ -11786,6 +11915,8 @@ const manager = new PlayerManager({
         return
       }
       if (type === 'volume' && typeof action.value === 'number') {
+        // O overlay ja aplicou no motor: nao repetir daqui.
+        volumeRefFromOverlay.current = true
         setVolume(action.value)
         try {
           localStorage.setItem('stplay.volume', String(action.value))
@@ -11796,6 +11927,7 @@ const manager = new PlayerManager({
         return
       }
       if (type === 'mute' && typeof action.value === 'boolean') {
+        volumeRefFromOverlay.current = true
         setMuted(action.value)
       }
     })
@@ -11862,7 +11994,10 @@ const manager = new PlayerManager({
   const [franquiaListOpen, setFranquiaListOpen] = useState(false)
   const [franquiaAbaPlayer, setFranquiaAbaPlayer] = useState<'dublado' | 'legendado'>('dublado')
   const filmesFranquia = useMemo(() => {
-    const todos = filmesDaMesmaFranquia(channel, list)
+    const brutos = sagasDaFranquia(channel, list).flatMap((s) => s.filmes)
+    // Mesma regra da gavota do overlay: com a protecao trancada, adulto nao
+    // entra na lista de continuacao de um filme infantil.
+    const todos = parentalLockedProp ? brutos.filter((c) => !ehCanalAdulto(c)) : brutos
     // Exclui versões [L] quando já existe a versão dublada do mesmo filme base
     const nomesDublados = new Set(
       todos
@@ -11874,7 +12009,7 @@ const manager = new PlayerManager({
       if (temL && nomesDublados.has(c.name.replace(/[\[\]()]/g, '').trim())) return false
       return true
     })
-  }, [channel, list])
+  }, [channel, list, parentalLockedProp])
 
   // Overlay (STUR/MPEG) é o dono do loading — UMA tela de
   // loading só. O spinner do App aparecia junto com o véu do overlay

@@ -11914,6 +11914,16 @@ html.player-overlay-mode #root {
   border: 1px solid transparent;
   background: transparent;
   transition: background 0.15s ease, border-color 0.15s ease;
+  /*
+   * `flex-shrink: 0` e obrigario dentro de `.po-drawer-saga`, que e um container
+   * flex de coluna. Sem isto a LINHA inteira era comprimida na vertical: a capa
+   * de 32px saia achatada numa faixa e o nome, ao quebrar em varias linhas, era
+   * cortado depois da primeira — o cartao virava uma tira ilegivel.
+   *
+   * A lista tem `overflow-y: auto`, entao a altura erolada: nunca falta espaco
+   * para as linhas, so nao podem encolher.
+   */
+  flex-shrink: 0;
 }
 
 .po-drawer-row:hover {
@@ -11956,13 +11966,32 @@ html.player-overlay-mode #root {
 .po-drawer-logo {
   width: 32px;
   height: 32px;
+  /*
+   * `min-*` alem de `width/height`: `height: 100%` do `img` filho resolvia
+   * contra a altura da linha, e uma linha comprimida achatava a capa numa
+   * faixa. Com o minimo travado, a capa e sempre um quadrado de 32px.
+   */
+  min-width: 32px;
+  min-height: 32px;
+  aspect-ratio: 1;
+  /*
+   * Capa distorcida: `height: 100%` do `img` resolvia contra a altura da linha,
+   * e numa linha mais alta a imagem esticava na horizontal. `object-fit` e
+   * `max-*` resolvem o desenho; o quadrado e garantido pelo `aspect-ratio`.
+   */
+  align-self: center;
   border-radius: 8px;
   flex-shrink: 0;
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: var(--surface-raised-hover);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  /*
+   * Sem fundo cinza e sem borda. Quando a capa falha, o placeholder aparecia
+   * como um quadrado solto chapado em volta da imagem — um bloco visual mais
+   * forte que a propria capa, e a linha ficava com duas caixas.
+   */
+  background: transparent;
+  border: 0;
 }
 
 /*
@@ -11982,6 +12011,14 @@ html.player-overlay-mode #root {
   background: transparent !important;
 }
 
+/*
+ * O nome do filme aparece INTEIRO.
+ *
+ * O `-webkit-line-clamp` deixava a linha corta depois de 2 linhas com reticencia
+ * ("Vieran Tomic: O Homem-Aranha de..."), e o nome daobra e a informacao que a
+ * pessoa le para escolher qual vai assistir. Nao ha ganho em poupar duas linhas:
+ * a linha cresce e a lista rola.
+ */
 .po-drawer-name {
   flex: 1;
   min-width: 0;
@@ -11989,16 +12026,117 @@ html.player-overlay-mode #root {
   font-weight: 600;
   line-height: 1.25;
   color: var(--text-primary);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 /* Linha do filme que esta tocando na aba Continuacao. */
 .po-drawer-row.po-drawer-agora {
   background: rgba(45, 212, 191, 0.10);
   border-left: 3px solid var(--accent, #2dd4bf);
+}
+
+/*
+ * OFERTA DO PROXIMO CAPITULO.
+ *
+ * Fica ACIMA da faixa de tempo, nunca sobre ela: a faixa mostra quanto falta
+ * para o fim, e e o dado que a pessoa usa para decidir se aceita a troca.
+ */
+.po-proximo {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  animation: po-proximo-entra 260ms ease-out;
+}
+
+@keyframes po-proximo-entra {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .po-proximo {
+    animation: none;
+  }
+}
+
+.po-proximo-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.po-proximo-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent, #2dd4bf);
+  font-weight: 700;
+}
+
+/* Titulo inteiro: e o nome da obra que a pessoa vai assistir a seguir. */
+.po-proximo-titulo {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.po-proximo-acoes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.po-proximo-btn {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 120ms ease, background 120ms ease;
+}
+
+.po-proximo-btn:focus-visible {
+  outline: 2px solid var(--accent, #2dd4bf);
+  outline-offset: 2px;
+}
+
+.po-proximo-btn-ghost {
+  background: transparent;
+  color: var(--text-secondary, #cbd5e1);
+}
+
+.po-proximo-btn-ghost:hover {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text-primary);
+}
+
+.po-proximo-btn-primary {
+  background: var(--accent, #2dd4bf);
+  color: #06231f;
+}
+
+.po-proximo-btn-primary:hover {
+  filter: brightness(1.1);
 }
 
 .po-drawer-now {
@@ -12041,6 +12179,45 @@ html.player-overlay-mode #root {
 
 .po-drawer-list {
   gap: 2px;
+}
+
+/*
+ * BLOCOS DE SAGA dentro da aba Continuacao.
+ *
+ * Uma franquia pode ter duas series: em Star Wars, a trilogia "Episodio
+ * I..III" e a serie "Star Wars 2..8". Elas ficam no MESMO drawer, mas em
+ * blocos separados com um cabecalho, para a pessoa nao clicar num filme de uma
+ * serie achando que e a continuacao da outra.
+ */
+.po-drawer-saga {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /*
+   * `flex-shrink: 0` e obrigatorio. A lista e um container flex de coluna; sem
+   * isto o bloco A SER COMPRIDO quando ha dois blocos (principal + lateral), e
+   * os cards ficavam achatados em tiras finas.
+   */
+  flex-shrink: 0;
+}
+
+.po-drawer-saga + .po-drawer-saga {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+/* Aviso de saga lateral. Fica visivel, nao e so leitura para leitor de tela. */
+.po-drawer-saga-aviso {
+  margin: 0 0 4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(250, 204, 21, 0.12);
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  color: #facc15;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 /*

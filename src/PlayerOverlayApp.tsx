@@ -56,9 +56,44 @@ type OverlayMeta = {
    * reproducao no topo como "Assistindo agora".
    */
   franquia?: OverlayItem[]
+  /*
+   * Os mesmos filmes, mas partidos em SAGAS. Uma franquia pode ter mais de
+   * uma serie: em Star Wars, a trilogia "Episodio I..III" e a serie
+   * "Star Wars 2..8" nao sao a mesma sequencia. Sem esta separacao o drawer
+   * misturava as duas e o proximo capitulo offeredo estava errado.
+   *
+   * `principal: false` marca a saga lateral, que o drawer mostra APOS a
+   * principal, com um aviso — nao some da lista nem volta pro topo.
+   */
+  sagas?: Array<{ principal: boolean; filmes: OverlayItem[] }>
 }
 
 const VOLUME_KEY = 'stplay.volume'
+
+/**
+ * Quanto antes do fim a oferta de proximo capitulo aparece, em segundos.
+ * 30s da para ler o titulo e clicar em "Comecar" sem perder o final.
+ */
+const SEGUNDOS_FIM = 30
+
+/**
+ * Margem de seguranca, como FRACAO da duracao.
+ *
+ * A duracao do container nao e a duracao do conteudo. Medido no Episodio I:
+ * a barra vai ate 2:16:10, mas o filme ACABA em 2:09:54 — 6m16s de cauda
+ * (creditos/pre-roll do arquivo). Um gatilho so em segundos nunca dispararia
+ * nesse filme: faltavam 376s, muito acima dos 30s.
+ *
+ * A fracao cobre essa cauda sem depender de o container estar certo. 5% de
+ * 2:16 sao ~7 min — a oferta aparece antes do final de verdade, que e o que a
+ * pessoa precisa: tempo de decidir e de carregar o proximo.
+ */
+const FRACAO_FIM = 0.05
+
+/** Janela final: o que valer mais entre os dois criterios. */
+function janelaFinal(duracaoSegundos: number): number {
+  return Math.max(SEGUNDOS_FIM, duracaoSegundos * FRACAO_FIM)
+}
 
 function readVolume() {
   const raw = localStorage.getItem(VOLUME_KEY)
@@ -294,22 +329,23 @@ export function PlayerOverlayApp() {
   const volumeRef = useRef(volume)
   const mutedRef = useRef(muted)
 
+  /*
+   * Refs de volume/mudo DEVEM ser atualizados no mesmo efeito que aplica o
+   * volume. Em efeitos separados, o de aplicação rodava antes do que escreve o
+   * ref, e mandava ao mpv o valor ANTERIOR: ao arrastar o slider o audio ia
+   * atrasando um passo em relacao ao ponteiro.
+   */
   useEffect(() => {
     volumeRef.current = volume
-  }, [volume])
-
-  useEffect(() => {
     mutedRef.current = muted
-  }, [muted])
+    const out = muted ? 0 : volume
+    void window.sturplay?.player?.command?.('volume', out)
+  }, [volume, muted])
 
   const applyOutputVolume = useCallback(() => {
     const out = mutedRef.current ? 0 : volumeRef.current
     void window.sturplay?.player?.command?.('volume', out)
   }, [])
-
-  useEffect(() => {
-    applyOutputVolume()
-  }, [volume, muted, applyOutputVolume])
 
   useEffect(() => {
     // Garante volume ao abrir overlay (mpv pode reiniciar em 100 mas UI estava baixa)
@@ -631,7 +667,12 @@ export function PlayerOverlayApp() {
     setVolume(next)
     setMuted(false)
     localStorage.setItem(VOLUME_KEY, String(next))
-    cmd('volume', next)
+    /*
+     * NAO manda `cmd('volume')` aqui. O efeito em [volume, muted] ja chama
+     * `applyOutputVolume`, que faz exatamente isso. Com os dois, cada passo do
+     * slider chegava ao mpv DUAS vezes — o log mostrava 0.35, 0.35, 0.3, 0.3…
+     * e o IPC repetido atrasava o audio ao arrastar.
+     */
     sendAction({ type: 'volume', value: next })
     showControls()
   }
@@ -640,7 +681,7 @@ export function PlayerOverlayApp() {
     e.stopPropagation()
     const next = !muted
     setMuted(next)
-    cmd('volume', next ? 0 : volume)
+    // Mesmo caso do setVol: o efeito aplica o volume, inclusive o 0 do mudo.
     sendAction({ type: 'mute', value: next })
     showControls()
   }
@@ -823,21 +864,182 @@ export function PlayerOverlayApp() {
     return meta.list?.find((item) => item.id === meta.currentId) ?? null
   }, [meta.kind, meta.list, meta.currentId])
 
-  const movieBins = useMemo(() => {
-    if (meta.kind !== 'movie') return { todos: [], dublado: [], legendado: [], franquia: [] }
+  const isLegendado = (item: OverlayItem) => /\[L\]/i.test(item.name ?? '')
+
+  /*
+   * Audio escolhido nas abas Dublado/Legendado. Fica separado de `listTab`
+   * porque a Continuacao e uma aba que REAPROVEITA o audio escolhido: ela
+   * precisa saber dublado ou legendado sem roubar a posicao das abas. Com um
+   * unico estado aparecia um segundo par de botoes embaixo (duplicado).
+   */
+  const [audioFiltro, setAudioFiltro] = useState<'dublado' | 'legendado'>('dublado')
+
+  /*
+   * As SAGAS da mesma franquia, ja filtradas pelo audio escolhido.
+   *
+   * `meta.sagas` mantem a separacao que o App fez. Sem ele (versao antiga do
+   * main, ou filme sem saga) cai num bloco unico com a lista inteira, que e o
+   * comportamento de antes — nunca fica vazio.
+   */
+  const sagaBlocos = useMemo<{ principal: boolean; filmes: OverlayItem[] }[]>(() => {
+    if (meta.kind !== 'movie') return []
+    const fonte =
+      meta.sagas && meta.sagas.length > 0
+        ? meta.sagas
+        : [{ principal: true, filmes: franquiaRelacionada }]
+    return fonte
+      .map((s) => ({
+        principal: s.principal,
+        filmes: s.filmes.filter((item) => isLegendado(item) === (audioFiltro === 'legendado')),
+      }))
+      // Saga sem nenhum filme no audio escolhido nao tem o que mostrar.
+      .filter((s) => s.filmes.length > 0)
+  }, [meta.kind, meta.sagas, audioFiltro, franquiaRelacionada])
+
+  const movieBins = useMemo<{
+    todos: OverlayItem[]
+    dublado: OverlayItem[]
+    legendado: OverlayItem[]
+    franchise: OverlayItem[]
+  }>(() => {
+    if (meta.kind !== 'movie') return { todos: [], dublado: [], legendado: [], franchise: [] }
     const completa = [filmeAgora, ...franquiaRelacionada].filter(
       (item): item is OverlayItem => item != null,
     )
     return {
       todos: completa,
-      dublado: completa.filter((item) => !/\[L\]/i.test(item.name)),
-      legendado: completa.filter((item) => /\[L\]/i.test(item.name)),
-      franquia: franquiaRelacionada,
+      dublado: completa.filter((item) => !isLegendado(item)),
+      legendado: completa.filter((item) => isLegendado(item)),
+      franchise: sagaBlocos.flatMap((s) => s.filmes),
     }
-  }, [meta.kind, meta.list, meta.currentId, meta.franquia, filmeAgora])
+  }, [meta.kind, meta.list, meta.currentId, sagaBlocos, filmeAgora])
+
+  const soContinuacao = meta.kind === 'movie' && listTab === 'franquia'
+
+  /*
+   * Linhas da aba Continuacao, em BLOCOS de saga.
+   *
+   * O filme em reproducao fica no topo do bloco principal. A saga lateral vem
+   * DEPOIS, com cabecalho: a mesma franquia pode ter duas series ("Episodio
+   * I..III" e "Star Wars 2..8") e misturar as duas numa fila unica faz a
+   * pessoa clicar num filme achando que e o proximo e descobrir que e de outra
+   * serie. O aviso evita isso sem tirar os filmes da lista.
+   */
+  const sagaComAtualNoTopo = useMemo(() => {
+    return sagaBlocos.map((bloco, i) => {
+      const ehPrincipal = bloco.principal
+      /*
+       * O filme em reproducao vai no TOPO do bloco principal, marcado como
+       * "Assistendo agora".
+       *
+       * A ordem do resto NAO muda: a saga ja vem em ordem de capitulo, e
+       * puxar o filme atual para a frente descolava a sequencia. No Episodio I
+       * isso colocava o Episodio III na posicao 1 e o Episodio II na 2 — a
+       * lista deixava de ser a ordem da saga.
+       */
+      const filmes = i === 0 && ehPrincipal && filmeAgora
+        ? [filmeAgora, ...bloco.filmes.filter((c) => c.id !== filmeAgora.id)]
+        : bloco.filmes
+      return { principal: ehPrincipal, filmes }
+    })
+  }, [sagaBlocos, filmeAgora])
+
+  /*
+   * A gaveta so usa os blocos com a aba Continuacao aberta; o popup de proximo
+   * usa sempre. Sao o MESMO calculo — se o popup usasse uma lista diferente da
+   * tela, a oferta contradiria a lista.
+   */
+  const continuacaoBlocos = soContinuacao ? sagaComAtualNoTopo : null
+
+  const continuacaoItens = useMemo(
+    () => continuacaoBlocos?.flatMap((b) => b.filmes) ?? null,
+    [continuacaoBlocos],
+  )
+
+  /*
+   * PROXIMO FILME — a oferta que a Netflix e a Crunchyroll fazem.
+   *
+   * Aparece sobre a barra de tempo quando falta pouco pro fim E existe um
+   * proximo capitulo. So entra na reta final: mostrar antes covers o video e
+   * some assim que a pessoa comeca a arrastar o tempo.
+   *
+   * `proximo` e o proximo da MESMA saga no MESMO audio da aba, e e o mesmo
+   * criterio da aba Continuacao — as duas telas tem que oferecer o mesmo
+   * proximo, senao a oferta contradiz a lista.
+   */
+  const proximo = useMemo(() => {
+    if (meta.kind === 'series') {
+      /*
+       * SERIE: proximo episodio da MESMA temporada. No fim da temporada, o
+       * primeiro da seguinte — e o que a pessoa espera de quem assiste em
+       * sequencia. A ordem de `seriesSeasonGroups` ja vem em ordem de
+       * temporada, entao "a proxima" e a seguinte na lista.
+       */
+      const temporadaAtual = meta.currentId ? findSeasonForEpisode(allItems, meta.currentId) : null
+      if (!temporadaAtual) return null
+      const naTemporada = seriesSeasonGroups.find(([s]) => s === temporadaAtual)?.[1] ?? []
+      const idx = naTemporada.findIndex((item) => item.id === meta.currentId)
+      if (idx >= 0) {
+        const seguinte = naTemporada[idx + 1]
+        if (seguinte) return seguinte
+      }
+      // Ultimo episodio da temporada: cai na primeira da seguinte.
+      const proxTemporada = seriesSeasonGroups.find(([s]) => s !== temporadaAtual)
+      return proxTemporada?.[1]?.[0] ?? null
+    }
+
+    if (meta.kind !== 'movie') return null
+    /*
+     * A MESMA lista que o drawer mostra (`continuacaoBlocos`), e nao
+     * `sagaBlocos`: a saga exclui o filme em reproducao — ele e a referencia do
+     * agrupamento — entao o `findIndex` dava sempre -1 e o popup nunca tinha o
+     * que oferecer. Foi por isso que ele nao aparecia nem com 50s para o fim.
+     *
+     * Usar `continuacaoBlocos` tambem garante que a oferta e a lista dizem a
+     * mesma coisa: o proximo do popup e a linha seguinte a que esta marcada
+     * como "Assistindo agora".
+     */
+    const saga = sagaComAtualNoTopo[0]?.filmes ?? []
+    const idx = saga.findIndex((item) => item.id === meta.currentId)
+    if (idx < 0) return null
+    return saga[idx + 1] ?? null
+  }, [meta.kind, meta.currentId, allItems, seriesSeasonGroups, sagaComAtualNoTopo])
+
+  const [proximoOferecido, setProximoOferecido] = useState(false)
+  /*
+   * A pessoa disse "agora nao". A oferta nao pode voltar sozinha: `position`
+   * oscila a cada `timeupdate`, e sem esta trava a popup piscava no ar durante
+   * o resto do final.
+   */
+  const [proximoDispensado, setProximoDispensado] = useState(false)
+
+  // Um popup por conteudo. Trocar de filme/episodio reabre a oferta.
+  useEffect(() => {
+    setProximoOferecido(false)
+    setProximoDispensado(false)
+  }, [meta.currentId])
+
+  /*
+   * Dispara na reta final, para filme E serie.
+   *
+   * A janela e `janelaFinal(duration)`, nao `SEGUNDOS_FIM`: a duracao do
+   * container costuma ser maior que o conteudo (o Episodio I acaba em
+   * 2:09:54 e a barra vai ate 2:16:10). Medir so em segundos deixava a oferta
+   * nunca aparecendo nesses arquivos.
+   *
+   * Nao dispara em live: nao ha "fim" de um canal.
+   */
+  useEffect(() => {
+    if (meta.kind !== 'movie' && meta.kind !== 'series') return
+    if (!proximo || proximoDispensado) return
+    if (isLive || duration <= 0) return
+    const faltam = duration - position
+    if (faltam <= janelaFinal(duration)) setProximoOferecido(true)
+  }, [meta.kind, proximo, proximoDispensado, isLive, duration, position])
 
   useEffect(() => {
     if (meta.kind !== 'movie') return
+    // No filme as abas sao so a Continuacao; o audio e filtro, nao aba.
     setListTab((prev) => (prev === 'canais' || prev === 'categorias' ? 'todos' : prev))
   }, [meta.kind])
 
@@ -848,19 +1050,16 @@ export function PlayerOverlayApp() {
   const drawerItems = useMemo(() => {
     if (meta.kind !== 'movie') return items
     const q = listFilter.trim().toLowerCase()
-    const base =
-      listTab === 'dublado'
-        ? movieBins.dublado
-        : listTab === 'legendado'
-          ? movieBins.legendado
-          : listTab === 'franquia'
-            ? movieBins.franquia
-            : movieBins.todos
+    const base = soContinuacao
+      ? movieBins.franchise
+      : audioFiltro === 'legendado'
+        ? movieBins.legendado
+        : movieBins.dublado
     if (!q) return base
     return base.filter(
       (item) => item.name?.toLowerCase().includes(q) || resolveEpisodeSeason(item).toLowerCase().includes(q),
     )
-  }, [meta.kind, listTab, listFilter, items, movieBins])
+  }, [meta.kind, soContinuacao, audioFiltro, listFilter, items, movieBins])
 
   const showListBtn = (meta.kind === 'series' || meta.kind === 'live' || meta.kind === 'movie') && (meta.list?.length || 0) > 1
 
@@ -1213,6 +1412,48 @@ export function PlayerOverlayApp() {
           duracao conhecida. `booting` e `failed` ja sao barrados por `dockVisible`
           (`uiVisible && !failed`), entao aqui basta nao exigir `playing`.
         */}
+        {/*
+          PROXIMO CAPITULO — vale para FILME (proximo da saga) e SERIE
+          (proximo episodio, ou o primeiro da temporada seguinte).
+
+          Fica ACIMA da faixa de tempo, e nao dentro dela: sobrepor o trilho
+          esconderia o tempo que resta, que e justamente o dado que a pessoa
+          precisa para decidir.
+        */}
+        {!isLive && proximoOferecido && proximo && proximo.id !== meta.currentId && (
+          <div className="po-proximo" role="dialog" aria-label="Próximo">
+            <div className="po-proximo-info">
+              <span className="po-proximo-label">A seguir</span>
+              <span className="po-proximo-titulo">{proximo.name}</span>
+            </div>
+            <div className="po-proximo-acoes">
+              <button
+                type="button"
+                className="po-proximo-btn po-proximo-btn-ghost"
+                onClick={() => {
+                  setProximoOferecido(false)
+                  // Trava a oferta: sem isso ela volta no proximo timeupdate.
+                  setProximoDispensado(true)
+                  showControls()
+                }}
+              >
+                Agora não
+              </button>
+              <button
+                type="button"
+                className="po-proximo-btn po-proximo-btn-primary"
+                onClick={() => {
+                  sendAction({ type: 'select', id: proximo.id })
+                  setProximoOferecido(false)
+                  showControls()
+                }}
+              >
+                Começar
+              </button>
+            </div>
+          </div>
+        )}
+
         {!isLive && duration > 0 && !failed && (
           <div className="po-seek-row">
             <span className="po-time">{formatTime(position)}</span>
@@ -1439,32 +1680,32 @@ export function PlayerOverlayApp() {
                 </>
               ) : meta.kind === 'movie' ? (
                 <>
+                  {/*
+                    Dublado/Legendado aqui sao o AUDIO, nao abas: um so pode
+                    estar marcado. Eles filtram a lista e valem tambem para a
+                    Continuacao. Antes eram abas concorrentes com a Continuacao
+                    e o drawer mostrava "Todos|Dublado|Legendado|Continuacao"
+                    mais um segundo par Dublado|Legendado embaixo.
+                  */}
                   <button
                     type="button"
-                    className={listTab === 'todos' ? 'active' : ''}
-                    onClick={() => setListTab('todos')}
-                  >
-                    Todos
-                  </button>
-                  <button
-                    type="button"
-                    className={listTab === 'dublado' ? 'active' : ''}
-                    onClick={() => setListTab('dublado')}
+                    className={audioFiltro === 'dublado' ? 'active' : ''}
+                    onClick={() => setAudioFiltro('dublado')}
                   >
                     Dublado
                   </button>
                   <button
                     type="button"
-                    className={listTab === 'legendado' ? 'active' : ''}
-                    onClick={() => setListTab('legendado')}
+                    className={audioFiltro === 'legendado' ? 'active' : ''}
+                    onClick={() => setAudioFiltro('legendado')}
                   >
                     Legendado
                   </button>
-                  {movieBins.franquia.length > 0 && (
+                  {movieBins.franchise.length > 0 && (
                     <button
                       type="button"
-                      className={listTab === 'franquia' ? 'active' : ''}
-                      onClick={() => setListTab('franquia')}
+                      className={soContinuacao ? 'active' : ''}
+                      onClick={() => setListTab(soContinuacao ? 'todos' : 'franquia')}
                     >
                       Continuação
                     </button>
@@ -1573,17 +1814,26 @@ export function PlayerOverlayApp() {
           >
             {/*
               Em filme na aba Continuacao, mostra o filme em reproducao no topo
-              ("Assistindo agora") seguido dos demais da mesma franquia. Nas
-              outras abas/outros conteudos usa drawerItems (todos/dublado/
+              ("Assistindo agora") seguido dos demais, em BLOCOS DE SAGA. Cada
+              saga lateral ganha um cabecalho que avisa que e outra serie.
+              Nas outras abas/outros conteudos usa drawerItems (dublado/
               legendado ou categorias/canais/temporadas/episodios).
             */}
-            {(
-              meta.kind === 'movie' && listTab === 'franquia'
-                ? [filmeAgora, ...movieBins.franquia].filter(
-                    (item): item is OverlayItem => item != null,
-                  )
-                : drawerItems
-            ).map((item, idx) => {
+            {(continuacaoBlocos ?? [null]).map((bloco, blocoIdx) => {
+              const linhas = bloco ? bloco.filmes : drawerItems
+              return (
+                <div className="po-drawer-saga" key={bloco ? `saga-${blocoIdx}` : 'lista'}>
+                {/*
+                  AVISO DE SAGA. Aparece so na saga lateral, que e outra serie
+                  da mesma franquia: sem ele a pessoa clica achando que e o
+                  proximo capitulo e sobe um filme de outra serie.
+                */}
+                {bloco && !bloco.principal && (
+                  <p className="po-drawer-saga-aviso">
+                    Outra saga desta franquia — não é a continuação destes filmes
+                  </p>
+                )}
+                {linhas.map((item, idx) => {
               const ativo = item.id === meta.currentId
               const favorito = favoritos.has(item.id)
               const ehAGora =
@@ -1615,6 +1865,16 @@ export function PlayerOverlayApp() {
                           loading="lazy"
                           decoding="async"
                           draggable={false}
+                          /*
+                           * Capa que falha nao deixa o icone de imagem
+                           * quebrada do navegador na linha. Varios titulos do
+                           * catalogo apontam para capa morta no painel; o
+                           * quadrado de 32px fica vazio, que e o que se espera
+                           * de um titulo sem arte.
+                           */
+                          onError={(e) => {
+                            e.currentTarget.style.visibility = 'hidden'
+                          }}
                         />
                       ) : null}
                     </span>
@@ -1647,6 +1907,9 @@ export function PlayerOverlayApp() {
                 </div>
               )
             })}
+                </div>
+              )
+            })}
           </div>
           {/*
             Rodape com a contagem e o "Fechar", como na gavota do motor nativo.
@@ -1663,7 +1926,7 @@ export function PlayerOverlayApp() {
               */}
               {meta.kind === 'movie'
                 ? listTab === 'franquia'
-                  ? `${movieBins.franquia.length} continuaçoes`
+                  ? `${Math.max(0, (continuacaoItens?.length ?? 1) - 1)} continuaçoes`
                   : `${drawerItems.length} filmes`
                 : listTab === 'categorias'
                   ? `${drawerCategorias.length} categorias`
