@@ -3,6 +3,9 @@ import type { CSSProperties } from 'react'
 import { Heart, List, X } from 'lucide-react'
 import { coverSrc } from './lib/proxy'
 import { ehCategoriaAdulta } from './lib/adulto'
+import { getSkipTimes, extractEpisodeNumber, extractSeasonNumber, type SkipTimes } from './lib/aniskip'
+import { FILMES } from './lib/oped-filmes'
+import { janelaCobrePosicao } from './lib/skip-janela'
 import {
   findSeasonForEpisode,
   formatSeasonOptionLabel,
@@ -16,19 +19,20 @@ import {
  * era redundante com a aba.
  */
 import type { VideoFit } from './lib/players/types'
+import { playerLog } from './lib/players/playerLogger'
 import { aspectHint, nextAspect, normalizeAspect } from './lib/players/video-aspect'
 
 type OverlayItem = {
   id: string
   name: string
   group?: string
-  /*
-   * A logo vinha cortada do payload: `App.tsx` mandava so `id`/`name`/`group`.
-   * Sem ela a lista do overlay era uma coluna de texto e a do motor nativo era
-   * uma lista de canais — duas coisas diferentes usando o mesmo nome de
-   * "gavota". Agora os dois lados mostram a mesma anatomia.
-   */
   logo?: string
+  /*
+   * seriesId do episodio, quando disponivel. Usado para indexar o metadado
+   * de opening (intro_start/intro_end) por serie. Vem de `series-${series_id}`
+   * no id do canal, ou pode ser preenchido diretamente pelo App.
+   */
+  seriesId?: string
 }
 
 type OverlayMeta = {
@@ -38,6 +42,7 @@ type OverlayMeta = {
   kind?: string
   list?: OverlayItem[]
   currentId?: string
+  seriesId?: string
   /*
    * Favoritos do perfil, por id. O overlay nao tinha NENHUM estado de favorito:
    * a lista nativa mostra o coracao em cada canal e a do motor nao mostrava
@@ -90,8 +95,44 @@ const SEGUNDOS_FIM = 30
  */
 const FRACAO_FIM = 0.05
 
-/** Janela final: o que valer mais entre os dois criterios. */
-function janelaFinal(duracaoSegundos: number): number {
+/**
+ * Oferta do próximo episódio em SÉRIE: não existe mais fração de duração.
+ *
+ * O valor antigo (12% da duração, ~2:54 antes do fim) foi REMOVIDO. Ele não
+ * tem relação com o encerramento real: no SPY E01 disparava em 21:24 com o
+ * ED em 21:52. Série agora usa o ED medido do episódio (mapa `oped-data`),
+ * e episódio sem ED medido simplesmente não oferece o próximo antes da hora.
+ */
+
+/**
+ * Janela final da oferta em FILME.
+ *
+ * Só filme: a duração do container mente (a cauda de 6 min do Episódio I),
+ * então a fração cobre essa diferença. Em série a duração é fiel e o que
+ * manda é o ED medido.
+ */
+function normalizarTituloFilme(t: string): string {
+  return (t || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function janelaFinal(
+  duracaoSegundos: number,
+  kind: 'movie' | 'series' | 'live',
+  titulo?: string
+): number {
+  if (kind !== 'movie') return 0
+  // Créditos MEDIDOS e certificados (finder): a oferta abre no começo real
+  // dos créditos. Sem marca do filme, mantém a janela por duração.
+  const medido = FILMES[normalizarTituloFilme(titulo || '')]
+  if (medido && medido.credits > 0 && medido.credits < duracaoSegundos) {
+    const janela = duracaoSegundos - medido.credits
+    if (janela >= 5 && janela <= duracaoSegundos * 0.6) return janela
+  }
   return Math.max(SEGUNDOS_FIM, duracaoSegundos * FRACAO_FIM)
 }
 
@@ -272,6 +313,9 @@ export function PlayerOverlayApp() {
   >('canais')
   const [drawerCategoria, setDrawerCategoria] = useState<string | null>(null)
   const [scrubPos, setScrubPos] = useState<number | null>(null)
+  const [hoverPos, setHoverPos] = useState<number | null>(null)
+  const [previewX, setPreviewX] = useState(0)
+  const [previewTop, setPreviewTop] = useState(0)
 
   /**
    * Janela em que o overlay se cala no zape de live.
@@ -653,12 +697,69 @@ export function PlayerOverlayApp() {
     showControls()
   }
 
+  /*
+   * Fim do arraste.
+   *
+   * DOIS SALPOS PARA UM ARRASTE — o bug que o log mostrou.
+   *
+   * `finishScrub` esta ligada em `onPointerUp`, `onLostPointerCapture`,
+   * `onKeyUp` e `onBlur`. O Chromium dispara `pointerup` e depois
+   * `lostpointercapture`, entao a funcao roda DUAS vezes. A guarda
+   * `if (scrubPos === null) return` nao segurava, porque `scrubPos` e estado
+   * do React: o `setScrubPos(null)` da primeira chamada so vale no proximo
+   * render, e a segunda chamada ainda via o valor antigo.
+   *
+   * No log: `seek 1347 (exato)`, `seek 1323 (scrub)`, `seek 1323 (exato)`. Tres
+   * saltos para um arraste, e o primeiro foi para um alvo que nem era o final.
+   *
+   * A guarda agora e um REF, que atualiza na hora.
+   */
+  const scrubConcluidoRef = useRef(false)
+
+  /*
+   * MINIATURA DA BARRA (estilo YouTube).
+   *
+   * Enquanto o cursor está sobre a barra (ou arrastando), pedimos ao processo
+   * principal o quadro daquele instante. O main usa um mpv quente: ~1,2-1,6 s
+   * por quadro novo e 0,4 s quando repete; o disco guarda por faixa de 5 s.
+   * Aqui só debounçamos o pedido (160 ms) e mantemos a última imagem na tela
+   * enquanto a próxima carrega.
+   */
+  const posPreview = scrubPos ?? hoverPos
+  // Miniatura de v?deo desligada: s? o instante, que ? leve e sempre aparece.
+
+
   const finishScrub = () => {
+    if (scrubConcluidoRef.current) return
+    scrubConcluidoRef.current = true
     if (scrubPos === null) return
     const next = scrubPos
     setScrubPos(null)
-    cmd('seek', next)
-    setCurrent(next)
+    /*
+     * O salto final é ABSOLUTO, e é o certo: o alvo é um instante escolhido
+     * na barra, não um deslocamento. A posição defasada do `timeupdate` só
+     * quebra os saltos RELATIVOS (as manoplas de 10s), que é por isso que
+     * elas usam `relative`.
+     *
+     * E é o ÚNICO salto do arraste: sem busca durante o arrasto, o mpv não
+     * invalida a posição de leitura oito vezes por segundo, e o vídeo
+     * continua tocando enquanto a pessoa arrasta.
+     *
+     * MEDIDO em 20/10/2026: gmaster1.shop RESPONDE 206 Partial Content
+     * (~0,6 s por faixa). O coment?rio anterior dizia que n?o; a origem
+     * mudou. Mesmo assim, buscar durante o arraste continua caro no mpv
+     * (cada seek invalida a leitura), ent?o o salto segue sendo um s?, no
+     * fim. A pr?via da barra usa esse range no mpv quente.
+     */
+    const alvo = Number.isFinite(next) ? next : 0
+    // A pessoa soltou o cursor no ponto onde o video ja esta: nao ha o que
+    // buscar, e buscar seria reler o arquivo por causa de nada.
+    if (Math.abs(alvo - current) < 1.5) {
+      showControls()
+      return
+    }
+    cmd('seek', alvo)
+    setCurrent(alvo)
     showControls()
   }
 
@@ -1020,6 +1121,208 @@ export function PlayerOverlayApp() {
   }, [meta.currentId])
 
   /*
+   * PULAR INTRO — aparece so durante o opening do episodio, por serie.
+   *
+   * Usa a API da AniSkip para buscar skip-times do episodio.
+   * Se a API nao retornar dados, nao mostra nada.
+   */
+  /*
+   * JANELA DE ABERTURA — decideda por DUAS fontes cruzadas.
+   *
+   * O problema que motivou isso: cada fonte sozinha erra de um jeito.
+   *
+   *   AniSkip  - sabe que o episódio TEM abertura e onde ela termina, mas o
+   *              início é de outro corte do vídeo. E para série que ela ainda
+   *              não indexou, responde "não tem abertura" mesmo tendo.
+   *   Áudio    - ouve o arquivo e acha a música de verdade, mas erra o
+   *              início em cena de diálogo forte e erra o fim em música que
+   *              dá uma baixada.
+   *
+   * A regra usa as duas, e cada uma só pode errar para o lado seguro:
+   *
+   *   1. AniSkip diz que TEM abertura?
+   *      - não tem: pode ser série nova no catálogo dela. Se o áudio achou
+   *        música, o áudio ganha (a AniSkip só não conhece ainda).
+   *      - tem: o áudio precisa concordar. Sem música no arquivo, é veto —
+   *        não mostra. É o caso do Naruto Shippuden S01E01, que tem abertura
+   *        anotada e não tem nenhuma.
+   *   2. As duas discordam sobre ONDE a música começa (mais de 60s de
+   *      diferença)? Não são a mesma música. Não mostra.
+   *   3. Concordam: início vem do áudio (é mais preciso), fim vem da AniSkip
+   *      (o áudio trunca a música pela metade).
+   */
+  const [skipTimes, setSkipTimes] = useState<SkipTimes | null>(null)
+  const [aniskipConcluido, setAniskipConcluido] = useState(false)
+
+  /*
+   * Janela de skip que o usuario ja dispensou ("Agora não") ou ja pulou.
+   * A chave separa intro de outro: dispensar a abertura nao pode esconder a
+   * encerramento, que aparece minutos depois no mesmo episodio.
+   */
+  const [skipDispensado, setSkipDispensado] = useState<string | null>(null)
+
+  useEffect(() => {
+    // Episódio novo: a janela do anterior não vale mais.
+    setAniskipConcluido(false)
+    setSkipDispensado(null)
+  }, [meta.currentId])
+
+  useEffect(() => {
+    /*
+     * FILME: abertura medida pelo finder (logos/abertura). Os créditos
+     * ficam na oferta de "próximo capítulo" (janelaFinal). Sem marca do
+     * filme, nenhum popup — nada de chutar.
+     */
+    if (meta.kind === 'movie') {
+      const medido = FILMES[normalizarTituloFilme(meta.title || '')]
+      if (medido?.op && medido.op.end > medido.op.start + 5) {
+        setSkipTimes({
+          source: 'local',
+          intro: { start: medido.op.start, end: medido.op.end },
+          outro: null,
+          len: medido.duration,
+        })
+      } else {
+        setSkipTimes(null)
+      }
+      setAniskipConcluido(true)
+      return
+    }
+
+    if (meta.kind !== 'series') {
+      setSkipTimes(null)
+      setAniskipConcluido(true)
+      return
+    }
+
+    const ep = allItems.find((item) => item.id === meta.currentId)
+    if (!ep) {
+      setSkipTimes(null)
+      setAniskipConcluido(true)
+      return
+    }
+
+    const epNum = extractEpisodeNumber(ep.name)
+
+    /*
+     * `meta.seriesId` é o MyAnimeList ID resolvido pelo catálogo.
+     * `ep.seriesId` é o stream_id do Xtream (ex.: 2273444) e NÃO serve para a
+     * AniSkip — usar ele na frente faz toda requisição dar 404.
+     */
+    const malId = meta.seriesId
+
+    if (!malId || epNum === null) {
+      setSkipTimes(null)
+      setAniskipConcluido(true)
+      return
+    }
+
+    let cancelado = false
+    void getSkipTimes(malId, epNum, extractSeasonNumber(ep.name)).then((result) => {
+      if (cancelado) return
+      setSkipTimes(result)
+      setAniskipConcluido(true)
+      setSkipDispensado(null)
+    })
+
+    return () => {
+      cancelado = true
+    }
+  }, [meta.kind, meta.title, meta.currentId, meta.seriesId, allItems])
+
+  /*
+   * Janela de ABERTURA que cobre a posição atual.
+   *
+   * Regradescribed no bloco dos estados, acima. Resumindo: a AniSkip diz se
+   * existe, o áudio diz ONDE começa, e o fim vem da AniSkip porque o áudio
+   * trunca a música.
+   *
+   * Só a abertura. O encerramento foi de fora de propósito: no fim do episódio
+   * a pessoa quer o próximo capítulo, e a oferta "A seguir" já ocupa aquele
+   * canto da tela — ter os dois era o que empilhava dois popups.
+   */
+  const janelaSkip = useMemo(() => {
+    if (isLive) return null
+    if (!aniskipConcluido) return null
+
+    /*
+     * SÓ marcação embutida conferida (`source === 'local'`).
+     *
+     * A consulta remota à AniSkip foi desligada de propósito. O início dela é
+     * contado a partir de outro corte do vídeo, e o cruzamento com o áudio
+     * fazia o botão aparecer segundos fora do lugar. Sem dado nosso conferido
+     * não aparece popup nenhum: melhor não oferecer do que pular errado.
+     */
+    const janela = skipTimes?.source === 'local' ? skipTimes.intro : null
+    if (!janelaCobrePosicao(janela, position)) return null
+    return { inicio: janela!.start, fim: janela!.end }
+  }, [skipTimes, position, isLive, aniskipConcluido])
+
+  /*
+   * ENCERRAMENTO: a ação certa é IR PARA O PRÓXIMO episódio, não pular o ED.
+   * Só com marcação conferida e quando a posição entra no intervalo.
+   */
+  const janelaEd = useMemo(() => {
+    if (isLive) return null
+    if (!aniskipConcluido) return null
+    if (skipTimes?.source !== 'local') return null
+    const ed = skipTimes.outro
+    if (!ed) return null
+
+    /*
+     * Tempo ABSOLUTO do arquivo analisado.
+     *
+     * Cheguei a deslocar pela cauda (duração − ed_tail) para compensar
+     * arquivos com outra duração, mas isso erra quando o arquivo do provedor
+     * só tem um final/preview mais longo: o ED continua no mesmo instante e
+     * o aviso aparecia ~75 s adiantado. O começo do arquivo é o mesmo (a OP
+     * bate), então o tempo absoluto é a referência certa.
+     */
+    if (!janelaCobrePosicao(ed, position)) return null
+    return ed
+  }, [
+    skipTimes,
+    position,
+    isLive,
+    aniskipConcluido,
+  ])
+
+  /*
+ * "A seguir" visível. Usado para tirar o popup de pular da frente: no fim do
+ * episódio não pode haver dois convites na tela, e ir para o próximo é a ação
+ * que a pessoa quer ali.
+ */
+const proximoVisivel =
+  !isLive && proximoOferecido && proximo !== null && proximo.id !== meta.currentId
+
+const chaveSkip = janelaSkip ? String(janelaSkip.inicio) : null
+const mostrarSkip = janelaSkip !== null && chaveSkip !== skipDispensado
+
+const chaveEd = janelaEd ? 'ed:' + String(janelaEd.start) : null
+const mostrarEd = janelaEd !== null && chaveEd !== skipDispensado
+
+/*
+ * DIAGNÓSTICO do popup: registra no log o número usado e a posição real do
+ * vídeo no instante em que o aviso aparece. É o que separa "meu tempo está
+ * errado" de "o app está disparando na hora errada".
+ */
+useEffect(() => {
+  if (!janelaSkip) return
+  playerLog('info', 'oped', 'popup OP', {
+    inicio: janelaSkip.inicio, fim: janelaSkip.fim,
+    posicao: position, duration,
+  })
+}, [janelaSkip])
+
+useEffect(() => {
+  if (!mostrarEd || !janelaEd) return
+  playerLog('info', 'oped', 'popup ED', {
+    inicio: janelaEd.start, fim: janelaEd.end,
+    posicao: position, duration,
+  })
+}, [mostrarEd, janelaEd])
+
+  /*
    * Dispara na reta final, para filme E serie.
    *
    * A janela e `janelaFinal(duration)`, nao `SEGUNDOS_FIM`: a duracao do
@@ -1034,8 +1337,47 @@ export function PlayerOverlayApp() {
     if (!proximo || proximoDispensado) return
     if (isLive || duration <= 0) return
     const faltam = duration - position
-    if (faltam <= janelaFinal(duration)) setProximoOferecido(true)
-  }, [meta.kind, proximo, proximoDispensado, isLive, duration, position])
+    /*
+     * ATRIBUICAO, e nao `if (...) setProximoOferecido(true)`.
+     *
+     * So ligar deixava a oferta grudada. Medido em Brave 10 [L]: com "Comecar"
+     * clicado no fim do S01E02, a oferta reapareceu no S01E03 — o episodio
+     * carregou em 00:01 e o cartao continuou na tela oferecendo o S01E04.
+     *
+     * A causa e a corrida do clique: `sendAction` e IPC, entao o `position` do
+     * episodio VELHO (no fim, faltam ~2s) ainda valia quando o `meta` novo
+     * chegou. O efeito reabriu a oferta com aquele `faltam`, e como nada nunca
+     * voltava a `false`, quando a posicao zerou a oferta ficou la para sempre.
+     *
+     * Atribuir nos dois sentidos fecha em: quando `faltam` cresce de novo, ela
+     * apaga sozinha.
+     */
+    /*
+     * Se temos o ENCERRAMENTO medido deste episódio, o cartão "A seguir"
+     * NÃO usa mais os 12% da duração: ele espera o ED começar.
+     *
+     * Era esse o "popup uns segundos antes": 12% de um episódio de 24 min
+     * dá ~2:54 antes do fim, e o ED podia começar bem depois disso (SPY E01:
+     * cartão em 21:17, ED em 21:52). Quem oferece o próximo episódio nesse
+     * caso é o aviso do ED, que usa o número medido.
+     */
+    const edLocal = skipTimes?.source === 'local' ? skipTimes.outro : null
+    if (edLocal) {
+      setProximoOferecido(false)
+      return
+    }
+
+    /*
+     * SÉRIE: sem ED medido não existe oferta antecipada. O valor de 12% da
+     * duração foi removido do app — ele disparava sem relação com o ED real.
+     * FILME mantém a janela final, porque ali a duração do container mente.
+     */
+    if (meta.kind !== 'movie') {
+      setProximoOferecido(false)
+      return
+    }
+    setProximoOferecido(faltam <= janelaFinal(duration, 'movie', meta.title))
+  }, [meta.kind, meta.title, proximo, proximoDispensado, isLive, duration, position, skipTimes])
 
   useEffect(() => {
     if (meta.kind !== 'movie') return
@@ -1394,6 +1736,104 @@ export function PlayerOverlayApp() {
         </svg>
       </button>
 
+      {/*
+        PULAR ABERTURA / ENCERRAMENTO.
+
+        Fica FORA do `.po-dock` porque o dock tem `opacity: 0` quando os
+        controles somem, e o botão precisa ficar à vista durante a música de
+        abertura com o vídeo limpo — como no Netflix e na Crunchyroll. Dentro
+        do dock ele só aparecia com os controles visíveis, que era o defeito.
+
+        Só aparece quando a AniSkip devolveu o intervalo DESTE episódio: sem
+        dado, nada é mostrado e nada é adivinhado.
+      */}
+      {/*
+        "A seguir" tem prioridade sobre "pular encerramento".
+
+        Os dois aparecem na mesma região do vídeo — o encerramento fica nos
+        últimos minutos e a oferta do próximo episódio nos últimos segundos — e
+        antes apareciam empilhados, com dois "Agora não / Pular" no mesmo canto.
+        No fim do episódio a ação certa é ir para o próximo, então a oferta
+        ganha e a de pular só reaparece se a pessoa dispensar a primeira.
+      */}
+      {!isLive && mostrarSkip && janelaSkip && !proximoVisivel && (
+        <div className="po-skip-slot" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="po-proximo"
+            role="dialog"
+            aria-label="Pular abertura"
+          >
+            <span className="po-proximo-label">Pular abertura</span>
+            <span className="po-proximo-titulo">Salta para {formatTime(janelaSkip.fim)}</span>
+            <div className="po-proximo-acoes">
+              <button
+                type="button"
+                className="po-proximo-btn po-proximo-btn-ghost"
+                onClick={() => {
+                  // Esconde só esta janela; a do outro tipo continua válida.
+                  if (chaveSkip) setSkipDispensado(chaveSkip)
+                }}
+              >
+                Agora não
+              </button>
+              <button
+                type="button"
+                className="po-proximo-btn po-proximo-btn-primary"
+                onClick={() => {
+                  const fim = janelaSkip.fim
+                  if (chaveSkip) setSkipDispensado(chaveSkip)
+                  showControls()
+                  void window.sturplay?.player?.sendOverlayAction?.({ type: 'seek', value: fim })
+                }}
+              >
+                Pular
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/*
+        ENCERRAMENTO -> PRÓXIMO EPISÓDIO.
+
+        O pedido é não "pular o ED": no encerramento a pessoa quer o próximo
+        capítulo. Mesma ação do cartão "A seguir", mas disparada quando o
+        encerramento começa (e só quando existe intervalo conhecido).
+      */}
+      {!isLive && mostrarEd && janelaEd && !proximoVisivel && proximo && (
+        <div className="po-skip-slot" onClick={(e) => e.stopPropagation()}>
+          <div className="po-proximo" role="dialog" aria-label="Próximo episódio">
+            <span className="po-proximo-label">Encerramento</span>
+            <span className="po-proximo-titulo">{proximo.name}</span>
+            <div className="po-proximo-acoes">
+              <button
+                type="button"
+                className="po-proximo-btn po-proximo-btn-ghost"
+                onClick={() => {
+                  if (chaveEd) setSkipDispensado(chaveEd)
+                  showControls()
+                }}
+              >
+                Agora não
+              </button>
+              <button
+                type="button"
+                className="po-proximo-btn po-proximo-btn-primary"
+                onClick={() => {
+                  const id = proximo.id
+                  if (chaveEd) setSkipDispensado(chaveEd)
+                  setProximoOferecido(false)
+                  setProximoDispensado(true)
+                  sendAction({ type: 'select', id })
+                }}
+              >
+                Próximo episódio
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div
         className={`po-dock${dockVisible ? ' is-visible' : ''}`}
         onClick={(e) => e.stopPropagation()}
@@ -1420,8 +1860,36 @@ export function PlayerOverlayApp() {
           esconderia o tempo que resta, que e justamente o dado que a pessoa
           precisa para decidir.
         */}
-        {!isLive && proximoOferecido && proximo && proximo.id !== meta.currentId && (
+        {/*
+          PROXIMO CAPITULO e o popup de PULAR ficam em slots diferentes.
+
+          O de pular vai para `.po-skip-slot`, fora do dock, porque precisa
+          sobreviver ao sumico dos controles. O de proximo fica aqui, dentro
+          do dock, porque so interessa quando a pessoa estapilando as
+          informacoes do episodio seguinte.
+        */}
+        {proximoVisivel && proximo && (
           <div className="po-proximo" role="dialog" aria-label="Próximo">
+            {/*
+              CAPA DO PROXIMO. Sem ela a oferta e so uma faixa de texto e nao se
+              reconhece o episodio seguinte; a arte e o que faz a pessoa bater o
+              olho e decidir. Se a capa faltar, o espaco nao e reservado e a
+              oferta encolhe para o texto.
+            */}
+            {proximo.logo ? (
+              <span className="po-proximo-capa" aria-hidden>
+                <img
+                  src={coverSrc(proximo.logo)}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  draggable={false}
+                  onError={(e) => {
+                    e.currentTarget.closest('.po-proximo-capa')?.remove()
+                  }}
+                />
+              </span>
+            ) : null}
             <div className="po-proximo-info">
               <span className="po-proximo-label">A seguir</span>
               <span className="po-proximo-titulo">{proximo.name}</span>
@@ -1444,7 +1912,18 @@ export function PlayerOverlayApp() {
                 className="po-proximo-btn po-proximo-btn-primary"
                 onClick={() => {
                   sendAction({ type: 'select', id: proximo.id })
+                  /*
+                   * `proximoDispensado` tambem, e nao so `proximoOferecido`.
+                   *
+                   * `sendAction` e IPC: o `meta` com o `currentId` novo chega
+                   * depois. Entre o clique e a troca, `position` ainda e o do
+                   * episodio velho — no fim — e o efeito de oferta lia isso como
+                   * "esta acabando" e religava o cartao. A trava sobe no clique e
+                   * o reset (que roda em `meta.currentId`) limpa junto: o
+                   * episodio novo nasce com a oferta livre para o FIM DELE.
+                   */
                   setProximoOferecido(false)
+                  setProximoDispensado(true)
                   showControls()
                 }}
               >
@@ -1474,15 +1953,16 @@ export function PlayerOverlayApp() {
                   )}%`,
                 } as CSSProperties
               }
+              onPointerMove={(e) => {
+                const r = e.currentTarget.getBoundingClientRect()
+                if (!r.width) return
+                const pct = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
+                setHoverPos(pct * duration)
+                setPreviewX(Math.min(window.innerWidth - 96, Math.max(96, e.clientX)))
+                setPreviewTop(r.top - 8)
+              }}
+              onPointerLeave={() => setHoverPos(null)}
             >
-              {scrubPos !== null && (
-                <span
-                  className="po-scrub-tip"
-                  style={{ left: `${Math.min(100, Math.max(0, (scrubPos / duration) * 100))}%` }}
-                >
-                  {formatTime(scrubPos)}
-                </span>
-              )}
               <input
                 type="range"
                 className="po-seek"
@@ -1490,7 +1970,33 @@ export function PlayerOverlayApp() {
                 max={duration}
                 step={1}
                 value={Math.min(position, duration)}
-                onChange={(e) => setScrubPos(Number(e.target.value))}
+                onChange={(e) => {
+                  /*
+                   * ARRASTE: só move o mostrador. NAO busca durante o arrasto.
+                   *
+                   * A ideia era buscar ao vivo (o video acompanhando o cursor),
+                   * e foi o que medi. Resultado: RUIM.
+                   *
+                   * A origem (`gmaster1.shop`) nao responde a range request —
+                   * devolve 200 OK com o arquivo inteiro em vez de 206 Partial
+                   * Content. Entao nao existe "pular para o byte X": o mpv
+                   * relê do comeco. Cada seek do arrasto (oito por segundo)
+                   * invalida a posicao de leitura, e o demuxer volta para o
+                   * inicio do arquivo a cada um.
+                   *
+                   * Medido no app: com o arraste ao vivo, a posicao ficou 5,8 s
+                   * parada e a imagem travada. Sem buscar durante o arrasto, o
+                   * video continua tocando normalmente enquanto a pessoa
+                   * arrasta — e so existe UM salto, no fim.
+                   *
+                   * Quem resolve o salto e o motor, com o seek rapido
+                   * (`mode: 'scrub'`), que para no keyframe mais proximo em
+                   * vez de decodificar ate o quadro exato.
+                   */
+                  // Novo arraste: a guarda do `finishScrub` volta a valer.
+                  scrubConcluidoRef.current = false
+                  setScrubPos(Number(e.target.value))
+                }}
                 onPointerUp={finishScrub}
                 onLostPointerCapture={finishScrub}
                 onKeyUp={finishScrub}
@@ -1939,6 +2445,20 @@ export function PlayerOverlayApp() {
             </button>
           </div>
         </aside>
+      )}
+
+      {/*
+        PRÉVIA DA BARRA fica FORA do `.po-dock`.
+
+        O dock tem `overflow: hidden` (para o conteúdo não vazar quando a janela
+        é menor que ele), e isso cortava a miniatura no teto. Como elemento
+        `position: fixed` no root — que cobre o vídeo inteiro — ela cabe acima
+        da barra sem depender do recorte do dock.
+      */}
+      {posPreview !== null && (
+        <div className="po-scrub-preview" style={{ left: previewX, top: previewTop }}>
+          <span className="po-scrub-time">{formatTime(posPreview)}</span>
+        </div>
       )}
     </div>
   )

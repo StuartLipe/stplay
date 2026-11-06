@@ -100,13 +100,24 @@ async function pipeUpstream(req, res, targetUrl, opts = {}) {
     'cache-control': 'no-store',
   })
   if (opts.streamDefaults) {
-    // Nunca repassa Content-Length/Range do painel no live: painel com length
-    // errado causava net::ERR_CONTENT_LENGTH_MISMATCH e retry de segundos.
-    // Chunked sempre (igual mpv ignora length e segue o pipe).
     outHeaders['Content-Type'] =
       sanitizeHeaderValue(guessStreamContentType(targetUrl, upstream.headers.get('content-type'))) ||
       'application/octet-stream'
-    outHeaders['Accept-Ranges'] = 'bytes'
+    // VOD: o <video> precisa do tamanho/range para saber a duracao e poder
+    // buscar. Sem Content-Length o Chromium trata o MP4 como stream ao vivo
+    // (duracao crescendo) e vive rebufferizando. HLS continua chunked.
+    const tipoUp = String(upstream.headers.get('content-type') || '')
+    const ehHls = /mpegurl/i.test(tipoUp) || /\.m3u8(\?|#|$)/i.test(targetUrl)
+    if (!ehHls) {
+      const len = upstream.headers.get('content-length')
+      const cr = upstream.headers.get('content-range')
+      const ar = upstream.headers.get('accept-ranges')
+      if (len) outHeaders['Content-Length'] = len
+      if (cr) outHeaders['Content-Range'] = cr
+      outHeaders['Accept-Ranges'] = ar || 'bytes'
+    } else {
+      outHeaders['Accept-Ranges'] = 'bytes'
+    }
   } else {
     const forwarded = safeResponseHeaders(upstream)
     for (const [key, value] of Object.entries(forwarded)) {

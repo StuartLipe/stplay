@@ -2787,6 +2787,56 @@ let underrun = criarGovernador()
 let underrunTimer = null
 /** Último time-pos visto (detecção de stall no ao vivo). */
 let lastLiveTimePos = -1
+
+/*
+ * CONGELAMENTO NO VOD — detector.
+ *
+ * O sintoma que o usuario descreve e "puxo a barra e o video trava e so volta
+ * depois". Congelamento no VOD e a posicao REAL do mpv parar de avancar com o
+ * video NAO pausado: o demuxer secou, o `cache-pause=false` segura o ultimo
+ * quadro e o video fica parado como uma foto, voltando quando a rede repõe.
+ *
+ * Este detector existe para MEDIR isso, nao para consertar. A diferenca
+ * importa: sem numero, "trava" e achismo, e achismo nao se conserta.
+ *
+ * Atras de STPLAY_SCRUB_TRACE porque e um timer de 500ms rodando o tempo
+ * todo, e isso nao e de graca.
+ */
+let vodUltimoAvanco = -1
+let vodUltimoAvancoEmMs = 0
+let vodPausado = true
+let vodTimerCongelamento = null
+let vodCongelandoDesde = 0
+
+function marcarAvancoVod(pos) {
+  if (pos > vodUltimoAvanco + 0.01) {
+    vodUltimoAvanco = pos
+    vodUltimoAvancoEmMs = Date.now()
+    if (vodCongelandoDesde) {
+      log.warn('stur', 'vod destravou', {
+        duracaoMs: Date.now() - vodCongelandoDesde,
+        posicao: pos,
+      })
+      vodCongelandoDesde = 0
+    }
+  }
+}
+
+function armarTimerCongelamento() {
+  if (vodTimerCongelamento) return
+  vodTimerCongelamento = setInterval(() => {
+    // Pausado nao e congelado: e a pessoa que mandou parar.
+    if (vodPausado) return
+    if (!vodUltimoAvancoEmMs) return
+    if (Date.now() - vodUltimoAvancoEmMs < 2000) return
+    if (vodCongelandoDesde) return
+    vodCongelandoDesde = Date.now()
+    log.warn('stur', 'vod congelou', {
+      posicao: vodUltimoAvanco,
+      paradoHaMs: Date.now() - vodUltimoAvancoEmMs,
+    })
+  }, 500)
+}
 /** Último `time-pos` que realmente contou como avanço (ver LIVE_TIME_POS_MIN_STEP). */
 let lastLiveTimePosAtPos = -1
 let lastLiveTimePosAt = 0
@@ -3323,6 +3373,9 @@ function handleIpcMessage(msg) {
   }
   if (msg.event === 'property-change') {
     if (msg.name === 'time-pos' && typeof msg.data === 'number') {
+      if (!liveMode) {
+        marcarAvancoVod(msg.data)
+      }
       emit({ type: 'timeupdate', current: msg.data })
       /*
         TRACE TEMPORARIO de rewind no ao vivo (STPLAY_TP_TRACE=1).
@@ -3422,6 +3475,8 @@ function handleIpcMessage(msg) {
       emitDuration(msg.data)
     }
     if (msg.name === 'pause') {
+      // Rastreio de congelamento no VOD: `pause=false` e o video tocando.
+      if (!liveMode) vodPausado = msg.data === true
       if (liveMode && livePlaybackReady) {
         if (userPausedLive) emit({ type: msg.data ? 'paused' : 'playing' })
         else if (!msg.data) emit({ type: 'playing' })
@@ -3969,6 +4024,9 @@ function observeProperties() {
   for (let i = 0; i < props.length; i++) {
     void sendIpc(['observe_property', i + 1, props[i]])
   }
+  // Rastreio de congelamento no VOD. Atras da env var porque e um timer de
+  // 500ms o tempo todo.
+  if (process.env.STPLAY_SCRUB_TRACE === '1') armarTimerCongelamento()
 }
 
 async function tryFallbackLoad(url, startSec) {
@@ -5130,14 +5188,20 @@ async function command(op, value, mode) {
       else userPausedVod = !userPausedVod
       await sendIpc(['cycle', 'pause'])
     } else if (op === 'seek' && typeof value === 'number') {
-      // `relative` e o que separa "anda 10s" de "va para 1:20:00".
-      //
-      // No caminho relativo o mpv aplica a partir da posicao REAL dele. No
-      // absoluto, o destino vinha calculado no renderer com um `currentTime`
-      // que chega por `timeupdate` e ja atrasa em relacao ao video — e um atraso
-      // de meio segundo numa seta para frente produz um destino ATRAS do ponto
-      // onde o video esta. Seek para tras no mpv joga fora o buffer e volta a
-      // ler da rede: e a travada que parece "nao carregou".
+      /*
+       * `relative` e o que separa "anda 10s" de "va para 1:20:00".
+       *
+       * No caminho relativo o mpv aplica a partir da posicao REAL dele. No
+       * absoluto, o destino vinha calculado no renderer com um `currentTime`
+       * que chega por `timeupdate` e ja atrasa em relacao ao video — e um atraso
+       * de meio segundo numa seta para frente produz um destino ATRAS do ponto
+       * onde o video esta. Seek para tras no mpv joga fora o buffer e volta a
+       * ler da rede: e a travada que parece "nao carregou".
+       *
+       * A BARRA DE TEMPO usa o absoluto, e está certo: o alvo ali é um
+       * instante escolhido, não um deslocamento. A posicao defasada só
+       * quebra os saltos relativos — que é o caso das manoplas de 10s.
+       */
       await sendIpc(['seek', value, mode === 'relative' ? 'relative' : 'absolute'])
     }
     else if (op === 'volume' && typeof value === 'number') {

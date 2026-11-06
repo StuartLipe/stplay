@@ -147,7 +147,14 @@ export default defineConfig({
     strictPort: true,
     open: false,
     watch: {
-      ignored: ['**/release/**', '**/dist/**'],
+      // oped-data/oped-filmes são reescritos pelo finder a cada 3 temporadas.
+      // Sem isso, o Vite recarrega o app (e o filme) no meio da reprodução.
+      ignored: [
+        '**/release/**',
+        '**/dist/**',
+        '**/src/lib/oped-data.ts',
+        '**/src/lib/oped-filmes.ts',
+      ],
     },
   },
 })

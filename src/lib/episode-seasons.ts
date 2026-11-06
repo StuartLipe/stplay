@@ -13,8 +13,17 @@ export function resolveEpisodeSeason(item: EpisodeListItem): string {
   return 'Outros'
 }
 
-export function groupEpisodesBySeason(items: EpisodeListItem[]): Array<[string, EpisodeListItem[]]> {
-  const seasons = new Map<string, EpisodeListItem[]>()
+/**
+ * Agrupa por temporada PRESERVANDO o tipo de quem entra.
+ *
+ * Antes devolvia `Array<[string, EpisodeListItem[]]>` e, num caller que passava
+ * itens mais ricos (`OverlayItem`, que tem `logo`), o `logo` sumia no tipo: o
+ * agrupamento so precisa de `id`, `name` e `group`, mas a assinatura nao dizia
+ * isso e cobrava de quem chamasse. O resultado era um erro de compilacao em
+ * quem so queria mostrar a capa do proximo episodio.
+ */
+export function groupEpisodesBySeason<T extends EpisodeListItem>(items: T[]): Array<[string, T[]]> {
+  const seasons = new Map<string, T[]>()
   for (const item of items) {
     const key = resolveEpisodeSeason(item)
     const bucket = seasons.get(key)

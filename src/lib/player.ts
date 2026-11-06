@@ -9,7 +9,7 @@ function looksLikeLiveUrl(url: string) {
   return /\/live\//i.test(url) || /[?&]output=(ts|m3u8|hls)\b/i.test(url)
 }
 
-/** Xtream/M3U ao vivo em .ts não toca no Chromium — o painel costuma servir o mesmo id em .m3u8. */
+/** Xtream/M3U ao vivo em .ts nÃ£o toca no Chromium â€” o painel costuma servir o mesmo id em .m3u8. */
 export function toLiveHlsUrl(url: string) {
   let next = url
   next = next.replace(/([?&]output=)ts\b/i, '$1m3u8')
@@ -33,8 +33,8 @@ export function hlsSourceCandidates(url: string, live: boolean) {
     seen.add(next)
     out.push(next)
   }
-  // Ordem = velocidade: tenta o original primeiro (sem conversão = 1 request a menos),
-  // depois convertido, depois variantes output= (alguns painéis só abrem com output=).
+  // Ordem = velocidade: tenta o original primeiro (sem conversÃ£o = 1 request a menos),
+  // depois convertido, depois variantes output= (alguns painÃ©is sÃ³ abrem com output=).
   add(url)
   if (live) {
     add(toLiveHlsUrl(url))
@@ -47,13 +47,13 @@ export function hlsSourceCandidates(url: string, live: boolean) {
         add(v.href)
       }
     } catch {
-      // url relativa — ignora variantes
+      // url relativa â€” ignora variantes
     }
   }
   return out
 }
 
-/** O painel às vezes manda .mp4 e o arquivo é .mkv/.avi — o Chromium recusa e mostra esse erro. */
+/** O painel Ã s vezes manda .mp4 e o arquivo Ã© .mkv/.avi â€” o Chromium recusa e mostra esse erro. */
 function vodUrlVariants(url: string): string[] {
   const match = url.match(/^(https?:\/\/.+\.)([a-z0-9]+)(\?.*)?$/i)
   if (!match) return [url]
@@ -133,7 +133,7 @@ function redactUrl(url: string) {
     const u = new URL(url)
     // Esconde user/pass/token do painel: /live/u/p/id -> /live/*/*/id
     const p = u.pathname.replace(/(\/live\/)[^/]+\/[^/]+(\/.*)?/i, '$1*/*$2')
-    return `${u.protocol}//${u.host}${p}${u.search ? '?…' : ''}`
+    return `${u.protocol}//${u.host}${p}${u.search ? '?â€¦' : ''}`
   } catch {
     return url.slice(0, 60)
   }
@@ -159,16 +159,16 @@ function isVideoRendering(video: HTMLVideoElement) {
   return video.videoWidth > 0 && video.videoHeight > 0 && video.currentTime > 0.05
 }
 
-/** Mantém o mudo escolhido pelo utilizador — playWithFallback não deve reativar o som. */
+/** MantÃ©m o mudo escolhido pelo utilizador â€” playWithFallback nÃ£o deve reativar o som. */
 export function setPlayerKeepMuted(video: HTMLVideoElement, keep: boolean) {
   if (keep) video.dataset.keepMuted = '1'
   else delete video.dataset.keepMuted
 }
 
 function playWithFallback(video: HTMLVideoElement) {
-  // NUNCA mexe em mute aqui — mutar/desmutar a cada fragmento causava
+  // NUNCA mexe em mute aqui â€” mutar/desmutar a cada fragmento causava
   // travamento + som mudo no meio do live (ESPN FHD).
-  // Só dá play se estiver pausado; o mute inicial é tratado uma vez no attach.
+  // SÃ³ dÃ¡ play se estiver pausado; o mute inicial Ã© tratado uma vez no attach.
   if (!video.paused && video.currentTime > 0) return
   try {
     const p = video.play()
@@ -180,7 +180,7 @@ function playWithFallback(video: HTMLVideoElement) {
 }
 
 function ensureUnmutedOnce(video: HTMLVideoElement) {
-  // Chamado 1x após autoplay com som liberado (gesto do usuário / canplay).
+  // Chamado 1x apÃ³s autoplay com som liberado (gesto do usuÃ¡rio / canplay).
   // Respeita o mudo escolhido pelo utilizador.
   try {
     if (video.dataset.keepMuted === '1') {
@@ -214,15 +214,15 @@ export interface PlayerControls {
 
 function formatVideoError(video: HTMLVideoElement) {
   const err = video.error
-  if (err?.code === 3) return 'Codec de vídeo ou áudio não suportado neste reprodutor'
-  if (err?.code === 4) return 'Este arquivo não toca no player interno (formato/codec).'
-  if (err?.code === 2) return 'Erro de conexão ao carregar o vídeo'
-  return 'Erro ao reproduzir o vídeo'
+  if (err?.code === 3) return 'Codec de vÃ­deo ou Ã¡udio nÃ£o suportado neste reprodutor'
+  if (err?.code === 4) return 'Este arquivo nÃ£o toca no player interno (formato/codec).'
+  if (err?.code === 2) return 'Erro de conexÃ£o ao carregar o vÃ­deo'
+  return 'Erro ao reproduzir o vÃ­deo'
 }
 
 export interface PlayerAttachOptions {
   live?: boolean
-  /** UHD / esportes — mais buffer e timeouts sem sacrificar estabilidade */
+  /** UHD / esportes â€” mais buffer e timeouts sem sacrificar estabilidade */
   heavy?: boolean
   onError?: (err: string) => void
   onAudioTracks?: (tracks: AudioTrack[]) => void
@@ -232,9 +232,9 @@ export interface PlayerAttachOptions {
 
 function createProxyLoader(elapsed: () => number) {
   const BaseLoader = Hls.DefaultConfig.loader
-  // Igual players web de referência (direto no painel, sem proxy).
-  // Tenta DIRETO primeiro (rápido como STUR); se falhar (CORS/403), cai pro proxy.
-  // Falha direta é rápida (browser rejeita na hora); só rede travada paga timeout.
+  // Igual players web de referÃªncia (direto no painel, sem proxy).
+  // Tenta DIRETO primeiro (rÃ¡pido como STUR); se falhar (CORS/403), cai pro proxy.
+  // Falha direta Ã© rÃ¡pida (browser rejeita na hora); sÃ³ rede travada paga timeout.
   return class extends BaseLoader {
     load(
       context: Parameters<InstanceType<typeof BaseLoader>['load']>[0],
@@ -346,8 +346,8 @@ function createHls(live: boolean, heavy = false, elapsed: () => number = () => 0
     return new Hls({
       ...shared,
       liveDurationInfinity: true,
-      // STUR abre na borda (0 delay); HLS com 2 segmentos atrás = 12s só de delay.
-      // 1 = cola no live igual mpv, abre rápido; buffer + watchdog seguram sem travar.
+      // STUR abre na borda (0 delay); HLS com 2 segmentos atrÃ¡s = 12s sÃ³ de delay.
+      // 1 = cola no live igual mpv, abre rÃ¡pido; buffer + watchdog seguram sem travar.
       liveSyncDurationCount: 1,
       liveMaxLatencyDurationCount: 5,
       maxLiveSyncPlaybackRate: 1.0,
@@ -355,25 +355,25 @@ function createHls(live: boolean, heavy = false, elapsed: () => number = () => 0
       maxStarvationDelay: 4,
       maxLoadingDelay: 4,
       backBufferLength: heavy ? 20 : 12,
-      // Start rápido vem do edge (count 1) + nível 0, não do buffer curto.
+      // Start rÃ¡pido vem do edge (count 1) + nÃ­vel 0, nÃ£o do buffer curto.
       // Buffer maior segura jitter de segmento via proxy sem travar depois.
       maxBufferLength: heavy ? 15 : 12,
       maxMaxBufferLength: heavy ? 40 : 30,
       maxBufferSize: heavy ? 64 * 1024 * 1024 : 48 * 1024 * 1024,
       maxBufferHole: 0.5,
-      // Começa baixo pra abrir rápido e não congelar no 1º frame FHD, sobe sozinho
+      // ComeÃ§a baixo pra abrir rÃ¡pido e nÃ£o congelar no 1Âº frame FHD, sobe sozinho
       abrEwmaDefaultEstimate: 1_500_000,
       abrEwmaFastLive: 3,
       abrBandWidthFactor: 0.8,
       abrBandWidthUpFactor: 0.7,
       capLevelToPlayerSize: false,
-      // 0 = abre rápido no nível leve; ABR sobe pra FHD sozinho
+      // 0 = abre rÃ¡pido no nÃ­vel leve; ABR sobe pra FHD sozinho
       startLevel: 0,
       fragLoadingMaxRetry: 4,
-      // Manifest/level: 2 tentativas e troca de candidato — 4x8s = 32s num SD é demais
+      // Manifest/level: 2 tentativas e troca de candidato â€” 4x8s = 32s num SD Ã© demais
       manifestLoadingMaxRetry: 2,
       levelLoadingMaxRetry: 2,
-      // Painel lento (>6s) existia e abria antes — 8s/10s dá chance sem spinner eterno
+      // Painel lento (>6s) existia e abria antes â€” 8s/10s dÃ¡ chance sem spinner eterno
       fragLoadingTimeOut: 10_000,
       manifestLoadingTimeOut: 8_000,
       levelLoadingTimeOut: 8_000,
@@ -384,8 +384,8 @@ function createHls(live: boolean, heavy = false, elapsed: () => number = () => 0
     ...shared,
     backBufferLength: 20,
     // VOD: puxa o arquivo inteiro logo de cara (carrega "de uma vez") em vez
-    // de seguir colado no playback — com 8s o loader só rodava DURANTE a
-    // reprodução e o vídeo ficava choppy até o fim. 30min/1GB de janela à
+    // de seguir colado no playback â€” com 8s o loader sÃ³ rodava DURANTE a
+    // reproduÃ§Ã£o e o vÃ­deo ficava choppy atÃ© o fim. 30min/1GB de janela Ã 
     // frente: carrega tudo em segundos e ainda segura rede lenta sem travar.
     maxBufferLength: 1800,
     maxMaxBufferLength: 1800,
@@ -430,11 +430,11 @@ export function attachPlayerEx(video: HTMLVideoElement, url: string, opts: Playe
   let destroyed = false
   let hlsRetry = 0
 /*
- * Quantos `networkError` NÃO-fatais a corrente aceita antes de ser tratada como
+ * Quantos `networkError` NÃƒO-fatais a corrente aceita antes de ser tratada como
  * trava. Medido no painel do dono: 38 em 35s, ~1,3s de intervalo, todos
- * `aborted`, e o `MANIFEST_PARSED` nunca veio. Um `aborted` isolado é o
- * hls.js trocando de segmento e não deve incomodar; 12 seguidos sem nenhum
- * progresso é o spinning infinito.
+ * `aborted`, e o `MANIFEST_PARSED` nunca veio. Um `aborted` isolado Ã© o
+ * hls.js trocando de segmento e nÃ£o deve incomodar; 12 seguidos sem nenhum
+ * progresso Ã© o spinning infinito.
  */
 const HLS_SOFT_FAIL_MAX = 12
 let hlsSoftFail = 0
@@ -452,9 +452,9 @@ let hlsSoftFail = 0
   video.setAttribute('playsinline', '')
   video.setAttribute('autoplay', '')
 
-  // Fallback progressivo: VOD tenta variantes; live TS o Chromium não toca,
-  // então não adianta enrolar em 5 variantes x 18s (vira spinner de 90s).
-  // Live tenta só o original via proxy com timeout curto, depois erro direto.
+  // Fallback progressivo: VOD tenta variantes; live TS o Chromium nÃ£o toca,
+  // entÃ£o nÃ£o adianta enrolar em 5 variantes x 18s (vira spinner de 90s).
+  // Live tenta sÃ³ o original via proxy com timeout curto, depois erro direto.
   const progressiveVariants = isHlsManifest(url)
     ? [playSrc(toLiveHlsUrl(url))]
     : live
@@ -477,8 +477,8 @@ let hlsSoftFail = 0
     }
     video.addEventListener('loadedmetadata', onMeta, { once: true })
     scheduleLoadTimeout()
-    // Live progressivo (.ts via proxy o Chromium não toca): 10s e erro, sem enrolar
-    scheduleBlankCheck(live ? 10_000 : 10_000)
+    // Live progressivo (.ts via proxy o Chromium nÃ£o toca): 10s e erro, sem enrolar
+    scheduleBlankCheck(live ? 10_000 : 30_000)
   }
 
   let loadTimer = 0
@@ -496,10 +496,10 @@ let hlsSoftFail = 0
     window.clearTimeout(retryTimer)
     window.clearInterval(freezeTimer)
   }
-  // Watchdog anti-congelamento live: checa a cada 1.5s; no 1º travamento
-  // já derruba pro nível leve + volta pra borda (antes esperava 2x em 2.5s).
-  // No caminho ffmpeg (hls destruído) sem dados novos: religa o remux com fresh=1,
-  // senão fica congelado na borda pra sempre igual o log mostrou (cur==bufEnd 100s).
+  // Watchdog anti-congelamento live: checa a cada 1.5s; no 1Âº travamento
+  // jÃ¡ derruba pro nÃ­vel leve + volta pra borda (antes esperava 2x em 2.5s).
+  // No caminho ffmpeg (hls destruÃ­do) sem dados novos: religa o remux com fresh=1,
+  // senÃ£o fica congelado na borda pra sempre igual o log mostrou (cur==bufEnd 100s).
   let lastFfmpegRestart = 0
   const startFreezeWatchdog = () => {
     window.clearInterval(freezeTimer)
@@ -556,8 +556,8 @@ let hlsSoftFail = 0
           void video.play().catch(() => undefined)
           return
         }
-        // Sem hls (ffmpeg/progressivo) e sem dado novo há 3 checagens: o remux
-        // prendeu no painel — religa com pipe novo (10s entre religações).
+        // Sem hls (ffmpeg/progressivo) e sem dado novo hÃ¡ 3 checagens: o remux
+        // prendeu no painel â€” religa com pipe novo (10s entre religaÃ§Ãµes).
         if (live && freezeStuckCount >= 3 && performance.now() - lastFfmpegRestart > 10000) {
           lastFfmpegRestart = performance.now()
           freezeStuckCount = 0
@@ -575,7 +575,7 @@ let hlsSoftFail = 0
                 void video.play().catch(() => undefined)
               }
             } catch {
-              // próxima checagem tenta de novo
+              // prÃ³xima checagem tenta de novo
             }
           })()
         }
@@ -584,10 +584,10 @@ let hlsSoftFail = 0
       }
     }, 1500)
   }
-  // Erro final com 1 retry automático no live (painel instável: 1ª tentativa
-  // falha, retry abre — igual você viu no Cartoon). Só mostra erro na 2ª falha.
+  // Erro final com 1 retry automÃ¡tico no live (painel instÃ¡vel: 1Âª tentativa
+  // falha, retry abre â€” igual vocÃª viu no Cartoon). SÃ³ mostra erro na 2Âª falha.
   let beginFn: (() => void) | null = null
-  // Retry pede pipe novo (fresh): não reaproveita proc que pode estar preso na falha anterior
+  // Retry pede pipe novo (fresh): nÃ£o reaproveita proc que pode estar preso na falha anterior
   let needFresh = false
   const finalError = (message: string) => {
     if (destroyed) return
@@ -614,7 +614,7 @@ let hlsSoftFail = 0
     loadTimer = window.setTimeout(() => {
       if (destroyed) return
       if (video.readyState < 1 && !video.error) onVideoError()
-    }, 8_000)
+    }, 30_000)
   }
   const scheduleBlankCheck = (ms: number) => {
     window.clearTimeout(blankTimer)
@@ -622,19 +622,19 @@ let hlsSoftFail = 0
       if (destroyed || video.error) return
       if (isVideoRendering(video)) return
       if (video.readyState >= 2 && video.currentTime > 0.5) return
-      // Tocando com dados mas sem frame e sem tempo = dado inútil (codec/nível ruim).
-      // Antes dava return e ficava spinner infinito com o botão em pause.
-      // Agora cai pro próximo candidato/motor em vez de rodar pra sempre.
+      // Tocando com dados mas sem frame e sem tempo = dado inÃºtil (codec/nÃ­vel ruim).
+      // Antes dava return e ficava spinner infinito com o botÃ£o em pause.
+      // Agora cai pro prÃ³ximo candidato/motor em vez de rodar pra sempre.
       if (hls) {
         const hasData = video.readyState >= 1 && video.currentTime > 0.5
         if (hasData) return
-        failHls(live ? 'Live não carregou — tentando próximo motor' : 'Demorou para abrir o stream ao vivo')
+        failHls(live ? 'Live nÃ£o carregou â€” tentando prÃ³ximo motor' : 'Demorou para abrir o stream ao vivo')
         return
       }
       // Progressivo travado sem frame: antes jogava o box de erro na tela e a
       // cadeia continuava em background (virava "da erro e depois carrega").
-      // Agora salta direto pro remux ffmpeg — o mesmo fim que o error event
-      // chegava — e o box só aparece se o remux também falhar.
+      // Agora salta direto pro remux ffmpeg â€” o mesmo fim que o error event
+      // chegava â€” e o box sÃ³ aparece se o remux tambÃ©m falhar.
       variantIndex = progressiveVariants.length
       onVideoError()
     }, ms)
@@ -703,7 +703,7 @@ let hlsSoftFail = 0
   video.addEventListener('error', onVideoError)
 
   const onLoadedData = () => {
-    scheduleBlankCheck(live ? 15_000 : 10_000)
+    scheduleBlankCheck(live ? 15_000 : 30_000)
     playWithFallback(video)
   }
   const onCanPlay = () => {
@@ -732,7 +732,7 @@ let hlsSoftFail = 0
   video.addEventListener('waiting', onStallNudge)
   video.addEventListener('stalled', onStallNudge)
   // Autoplay com som bloqueado pelo Chromium deixa pausado.
-  // Mantém mutado até o 1º frame tocando, aí devolve o som se o usuário não mutou.
+  // MantÃ©m mutado atÃ© o 1Âº frame tocando, aÃ­ devolve o som se o usuÃ¡rio nÃ£o mutou.
   const onFirstPlaying = () => {
     dbg('playing', { t: elapsed() })
     ensureUnmutedOnce(video)
@@ -765,16 +765,16 @@ let hlsSoftFail = 0
     if (destroyed) return
     if (isVideoRendering(video) && !video.paused) return
     dbg('fail-hls', { t: elapsed(), message, details: details ?? null, hlsIndex })
-    // Live com mais de 8s já queimou tempo demais em candidato: pula o resto e
-    // vai direto pro progressivo/ffmpeg (meta: abrir em até 10s na 1ª vez).
+    // Live com mais de 8s jÃ¡ queimou tempo demais em candidato: pula o resto e
+    // vai direto pro progressivo/ffmpeg (meta: abrir em atÃ© 10s na 1Âª vez).
     if (live && elapsed() > 8000) hlsIndex = hlsCandidates.length
     else hlsIndex += 1
     if (hlsIndex < hlsCandidates.length) {
       startHls(hlsCandidates[hlsIndex])
       return
     }
-    // HLS esgotou: tenta progressivo (original via proxy) e por último o
-    // remux ffmpeg local (TS/HEVC/AC3 que o Chromium não abre sozinho).
+    // HLS esgotou: tenta progressivo (original via proxy) e por Ãºltimo o
+    // remux ffmpeg local (TS/HEVC/AC3 que o Chromium nÃ£o abre sozinho).
     destroyHls()
     variantIndex = -1
     let ffmpegTried = false
@@ -830,12 +830,12 @@ let hlsSoftFail = 0
     hls.attachMedia(video)
     hls.loadSource(src)
     // Se o manifest travar sem parse (hang), o blank estoura e troca de candidato.
-    // Live em 10s pra cair rápido pro ffmpeg (meta: abrir em até 10s).
-    scheduleBlankCheck(live ? 10_000 : 10_000)
+    // Live em 10s pra cair rÃ¡pido pro ffmpeg (meta: abrir em atÃ© 10s).
+    scheduleBlankCheck(live ? 10_000 : 30_000)
     hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
       if (destroyed || !hls) return
-      // Progresso real: o circuito de erro não-fatal volta a zero. A partir
-      // daqui o `aborted` isolado é o hls.js trocando de segmento.
+      // Progresso real: o circuito de erro nÃ£o-fatal volta a zero. A partir
+      // daqui o `aborted` isolado Ã© o hls.js trocando de segmento.
       hlsSoftFail = 0
       try {
         dbg('manifest', {
@@ -848,26 +848,26 @@ let hlsSoftFail = 0
       }
       playWithFallback(video)
       startFreezeWatchdog()
-      scheduleBlankCheck(live ? 10_000 : 10_000)
+      scheduleBlankCheck(live ? 10_000 : 30_000)
     })
-    // NÃO dá play/mute a cada fragmento — isso travava e mutava o ESPN no meio.
-    // Só limpa o timer de tela preta e deixa o MSE seguir.
-    // NÃO limpa o blankTimer no LEVEL/FRAG_LOADED do live — o playlist recarrega
+    // NÃƒO dÃ¡ play/mute a cada fragmento â€” isso travava e mutava o ESPN no meio.
+    // SÃ³ limpa o timer de tela preta e deixa o MSE seguir.
+    // NÃƒO limpa o blankTimer no LEVEL/FRAG_LOADED do live â€” o playlist recarrega
     // a cada segmento e resetava o timeout pra sempre (spinner infinito sem erro).
-    // Só FRAG_BUFFERED (dado real) limpa.
+    // SÃ³ FRAG_BUFFERED (dado real) limpa.
     hls.on(Hls.Events.LEVEL_LOADED, () => {
       if (destroyed) return
     })
     hls.on(Hls.Events.FRAG_LOADED, () => {
       if (destroyed) return
-      // Segmento baixado é progresso: o circuito de não-fatal volta a zero.
+      // Segmento baixado Ã© progresso: o circuito de nÃ£o-fatal volta a zero.
       hlsSoftFail = 0
     })
     hls.on(Hls.Events.FRAG_BUFFERED, () => {
       window.clearTimeout(blankTimer)
       hlsSoftFail = 0
-      // Live: hls.js só leva o currentTime pra borda no refresh do playlist
-      // (até 20s parado no 0.0 — issue #4950). Se o 0.0 tá longe da janela,
+      // Live: hls.js sÃ³ leva o currentTime pra borda no refresh do playlist
+      // (atÃ© 20s parado no 0.0 â€” issue #4950). Se o 0.0 tÃ¡ longe da janela,
       // pula na hora pra borda igual o mpv (live_start_index=-1), sem mpv.
       if (live && !firstFragLogged) {
         try {
@@ -892,8 +892,8 @@ let hlsSoftFail = 0
       if (!video.paused) ensureUnmutedOnce(video)
       else playWithFallback(video)
     })
-    // Anti-travamento já tratado pelo onStallNudge global (waiting/stalled).
-    // Aqui só limpa tela preta, sem recriar HLS.
+    // Anti-travamento jÃ¡ tratado pelo onStallNudge global (waiting/stalled).
+    // Aqui sÃ³ limpa tela preta, sem recriar HLS.
     const onStall = () => {
       if (destroyed || !live) return
       window.clearTimeout(blankTimer)
@@ -906,7 +906,7 @@ let hlsSoftFail = 0
     }
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (destroyed || !hls || !data.fatal) {
-        // Loga não-fatal pra diagnosticar spinner (manifest 403/404 aparece aqui antes de fatal)
+        // Loga nÃ£o-fatal pra diagnosticar spinner (manifest 403/404 aparece aqui antes de fatal)
         if (data && !data.fatal) {
           try {
             console.warn('[stplay][hls]', data.type, data.details, data.response?.code || data.networkDetails || '')
@@ -914,24 +914,24 @@ let hlsSoftFail = 0
             // ignore
           }
           /*
-           * DISJUNTOR de erro não-fatal repetido.
+           * DISJUNTOR de erro nÃ£o-fatal repetido.
            *
            * O caminho de retry contava SO erro fatal: `hlsRetry` so sobe no
-           * `NETWORK_ERROR` fatal e no `MEDIA_ERROR`. Um `aborted` não-fatal não
-           * entra em nenhuma das duas contagens — e era o que o painel deste
+           * `NETWORK_ERROR` fatal e no `MEDIA_ERROR`. Um `aborted` nÃ£o-fatal nÃ£o
+           * entra em nenhuma das duas contagens â€” e era o que o painel deste
            * dono produzia, sem parar.
            *
            * Medido no log: 38 `networkError / aborted` em 35s, ritmo de ~1,3s,
-           * e `MANIFEST_PARSED` nunca chegou. `hls.js` aborta a requisição quando
+           * e `MANIFEST_PARSED` nunca chegou. `hls.js` aborta a requisiÃ§Ã£o quando
            * reinicia o load; ele fazia isso, o contador nao subia, o `scheduleBlankCheck`
            * de 10s era rearmado a cada `startHls`, e a tela ficava em spinner
            * para sempre sem nunca cair no proximo candidato nem no proximo motor.
            *
-           * `aborted` sozinho é normal em live (troca de segmento, `startLoad`).
-           * O que é patológico é a RAJADA sem nenhum progresso: por isso o contador
-           * sobe no não-fatal e ZERA em qualquer sinal de vida (manifest parsed,
+           * `aborted` sozinho Ã© normal em live (troca de segmento, `startLoad`).
+           * O que Ã© patolÃ³gico Ã© a RAJADA sem nenhum progresso: por isso o contador
+           * sobe no nÃ£o-fatal e ZERA em qualquer sinal de vida (manifest parsed,
            * fragmento bufferizado, tempo correndo). Nesses casos o circuito fica
-           * fechado e o streaming normal nunca é interrompido.
+           * fechado e o streaming normal nunca Ã© interrompido.
            */
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
             hlsSoftFail += 1
@@ -944,7 +944,7 @@ let hlsSoftFail = 0
               hlsSoftFail = 0
               removeStall()
               failHls(
-                live ? 'Live não carregou — tentando próximo motor' : 'Demorou para abrir o stream',
+                live ? 'Live nÃ£o carregou â€” tentando prÃ³ximo motor' : 'Demorou para abrir o stream',
                 `networkError repetido (${data.details || 'sem detalhe'})`,
               )
             }
@@ -955,7 +955,7 @@ let hlsSoftFail = 0
       const detailCode =
         data.details ||
         (typeof data.response?.code === 'number' ? `http ${data.response.code}` : '')
-      // 3 tentativas rápidas e cai fora — spinner longo não ajuda, o STUR assume
+      // 3 tentativas rÃ¡pidas e cai fora â€” spinner longo nÃ£o ajuda, o STUR assume
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR && hlsRetry < 4) {
         hlsRetry += 1
         window.setTimeout(() => {
@@ -971,13 +971,13 @@ let hlsSoftFail = 0
       }
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
         try {
-          // 1ª e 2ª vez: só recover, SEM trocar codec (trocar codec mutava o áudio no meio)
+          // 1Âª e 2Âª vez: sÃ³ recover, SEM trocar codec (trocar codec mutava o Ã¡udio no meio)
           if (hlsRetry < 2) {
             hlsRetry += 1
             hls.recoverMediaError()
             return
           }
-          // Só troca codec 1x e só se ainda não trocou
+          // SÃ³ troca codec 1x e sÃ³ se ainda nÃ£o trocou
           if (!audioSwapDone) {
             audioSwapDone = true
             hls.swapAudioCodec()
@@ -1004,7 +1004,7 @@ let hlsSoftFail = 0
 
   const begin = () => {
     if (destroyed) return
-    // Re-lê: o retry pode ter aprendido o motor na 1ª tentativa
+    // Re-lÃª: o retry pode ter aprendido o motor na 1Âª tentativa
     remembered = readEngineMemory(url)
     hostFfmpeg = readHostFfmpegCount(url)
     dbg('begin', { t: elapsed(), url: redactUrl(url), hls: hlsCandidates.length, remembered, hostCount: hostFfmpeg })
@@ -1052,10 +1052,10 @@ let hlsSoftFail = 0
     return destroy
   }
 
-  // MP4/MKV direto (não-HLS): usa a MESMA memória de motor do ramo HLS. Sem
+  // MP4/MKV direto (nÃ£o-HLS): usa a MESMA memÃ³ria de motor do ramo HLS. Sem
   // isto, todo reaberto refaz a cadeia progressiva inteira (variantes x
-  // timeout ~40s de spinner) até chegar no remux que o host já gravou que
-  // precisa. hostCount>=2 = host já provou que precisa de ffmpeg.
+  // timeout ~40s de spinner) atÃ© chegar no remux que o host jÃ¡ gravou que
+  // precisa. hostCount>=2 = host jÃ¡ provou que precisa de ffmpeg.
   if (remembered !== 'hls' && (remembered === 'ffmpeg' || hostFfmpeg >= 2)) {
     dbg('remembered-ffmpeg', { t: elapsed(), url: redactUrl(url), hostCount: hostFfmpeg, vod: true })
     const useFresh = needFresh

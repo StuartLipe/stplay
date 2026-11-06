@@ -11589,6 +11589,51 @@ html.player-overlay-mode #root {
   white-space: nowrap;
 }
 
+/* Prévia da barra: miniatura do quadro + tempo, como no YouTube.
+   Fica FORA do `.po-dock` (que tem overflow:hidden e cortava no teto). */
+.po-scrub-preview {
+  position: fixed;
+  transform: translate(-50%, -100%);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border-radius: 6px;
+  /* Transparente: s? o n?mero, sem caixa cinza. */
+  background: transparent;
+  pointer-events: none;
+}
+
+.po-scrub-thumb {
+  display: block;
+  width: 168px;
+  height: 94px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #000;
+}
+
+.po-scrub-thumb-vazia {
+  background: linear-gradient(90deg, #151a24, #232b3a, #151a24);
+  background-size: 200% 100%;
+  animation: po-thumb-carregando 1s linear infinite;
+}
+
+@keyframes po-thumb-carregando {
+  from { background-position: 0 0; }
+  to { background-position: -200% 0; }
+}
+
+.po-scrub-time {
+  display: block;
+  font-size: 12px;
+  line-height: 1.1;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 0 8px rgba(0, 0, 0, 0.8);
+}
+
 .po-seek,
 /*
  * Trilho do volume desenhado a mao, igual ao `.po-seek` acima.
@@ -12041,18 +12086,78 @@ html.player-overlay-mode #root {
  * Fica ACIMA da faixa de tempo, nunca sobre ela: a faixa mostra quanto falta
  * para o fim, e e o dado que a pessoa usa para decidir se aceita a troca.
  */
+/*
+ * A oferta na direita.
+ *
+ * `margin-left: auto` + `width: fit-content` porque o `.po-dock` e bloco, nao
+ * flex — sem isso o cartao esticaria de ponta a ponta. Alinhar a direita tambem
+ * afasta do titulo centralizado da obra e dos controles da esquerda, que e onde
+ * o olho ja esta quando a barra aparece.
+ */
+.po-skip-slot {
+  position: absolute;
+  right: 18px;
+  /* Acima da faixa de tempo e do título, sem cobrir nenhum dos dois. */
+  bottom: 118px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.po-skip-slot > * {
+  pointer-events: auto;
+}
+
+@media (max-width: 640px) {
+  .po-skip-slot {
+    right: 10px;
+    left: 10px;
+    bottom: 104px;
+  }
+}
+
 .po-proximo {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-bottom: 10px;
-  padding: 12px 14px;
+  gap: 12px;
+  margin-left: auto;
+  margin-bottom: 8px;
+  width: fit-content;
+  padding: 8px 10px;
   border-radius: 12px;
-  background: rgba(15, 23, 42, 0.92);
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(8px);
+  /*
+   * Fundo quase transparente, nao um bloco. A primeira versao era
+   * `rgba(15, 23, 42, 0.88)` e o cartao virava um retangulo solido chapado em
+   * cima do video — o mesmo efeito que o proprio `.po-dock` ja teve e rejeitou
+   * (ver o historico dele). Aqui o video continua sendo o fundo; o que segura a
+   * leitura e o desfoque, a sombra suave e o texto em branco puro.
+   */
+  background: rgba(8, 11, 16, 0.38);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(20px) saturate(125%);
   animation: po-proximo-entra 260ms ease-out;
+  /* A oferta e um aviso, nao um painel: nao pode competir com o video. */
+  max-width: min(520px, 100%);
+}
+
+/* Capa do proximo: 16:9, o formato da arte de serie. */
+.po-proximo-capa {
+  flex-shrink: 0;
+  width: 104px;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.po-proximo-capa img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 @keyframes po-proximo-entra {
@@ -12075,26 +12180,32 @@ html.player-overlay-mode #root {
 .po-proximo-info {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
   flex: 1;
 }
 
 .po-proximo-label {
-  font-size: 11px;
+  font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.09em;
   color: var(--accent, #2dd4bf);
   font-weight: 700;
+  /* O fundo ficou translucido de proposito, entao o texto carrega a sombra. */
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
 }
 
 /* Titulo inteiro: e o nome da obra que a pessoa vai assistir a seguir. */
 .po-proximo-titulo {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: #fff;
   line-height: 1.3;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
 }
 
 .po-proximo-acoes {
@@ -12106,12 +12217,13 @@ html.player-overlay-mode #root {
 
 .po-proximo-btn {
   border: 0;
-  border-radius: 8px;
-  padding: 8px 14px;
-  font-size: 13px;
+  border-radius: 7px;
+  padding: 6px 12px;
+  font-size: 12px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
+  white-space: nowrap;
   transition: filter 120ms ease, background 120ms ease;
 }
 
@@ -12121,13 +12233,14 @@ html.player-overlay-mode #root {
 }
 
 .po-proximo-btn-ghost {
-  background: transparent;
-  color: var(--text-secondary, #cbd5e1);
+  /* Sobre o cartao translucido, um botao sem fundo nenhum nao se le como botao. */
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
 }
 
 .po-proximo-btn-ghost:hover {
-  background: rgba(148, 163, 184, 0.14);
-  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
 }
 
 .po-proximo-btn-primary {
@@ -13839,4 +13952,47 @@ button.hidden-item-chip:focus-visible {
   .browse-hide-btn {
     max-width: 100%;
   }
+}
+
+
+/* Pr?via da barra nos players MPEG/interno (mesmo visual do overlay). */
+.player-thumb-preview {
+  position: fixed;
+  transform: translate(-50%, -100%);
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border-radius: 6px;
+  /* Transparente: s? o n?mero, sem caixa cinza. */
+  background: transparent;
+  pointer-events: none;
+}
+
+.player-thumb-preview img {
+  display: block;
+  width: 168px;
+  height: 94px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #000;
+}
+
+.player-thumb-vazia {
+  display: block;
+  width: 168px;
+  height: 94px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #151a24, #232b3a, #151a24);
+  background-size: 200% 100%;
+  animation: po-thumb-carregando 1s linear infinite;
+}
+
+.player-thumb-time {
+  font-size: 13px;
+  color: #fff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 0 8px rgba(0, 0, 0, 0.8);
 }

@@ -17,32 +17,7 @@ const ffmpegPerTarget = new Map()
 
 const IPTV_UA = 'VLC/3.0.20 LibVLC/3.0.20'
 
-function resolveFfmpegPath() {
-  const candidates = []
-  try {
-    const fromPkg = require('ffmpeg-static')
-    if (fromPkg && typeof fromPkg === 'string') {
-      candidates.push(fromPkg.replace(/app\.asar([/\\])/g, 'app.asar.unpacked$1'))
-    }
-  } catch {
-    // ignore
-  }
-  try {
-    const { app } = require('electron')
-    candidates.push(path.join(app.getAppPath(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'))
-  } catch {
-    // ignore
-  }
-  const pf = process.env.ProgramFiles || 'C:\\Program Files'
-  candidates.push(
-    path.join(pf, 'IPTV Player One', 'resources', 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
-  )
-  candidates.push(path.join(__dirname, '..', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'))
-  for (const candidate of candidates) {
-    if (candidate && fs.existsSync(candidate)) return candidate
-  }
-  return null
-}
+const { resolveFfmpegPath } = require('./ffmpeg-path.cjs')
 
 const FFMPEG_PATH = resolveFfmpegPath()
 

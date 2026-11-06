@@ -2,6 +2,7 @@ import type { Channel, ContentKind, Playlist } from '../types'
 import { parseM3u } from './m3u'
 import { fetchText } from './proxy'
 import { clearDiskCatalog, loadDiskCatalog, saveDiskCatalog } from './catalogDisk'
+import { ehCategoriaAdulta } from './adulto'
 import {
   clearXtreamM3uCache,
   loadXtreamFullM3u,
@@ -258,6 +259,19 @@ export async function loadCategoryContent(
         byCategory.set(cacheKey, items)
         return items
       }
+      // Fallback: itens sem category_id (painel não enviou) ficam com
+      // group='Séries' e não batem em nenhuma categoria específica. Tenta
+      // match parcial pelo nome da categoria no grupo.
+      const nome = category.name?.toLowerCase() || ''
+      const parcial = all.filter(
+        (item) =>
+          item.group?.toLowerCase().includes(nome) &&
+          !ehCategoriaAdulta(item.name || ''),
+      )
+      if (parcial.length > 0) {
+        byCategory.set(cacheKey, parcial)
+        return parcial
+      }
     }
     const xtream = toXtreamPlaylist(playlist)
     if (xtream && category.id) {
@@ -268,8 +282,17 @@ export async function loadCategoryContent(
           key(playlist.id, 'series'),
           mergeChannels(byKind.get(key(playlist.id, 'series')) ?? [], items),
         )
+        return items
       }
-      return items
+      // API por categoria vazia: tenta filtramento local da lista completa
+      const all2 = byKind.get(key(playlist.id, 'series'))
+      if (all2 && all2.length > 0) {
+        const locais = all2.filter((item) => matchesCategory(item, category))
+        if (locais.length > 0) {
+          byCategory.set(cacheKey, locais)
+          return locais
+        }
+      }
     }
     const loaded = await loadCatalog(playlist, 'series')
     return loaded.filter((item) => matchesCategory(item, category))

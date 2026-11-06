@@ -161,7 +161,7 @@ function cleanPlotText(raw: unknown): string | undefined {
   }
   text = text.replace(/\s+\n/g, '\n').replace(/\n\s+/g, '\n').replace(/[ \t]+/g, ' ').trim()
   if (text.length < 20) return undefined
-  if (/^(n\/a|na|null|undefined|-|sem (sinopse|descricao|descrição))$/i.test(text)) return undefined
+  if (/^(n\/a|na|null|undefined|-|sem (sinopse|descricao|descriÃ§Ã£o))$/i.test(text)) return undefined
   return text
 }
 
@@ -185,7 +185,7 @@ function pickPlotFromRecord(record: Record<string, unknown>, depth: number): str
   return best
 }
 
-/** Sinopse do filme/série nos campos que o painel manda (plot, description, overview, TMDB aninhado…). */
+/** Sinopse do filme/sÃ©rie nos campos que o painel manda (plot, description, overview, TMDB aninhadoâ€¦). */
 function pickPlot(...sources: unknown[]): string | undefined {
   let best: string | undefined
   for (const source of sources) {
@@ -243,13 +243,13 @@ async function fetchItunesPlot(name: string, year?: string, entity: 'movie' | 't
         .sort((a, b) => b.score - a.score)
       if (ranked[0] && ranked[0].score >= 3) return ranked[0].plot
     } catch {
-      // iTunes é só fallback da sinopse
+      // iTunes Ã© sÃ³ fallback da sinopse
     }
   }
   return undefined
 }
 
-/** Pega lançamento do filme/série nos campos que o painel costuma mandar na lista. */
+/** Pega lanÃ§amento do filme/sÃ©rie nos campos que o painel costuma mandar na lista. */
 function pickStreamReleaseDate(item: {
   releaseDate?: string
   release_date?: string
@@ -293,7 +293,7 @@ function xtreamBase(playlist: Playlist) {
   return normalizeHost(playlist.xtream.host)
 }
 
-/** Catálogo completo de uma vez. */
+/** CatÃ¡logo completo de uma vez. */
 function xtreamM3uUrl(playlist: Playlist, output: 'ts' | 'm3u8' = 'ts') {
   const { username, password } = playlist.xtream!
   return `${xtreamBase(playlist)}/get.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&type=m3u_plus&output=${output}`
@@ -329,12 +329,12 @@ function seriesUrl(playlist: Playlist, id: string | number, ext = 'mp4') {
 
 export async function testXtream(playlist: Playlist): Promise<{ profile: XtreamProfile }> {
   const data = await fetchJson<XtreamUser>(apiUrl(playlist))
-  // Alguns forks devolvem `auth` como string ("0"). `=== 0` não pega, e a conta
-  // inválida passava pelo teste de conexão como se estivesse saudável.
+  // Alguns forks devolvem `auth` como string ("0"). `=== 0` nÃ£o pega, e a conta
+  // invÃ¡lida passava pelo teste de conexÃ£o como se estivesse saudÃ¡vel.
   const auth = Number(data.user_info?.auth)
-  if (!Number.isFinite(auth) || auth === 0) throw new Error('Usuário ou senha inválidos')
+  if (!Number.isFinite(auth) || auth === 0) throw new Error('UsuÃ¡rio ou senha invÃ¡lidos')
   const status = String(data.user_info?.status ?? '').toLowerCase()
-  if (status && status !== 'active') throw new Error(`Conta ${status} — assinatura não ativa`)
+  if (status && status !== 'active') throw new Error(`Conta ${status} â€” assinatura nÃ£o ativa`)
   let domain = data.server_info?.url || playlist.xtream?.host || ''
   try {
     domain = new URL(domain).hostname
@@ -355,7 +355,7 @@ export async function testXtream(playlist: Playlist): Promise<{ profile: XtreamP
 
 /**
  * Converte playlist M3U do painel (get.php?username=&password=) em Xtream
- * para usar player_api — sem isso o M3U trunca em ~3k e some categorias.
+ * para usar player_api â€” sem isso o M3U trunca em ~3k e some categorias.
  */
 export function toXtreamPlaylist(playlist: Playlist): Playlist | null {
   if (playlist.kind === 'xtream' && playlist.xtream?.host && playlist.xtream.username && playlist.xtream.password) {
@@ -400,7 +400,7 @@ function getCatName(c: unknown): string {
 function getStreamCatId(s: unknown): string {
   if (!s || typeof s !== 'object') return ''
   const item = s as Record<string, unknown>
-  // category_id explícito tem prioridade (inclui o que forçamos no fetch por categoria)
+  // category_id explÃ­cito tem prioridade (inclui o que forÃ§amos no fetch por categoria)
   const direct = item.category_id ?? item.cat_id
   if (direct !== undefined && direct !== null && String(direct).trim() !== '') {
     return String(direct).trim()
@@ -412,10 +412,10 @@ function getStreamCatId(s: unknown): string {
 }
 
 /**
- * Sinaliza "sessão inválida" para o retry loop saber que NÃO deve repetir.
+ * Sinaliza "sessÃ£o invÃ¡lida" para o retry loop saber que NÃƒO deve repetir.
  * Sem isso, `loadXtreamVodCategory` gastava 1,2 + 2,4 + 3,6 + 4,8 + 6 = 18s de
  * backoff numa conta expirada, e o `loadXtreamVod` ainda repetia por categoria:
- * dezenas de segundos de "Carregando filmes…" e depois grade vazia, sem erro.
+ * dezenas de segundos de "Carregando filmesâ€¦" e depois grade vazia, sem erro.
  */
 class AuthExpiredError extends Error {
   constructor(message: string) {
@@ -431,15 +431,15 @@ function isAuthExpired(error: unknown): boolean {
 function asArray<T>(data: unknown): T[] {
   if (Array.isArray(data)) return data as T[]
   if (data && typeof data === 'object') {
-    // Sessão inválida/expirada devolve um envelope, não uma lista:
+    // SessÃ£o invÃ¡lida/expirada devolve um envelope, nÃ£o uma lista:
     //   { user_info: { auth: 0, ... }, server_info: {...} }
     // Object.values transformava isso em 2 "canais" sem nome apontando para
-    // /live/user/pass/undefined.m3u8 — o usuário via 2 entradas quebradas em vez
-    // de "login inválido".
+    // /live/user/pass/undefined.m3u8 â€” o usuÃ¡rio via 2 entradas quebradas em vez
+    // de "login invÃ¡lido".
     const record = data as Record<string, unknown>
     if (record.user_info) {
       const auth = Number((record.user_info as { auth?: unknown }).auth)
-      if (!Number.isFinite(auth) || auth === 0) throw new AuthExpiredError('Sessão inválida ou expirada — confira usuário e senha')
+      if (!Number.isFinite(auth) || auth === 0) throw new AuthExpiredError('SessÃ£o invÃ¡lida ou expirada â€” confira usuÃ¡rio e senha')
       throw new Error('Resposta inesperada do painel (sem lista de itens)')
     }
     return Object.values(record as Record<string, T>)
@@ -447,7 +447,7 @@ function asArray<T>(data: unknown): T[] {
   return []
 }
 
-/** Limita requisições paralelas — servidores Xtream costumam dropar dezenas de hits ao mesmo tempo. */
+/** Limita requisiÃ§Ãµes paralelas â€” servidores Xtream costumam dropar dezenas de hits ao mesmo tempo. */
 async function mapPool<T, R>(items: T[], concurrency: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length)
   let next = 0
@@ -482,7 +482,7 @@ export async function loadXtreamLive(playlist: Playlist): Promise<Channel[]> {
     return cid && (!presentCatIds.has(cid) || ehCategoriaAdulta(getCatName(c)))
   })
 
-  // Completa categorias faltantes com pouca concorrência (evita 429)
+  // Completa categorias faltantes com pouca concorrÃªncia (evita 429)
   if (missingCats.length > 0) {
     const existingStreamIds = new Set(streams.map((s) => String(s.stream_id)))
     const extras = await mapPool(missingCats, 2, async (c) => {
@@ -565,9 +565,9 @@ const xtreamM3uCache = new Map<string, Channel[]>()
 /**
  * Carrega o M3U completo do painel.
  *
- * O timeout precisa ser explícito: painéis grandes devolvem 100MB+ / 300k
- * canais e levam ~100s só no download. Sem isto o fetch aborta no meio e a
- * falha aparece como "playlist vazia" — que é sintoma, não causa.
+ * O timeout precisa ser explÃ­cito: painÃ©is grandes devolvem 100MB+ / 300k
+ * canais e levam ~100s sÃ³ no download. Sem isto o fetch aborta no meio e a
+ * falha aparece como "playlist vazia" â€” que Ã© sintoma, nÃ£o causa.
  */
 export async function loadXtreamFullM3u(playlist: Playlist, force = false): Promise<Channel[]> {
   const cacheKey = playlist.id
@@ -584,7 +584,7 @@ export async function loadXtreamFullM3u(playlist: Playlist, force = false): Prom
   }
 
   if (!text.includes('#EXTINF')) {
-    throw new Error('Playlist M3U vazia ou inválida')
+    throw new Error('Playlist M3U vazia ou invÃ¡lida')
   }
 
   const items = parseM3u(text)
@@ -678,16 +678,16 @@ export async function loadXtreamVodCategories(playlist: Playlist): Promise<Xtrea
   return out
 }
 
-/** Categorias de filmes esperadas no painel (TV). Soft-match evita duplicar as que a API já mandou. */
+/** Categorias de filmes esperadas no painel (TV). Soft-match evita duplicar as que a API jÃ¡ mandou. */
 const EXPECTED_MOVIE_CATEGORY_NAMES = [
   'ESPECIAL DE NATAL',
   'OSCAR 2026',
   'UHD | 4K',
   'CINEMA',
-  'LANÇAMENTOS',
+  'LANÃ‡AMENTOS',
   'CINE NOSTALGIA',
   'ESPECIAL CHUCK NORRIS',
-  'AÇÃO',
+  'AÃ‡ÃƒO',
   'CRIME',
   'TERROR',
   'SUSPENSE',
@@ -695,10 +695,10 @@ const EXPECTED_MOVIE_CATEGORY_NAMES = [
   'GUERRA',
   'FAROESTE',
   'ESPECIAL INFANTIL',
-  'ANIMAÇÃO',
+  'ANIMAÃ‡ÃƒO',
   'AVENTURA',
   'FANTASIA',
-  'FICÇÃO',
+  'FICÃ‡ÃƒO',
   'MARVEL | DC',
   'COMEDIA',
   'ROMANCE',
@@ -713,7 +713,7 @@ const EXPECTED_MOVIE_CATEGORY_NAMES = [
   "SHOWS ROCK'IN RIO 2024",
   "FLASHBACK'S - 70, 80, 90",
   'STAND UP',
-  'DUBLAGEM NÃO OFICIAL',
+  'DUBLAGEM NÃƒO OFICIAL',
   'LEGENDADOS',
   'DIVERSOS',
   'ADULTOS XXX',
@@ -729,7 +729,7 @@ function normCat(text: string) {
     .trim()
 }
 
-/** Une categorias da API com a lista do servidor — só nomes reais da API (sem shells vazios). */
+/** Une categorias da API com a lista do servidor â€” sÃ³ nomes reais da API (sem shells vazios). */
 export function mergeMovieCategoryList(apiCats: XtreamCategory[]): XtreamCategory[] {
   if (apiCats.length === 0) return []
 
@@ -785,7 +785,7 @@ function delay(ms: number) {
 
 /**
  * Expert: o endpoint por category_id devolve a lista daquela cat.
- * Só filtra se vier dump misturado com outros category_id.
+ * SÃ³ filtra se vier dump misturado com outros category_id.
  */
 function filterVodByCategory(items: VodStream[], categoryId: string): VodStream[] {
   if (items.length === 0) return []
@@ -796,10 +796,10 @@ function filterVodByCategory(items: VodStream[], categoryId: string): VodStream[
     const cid = getStreamCatId(s)
     return cid && cid !== categoryId
   })
-  // Dump global disfarçado — só descarta se for claramente misturado e enorme
+  // Dump global disfarÃ§ado â€” sÃ³ descarta se for claramente misturado e enorme
   if (foreign.length > items.length * 0.85 && items.length > 4000) return []
 
-  // Sem tags ou tags vazias → confiar no endpoint (pelo endpoint)
+  // Sem tags ou tags vazias â†’ confiar no endpoint (pelo endpoint)
   return items
 }
 
@@ -817,7 +817,7 @@ export async function loadXtreamVodCategory(
       raw = asArray<VodStream>(await fetchJson<VodStream[]>(url))
       break
     } catch (error) {
-      // Sessão expirada é permanente: repetir só queima 18s de backoff por
+      // SessÃ£o expirada Ã© permanente: repetir sÃ³ queima 18s de backoff por
       // categoria (e o loadXtreamVod ainda refaz por categoria) para terminar
       // com a mesma grade vazia. Deixa o erro subir.
       if (isAuthExpired(error)) throw error
@@ -832,9 +832,9 @@ export async function loadXtreamVodCategory(
 }
 
 /**
- * FILMES: dump global (rápido) + um get_vod_streams por categoria.
- * O painel corta o dump único (~21k de ~30k). Sem o fill, categorias
- * como CINEMA só aparecem cheias depois que o usuário clica nelas.
+ * FILMES: dump global (rÃ¡pido) + um get_vod_streams por categoria.
+ * O painel corta o dump Ãºnico (~21k de ~30k). Sem o fill, categorias
+ * como CINEMA sÃ³ aparecem cheias depois que o usuÃ¡rio clica nelas.
  */
 export async function loadXtreamVod(
   playlist: Playlist,
@@ -864,7 +864,7 @@ export async function loadXtreamVod(
     emit()
   }
 
-  // Player One: adempausa + um dump global (não dispara dezenas de category_id)
+  // Player One: adempausa + um dump global (nÃ£o dispara dezenas de category_id)
   await delay(300)
   const vodUrlAll = apiUrl(playlist, 'action=get_vod_streams')
   try {
@@ -884,40 +884,6 @@ export async function loadXtreamVod(
 
   if (apiCats.length === 0) {
     return [...byId.values()]
-  }
-
-  // Sempre completa por category_id — o dump global deste painel não traz tudo
-  const failed: XtreamCategory[] = []
-  const concurrency = 2
-  for (let i = 0; i < apiCats.length; i += concurrency) {
-    const slice = apiCats.slice(i, i + concurrency)
-    if (i > 0) await delay(i % 18 === 0 ? 900 : 280)
-    const batches = await Promise.all(
-      slice.map(async (cat) => {
-        let batch = await loadXtreamVodCategory(playlist, cat.id, cat.name)
-        if (batch.length === 0) {
-          await delay(800)
-          batch = await loadXtreamVodCategory(playlist, cat.id, cat.name)
-        }
-        return [cat, batch] as const
-      }),
-    )
-    for (const [cat, batch] of batches) {
-      if (batch.length === 0) {
-        failed.push(cat)
-        continue
-      }
-      for (const item of batch) byId.set(item.id, item)
-    }
-    emit()
-  }
-
-  for (const cat of failed) {
-    await delay(1400)
-    const batch = await loadXtreamVodCategory(playlist, cat.id, cat.name)
-    if (batch.length === 0) continue
-    for (const item of batch) byId.set(item.id, item)
-    emit()
   }
 
   return [...byId.values()]
@@ -943,13 +909,10 @@ function filterSeriesByCategory(items: SeriesItem[], categoryId: string): Series
   if (items.length === 0) return []
   const matched = items.filter((s) => getStreamCatId(s) === categoryId)
   if (matched.length > 0) return matched
-
-  const foreign = items.filter((s) => {
-    const cid = getStreamCatId(s)
-    return cid && cid !== categoryId
-  })
-  if (foreign.length > items.length * 0.85 && items.length > 4000) return []
-
+  // Se nenhum item bate com o category_id do painel, retorna todos para que
+  // o filtramento local (matchesCategory em loadCategoryContent) cuide do resto.
+  // O painel pode retornar um dump misturado sem respeitar o category_id;
+  // devolver [] aqui faria a categoria ficar vazia.
   return items
 }
 
@@ -959,9 +922,9 @@ export async function loadXtreamSeriesCategory(
   categoryName: string,
 ): Promise<Channel[]> {
   const url = apiUrl(playlist, `action=get_series&category_id=${encodeURIComponent(categoryId)}`)
-  // `asArray` fica FORA do `.catch(() => [])`: a rejeição de sessão expirada
-  // antes derrubava o Promise.all de loadXtreamSeries, abortando o catálogo
-  // inteiro de séries por causa de UMA categoria ruim. O `.catch` estava
+  // `asArray` fica FORA do `.catch(() => [])`: a rejeiÃ§Ã£o de sessÃ£o expirada
+  // antes derrubava o Promise.all de loadXtreamSeries, abortando o catÃ¡logo
+  // inteiro de sÃ©ries por causa de UMA categoria ruim. O `.catch` estava
   // ligado ao `fetchWithRetry` e engolia o erro do `asArray`.
   let items = asArray<SeriesItem>(await fetchWithRetry<SeriesItem[]>(url).catch(() => []))
   if (items.length === 0) {
@@ -992,7 +955,7 @@ export async function loadXtreamSeries(
       const cid = getStreamCatId(s)
       const group =
         (cid && names.get(cid)) ||
-        (ehCategoriaAdulta(s.name || '') ? 'ADULTOS XXX' : 'Séries')
+        (ehCategoriaAdulta(s.name || '') ? 'ADULTOS XXX' : 'SÃ©ries')
       byId.set(`series-${s.series_id}`, mapSeriesToChannel(playlist, s, group, cid || undefined))
     }
     emit()
@@ -1020,39 +983,6 @@ export async function loadXtreamSeries(
     ingest(streams)
   } catch {
     // completa por categoria
-  }
-
-  const failed: XtreamCategory[] = []
-  const concurrency = 2
-  for (let i = 0; i < cats.length; i += concurrency) {
-    const slice = cats.slice(i, i + concurrency)
-    if (i > 0) await delay(i % 18 === 0 ? 900 : 280)
-    const batches = await Promise.all(
-      slice.map(async (cat) => {
-        let batch = await loadXtreamSeriesCategory(playlist, cat.id, cat.name)
-        if (batch.length === 0) {
-          await delay(800)
-          batch = await loadXtreamSeriesCategory(playlist, cat.id, cat.name)
-        }
-        return [cat, batch] as const
-      }),
-    )
-    for (const [cat, batch] of batches) {
-      if (batch.length === 0) {
-        failed.push(cat)
-        continue
-      }
-      for (const item of batch) byId.set(item.id, item)
-    }
-    emit()
-  }
-
-  for (const cat of failed) {
-    await delay(1400)
-    const batch = await loadXtreamSeriesCategory(playlist, cat.id, cat.name)
-    if (batch.length === 0) continue
-    for (const item of batch) byId.set(item.id, item)
-    emit()
   }
 
   return [...byId.values()]
@@ -1086,7 +1016,7 @@ export function peekLoadedSeriesInfo(playlist: Playlist, seriesId: string): Seri
   return cached as SeriesInfo | undefined
 }
 
-/** Dispara get_series_info em fundo (hover na grelha) para o clique já ter cache. */
+/** Dispara get_series_info em fundo (hover na grelha) para o clique jÃ¡ ter cache. */
 export function prefetchSeriesInfo(playlist: Playlist, seriesId: string) {
   if (!seriesId) return
   if (peekLoadedSeriesInfo(playlist, seriesId)) return
@@ -1193,7 +1123,7 @@ export async function loadSeriesInfo(playlist: Playlist, seriesId: string): Prom
 
         return {
           id: `ep-${epId}`,
-          name: ep.title || epInfo.name || epInfo.title || `Episódio ${ep.episode_num ?? epId}`,
+          name: ep.title || epInfo.name || epInfo.title || `EpisÃ³dio ${ep.episode_num ?? epId}`,
           group: `Temporada ${season}`,
           url: seriesUrl(playlist, epId, ep.container_extension || 'mp4'),
           logo,
@@ -1207,6 +1137,24 @@ export async function loadSeriesInfo(playlist: Playlist, seriesId: string): Prom
         }
       }),
     }))
+
+    /*
+     * IMAGEM REPETIDA NÃƒO Ã‰ A DO EPISÃ“DIO.
+     *
+     * O painel manda, para vÃ¡rios animes, a MESMA imagem em todos os episÃ³dios
+     * da temporada (Re:Zero S3: os 12 episÃ³dios com o mesmo still). Mostrar
+     * isso faz o card parecer de outro tÃ­tulo. Quando a temporada inteira
+     * compartilha a mesma imagem, ela Ã© descartada e o card cai na capa da
+     * sÃ©rie â€” que Ã© coerente com o que a pessoa estÃ¡ vendo.
+     */
+    for (const temporada of seasons) {
+      const logos = temporada.episodes
+        .map((e) => e.logo)
+        .filter((v): v is string => Boolean(v))
+      if (logos.length >= 2 && new Set(logos).size === 1) {
+        for (const e of temporada.episodes) e.logo = undefined
+      }
+    }
 
     const addedDate = formatAddedDate(
       data.info?.last_modified || data.info?.added || (data as any).last_modified || (data as any).added
@@ -1370,7 +1318,7 @@ export async function loadShortEpgList(
   return mapEpgApiRows(rows)
 }
 
-/** Guia completo do canal (dia inteiro) — melhor que get_short_epg no Programação. */
+/** Guia completo do canal (dia inteiro) â€” melhor que get_short_epg no ProgramaÃ§Ã£o. */
 export async function loadEpgDataTable(playlist: Playlist, streamId: string): Promise<ShortEpg[]> {
   const data = await fetchJson<EpgApiRow[] | { epg_listings?: EpgApiRow[] }>(
     apiUrl(playlist, `action=get_simple_data_table&stream_id=${encodeURIComponent(streamId)}`),
@@ -1379,6 +1327,6 @@ export async function loadEpgDataTable(playlist: Playlist, streamId: string): Pr
   const rows = Array.isArray(data) ? data : data.epg_listings
   const mapped = mapEpgApiRows(rows)
   if (mapped.length > 0) return mapped
-  // Alguns painéis só respondem no short_epg
+  // Alguns painÃ©is sÃ³ respondem no short_epg
   return loadShortEpgList(playlist, streamId, 40)
 }

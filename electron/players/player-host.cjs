@@ -8,8 +8,10 @@ const mpeg = require('./mpeg-player.cjs')
 const sturProxy = require('../stur-ffmpeg-proxy.cjs')
 const external = require('./external-player.cjs')
 const overlay = require('./overlay-window.cjs')
+const { analisarAbertura } = require('./anime-abertura.cjs')
 const { videoContentRect } = require('./overlay-bounds.cjs')
 const log = require('./player-log.cjs')
+const thumbs = require('./thumb-service.cjs')
 const { normalizePlayUrl, isPlayableUrl } = require('./play-url.cjs')
 
 /** @type {'libmpv' | 'mpv' | 'mpv-one' | 'stur' | 'vlc' | 'mpc' | null} */
@@ -17,6 +19,7 @@ let activeEngine = null
 /** @type {import('electron').BrowserWindow | null} */
 let boundWindow = null
 let playbackActive = false
+let activePlayUrl = ''
 let playbackShortcutsOn = false
 
 const PLAYBACK_SHORTCUT_KEYS = ['Escape', 'Up', 'Down', 'Left', 'Right']
@@ -249,9 +252,43 @@ function hideSurfaces() {
   return { ok: true }
 }
 
+/*
+ * A analise de abertura em andamento.
+ *
+ * Fica no escopo do modulo porque precisa sobreviver entre a chamada do
+ * `player:start` e o fim do episode — e precisa ser morta quando o episodio
+ * muda ou o player para, para nao deixar ffmpeg zumbi baixando audio de um
+ * episodio que ninguem esta mais vendo.
+ */
+let analiseAberturaAtual = null
+
+function pararAnaliseAbertura() {
+  if (!analiseAberturaAtual) return
+  try {
+    analiseAberturaAtual.parar()
+  } catch {
+    // ja morreu
+  }
+  analiseAberturaAtual = null
+}
+
+/*
+ * Só serie tem abertura. Filme nao tem — e rodar a analise nele seria baixar
+ * e decodificar o audio de um filme inteiro para descobrir nada.
+ *
+ * O caminho da URL ja diz: o Xtream serve serie em `/series/` e filme em
+ * `/movie/`. Nao precisa de campo novo no payload.
+ */
+function ehUrlDeSerie(url) {
+  return typeof url === 'string' && /\/series\//i.test(url)
+}
+
 async function stopAll() {
   markPlaybackActive(false)
   activeEngine = null
+  // A analise de abertura tambem para: sem video tocando, o ffmpeg continua
+  // baixando o audio de um episodio que ja acabou.
+  pararAnaliseAbertura()
   setNativeVideoCompositor(getMainWindow(), false)
   try {
     stur.hide()
@@ -463,8 +500,9 @@ async function command(op, value, mode) {
   // Sem este registro o meio da cadeia e um buraco: da para ver que o
   // renderer pediu e que o motor nao recebeu, sem saber QUAL dos dois
   // intrumentos esta mentindo.
-  if (op === 'seek') {
-    log.info('host', 'seek recebido', { op, value, mode, engine: activeEngine })
+  if (op === 'seek' || op === 'pause' || op === 'play' ||
+      op === 'toggle' || op === 'toggle-pause') {
+    log.info('host', 'comando', { op, value, mode, engine: activeEngine })
   }
   if (activeEngine === 'libmpv') return libmpv.command(op, value, mode)
   if (activeEngine === 'mpv') return mpvExe.command(op, value, mode)
@@ -577,8 +615,72 @@ function registerPlayerIpc() {
     hideSurfaces()
   })
 
+  /*
+   * Só serie tem abertura. Filme nao tem — e rodar a analise nele seria
+   * baixar e decodificar o audio de um filme inteiro para descobrir nada.
+   *
+   * O caminho da URL ja diz: o Xtream serve serie em `/series/` e filme em
+   * `/movie/`. Nao precisa de campo novo no payload.
+   */
   ipcMain.handle('player:start', async (_event, payload) => {
     const { engine, url, startTime, bounds, live, aspect } = payload || {}
+
+    /*
+     * Detecta a musicA DE ABERTURA pelo audio do proprio arquivo.
+     *
+     * Roda em segundo plano e sem bloquear: o ffmpeg so le o audio, em mono
+     * 8 kHz, e termina a analise bem antes de a pessoa chegar na abertura
+     * (medido: ~53s de parede para achar a abertura que comeca em 1:36).
+     *
+     * Por que isso e necessario: a AniSkip erra os tempos. Para Attack on
+     * Titan S01E01 ela diz que a abertura comeca em 0:47, e no arquivo comeca
+     * em 1:36; para Naruto Shippuden S01E01 ela diz que ha abertura, e nao ha.
+     * A base e preenchida por gente, contra cortes diferentes.
+     *
+     * A URL vai para o ffmpeg local. O ffmpeg so pede os MESMOS bytes que o
+     * player ja pede; nao ha upload nem video indo para fora.
+     */
+    /*
+     * ANÁLISE DE ÁUDIO DA ABERTURA: desligada.
+     *
+     * O overlay passou a usar só o mapa conferido embutido (`oped-data.ts`).
+     * Sem dado conferido, nenhum popup aparece — regra do produto: não
+     * oferecer pulo sem certeza. Deixe `false` até querer reativar.
+     */
+    const ANALISAR_ABERTURA_AUDIO = false
+
+    if (ANALISAR_ABERTURA_AUDIO && live !== true && ehUrlDeSerie(normalizePlayUrl(url) || url)) {
+      /*
+       * Mata a analise anterior antes de comecar a nova.
+       *
+       * Sem isso, trocar de episodio deixa o ffmpeg antigo rodando: ele
+       * continua baixando e decodificando o audio de um episodio que ninguem
+       * esta mais vendo, e os processos se acumulam. Zumbi de ffmpeg.
+       */
+      pararAnaliseAbertura()
+      void Promise.resolve()
+        .then(() => {
+          const analise = analisarAbertura(normalizePlayUrl(url) || url, {
+            aoDetectar: (janela) => {
+              log.info('abertura', 'janela detectada', janela ?? null)
+              overlay.sendEvent({ type: 'skip-abertura', janela })
+            },
+            aoErro: (e) => {
+              log.warn('abertura', 'falha ao detectar', { erro: e?.message })
+              // `indisponivel` faz o overlay cair na AniSkip, que é melhor do que
+              // nao ter botão nenhum.
+              overlay.sendEvent({ type: 'skip-abertura', janela: null, indisponivel: true })
+            },
+          })
+          analiseAberturaAtual = analise
+          return analise
+        })
+        .catch(() => {})
+    } else {
+      // Filme ou live: nao ha o que detectar, e a analise anterior (se houver)
+      // ja nao vale para este episode.
+      pararAnaliseAbertura()
+    }
     // Zap rápido ao vivo: cancela fila de reloads antigos (só o último canal importa).
     if (engine === 'stur' && live === true && stur.isRunning()) {
       bumpHostEpoch()
@@ -594,6 +696,8 @@ function registerPlayerIpc() {
       if (!playUrl || !isPlayableUrl(playUrl)) {
         return { ok: false, error: 'URL inválida' }
       }
+      // O serviço de miniaturas da barra precisa da URL que está tocando.
+      activePlayUrl = playUrl
       const win = getMainWindow()
       if (!win) return { ok: false, error: 'Janela indisponível' }
       const opts = { live: live === true, aspect: aspect }
@@ -630,11 +734,40 @@ function registerPlayerIpc() {
   /** Dev/teste: abre arquivo local ou URL direto no engine escolhido. */
   ipcMain.handle('player:open', async (_event, payload) => openFile(payload))
 
-  ipcMain.handle('player:stop', async () => runHostOp(() => stopAll()))
+  ipcMain.handle('player:stop', async () => {
+    try { thumbs.parar() } catch { /* ignore */ }
+    activePlayUrl = ''
+    return runHostOp(() => stopAll())
+  })
 
   ipcMain.handle('player:command', async (_event, op, value, mode) => command(op, value, mode))
 
   ipcMain.handle('player:set-bounds', async (_event, rect) => setBounds(rect))
+
+  /*
+   * Miniatura da barra de progresso: o overlay pede o tempo e recebe um JPEG
+   * em data URL. O mpv quente faz seek+screenshot; o cache de disco evita
+   * repetir o mesmo trecho.
+   */
+  ipcMain.handle('player:thumb', async (_event, time) => {
+    if (!activePlayUrl) {
+      log.warn('thumb', 'sem url ativa')
+      return null
+    }
+    const t0 = Date.now()
+    try {
+      const dataUrl = await thumbs.miniatura(activePlayUrl, Number(time) || 0)
+      log.info('thumb', dataUrl ? 'ok' : 'sem imagem', {
+        time: Number(time) || 0,
+        ms: Date.now() - t0,
+        kb: dataUrl ? Math.round(dataUrl.length / 1024) : 0,
+      })
+      return dataUrl ? { dataUrl } : null
+    } catch (e) {
+      log.warn('thumb', 'erro', { erro: String(e && e.message) })
+      return null
+    }
+  })
 
   ipcMain.handle('overlay:show', async (_event, rect, meta) => {
     const win = getMainWindow()

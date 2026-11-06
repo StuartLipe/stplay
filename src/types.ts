@@ -43,6 +43,8 @@ export type Channel = {
   releasedate?: string
   rating?: string
   added?: string | number
+  /** MyAnimeList ID, usado para buscar skip-times na AniSkip API */
+  malId?: string
 }
 
 export type ContentDetails = {

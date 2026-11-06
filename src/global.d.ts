@@ -37,6 +37,16 @@ export type PlayerEventPayload = {
    * tem o arquivo; a partir dai o `percent` e curva de relogio, nao progresso.
    */
   motivo?: string
+  /**
+   * Abertura detectada pelo main no ÁUDIO do próprio arquivo (ffmpeg).
+   *
+   * Vem em `skip-abertura`. `janela` = `{ inicio, fim }` em segundos, ou
+   * `null` quando o episódio não tem abertura — e `null` é resposta correta,
+   * não falha. `indisponivel` = o ffmpeg não rodou; aí o overlay usa a AniSkip
+   * como reserva.
+   */
+  janela?: { inicio: number; fim: number } | null
+  indisponivel?: boolean
 }
 
 /**
@@ -127,6 +137,8 @@ declare global {
         }) => Promise<{ ok: boolean; error?: string; engine?: string }>
         hide?: () => Promise<{ ok: boolean }>
         hideSync?: () => { ok: boolean }
+        /** Miniatura da barra: JPEG em data URL para o tempo pedido (s). */
+        getThumbnail?: (time: number) => Promise<{ dataUrl: string } | null>
         restoreShell?: () => { ok: boolean }
         stop: () => Promise<{ ok: boolean }>
         /**
@@ -183,6 +195,8 @@ declare global {
         ) => Promise<{ ok: boolean; error?: string }>
         setBounds?: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>
         command?: (op: string, value?: number) => Promise<{ ok: boolean }>
+        /** Miniatura da barra: JPEG em data URL para o tempo pedido. */
+        getThumbnail?: (time: number) => Promise<{ dataUrl: string } | null>
         stop: () => Promise<void>
         stopExternal?: () => Promise<{ ok: boolean }>
         focus?: () => Promise<{ ok: boolean }>

@@ -55,6 +55,8 @@ import { capDownloads, downloadIdFor, reconcileDownloads, withoutDownloadTarget 
 import { clearAllHiddenItems, loadActiveId, loadActiveProfileId, loadAllHiddenItems, loadContinueWatching, loadFavorites, loadHiddenItems, loadPlaylists, loadProfiles, loadRecentLiveChannels, loadSettings, loadSortModes, saveActiveId, saveActiveProfileId, saveContinueWatching, saveFavorites, saveHiddenItems, savePlaylists, saveProfiles, saveRecentLiveChannels, saveSettings, saveSortModes , type HiddenItems } from './lib/storage'
 import { resolveLastPlaylistId, shouldRestoreLastSession } from './lib/last-playlist'
 import { canPersistCatalog } from './lib/catalog-owner'
+import { malIdParaSerie } from './lib/anime-mal-ids'
+import { getSkipTimes, extractEpisodeNumber, extractSeasonNumber, type SkipTimes } from './lib/aniskip'
 import { clearXtreamM3uCache, formatAddedDate, loadEpgDataTable, loadM3uAccountProfile, loadSeriesInfo, loadShortEpg, loadShortEpgList, loadVodInfo, peekLoadedSeriesInfo, prefetchSeriesInfo, testXtream, resolveFreshLiveChannel } from './lib/xtream'
 import {
   ACCENT_PRESETS,
@@ -1715,6 +1717,18 @@ export default function App() {
     startTime?: number,
     opts?: { autoFullscreen?: boolean; autoPlay?: boolean },
   ) {
+    /*
+     * FILME: abrir pelo catálogo também retoma de onde parou. Antes o saved
+     * só era consultado no caminho de série; quem fechava o filme e reabria
+     * pela ficha começava do zero.
+     */
+    if (startTime === undefined && channel.kind === 'movie') {
+      const salvo = continueWatching.find(
+        (item) => item.playlistId === active?.id && item.channel.id === channel.id,
+      )
+      if (salvo && salvo.currentTime > 5) startTime = salvo.currentTime
+    }
+
     const resume = startTime !== undefined && startTime > 0
     const autoPlay = Boolean(opts?.autoPlay)
 
@@ -2401,12 +2415,7 @@ export default function App() {
         </div>
       )}
 
-      {view.name === 'player' &&
-        !(
-          settings.player === 'internal' &&
-          (view.channel.kind === 'movie' ||
-            (view.channel.kind === 'series' && view.fromSeries))
-        ) && (
+      {view.name === 'player' && (
         <div className="details-overlay details-overlay-player">
         <Player
           channel={view.channel}
@@ -10359,6 +10368,8 @@ function Player({
   const [seeking, setSeeking] = useState(false)
   const seekPointerRef = useRef(false)
   const [seekTime, setSeekTime] = useState(0)
+  // Prévia da barra (MPEG/interno): só o instante. Miniatura de vídeo desligada.
+  const [thumbHover, setThumbHover] = useState<{ x: number; y: number; t: number } | null>(null)
   const [epg, setEpg] = useState<ShortEpg | null>(null)
   const progressHandler = useRef(onProgress)
   progressHandler.current = onProgress
@@ -10483,6 +10494,41 @@ function Player({
     playbackEngine === 'mpeg' ||
     (playbackEngine === 'auto' && managedEngine === 'stur')
   const useBufferedNative = useNativePlayer
+  /*
+   * POPUPS DE PULAR NO PLAYER DO APP (MPEG/interno).
+   *
+   * No STUR nativo quem mostra ? o overlay. No MPEG/interno o v?deo mora no
+   * App, ent?o a mesma marca??o (mapa local conferido) ? aplicada aqui. Sem
+   * `source === 'local'` n?o aparece nada ? a regra de n?o inventar vale nos
+   * dois motores.
+   */
+  const [skipTimes, setSkipTimes] = useState<SkipTimes | null>(null)
+  const [skipDispensado, setSkipDispensado] = useState<string | null>(null)
+  const skipMal = channel.kind === 'series' ? malIdParaSerie(channel.seriesName || channel.name) : null
+  const skipEp = channel.kind === 'series' ? extractEpisodeNumber(channel.name) : null
+  const skipTemp = channel.kind === 'series' ? extractSeasonNumber(channel.name) : null
+  useEffect(() => {
+    setSkipTimes(null)
+    if (!skipMal || skipEp === null) return
+    let vivo = true
+    void getSkipTimes(skipMal, skipEp, skipTemp).then((r) => {
+      if (vivo) setSkipTimes(r)
+    })
+    return () => { vivo = false }
+  }, [skipMal, skipEp, skipTemp, channel.id])
+  useEffect(() => { setSkipDispensado(null) }, [channel.id])
+  const introSkip = skipTimes?.source === 'local' ? skipTimes.intro : null
+  const outroSkip = skipTimes?.source === 'local' ? skipTimes.outro : null
+  const proximoEp = useMemo(() => {
+    const i = list.findIndex((x) => x.id === channel.id)
+    return i >= 0 && i + 1 < list.length ? list[i + 1] : null
+  }, [list, channel.id])
+  const chaveOp = introSkip ? `op:${introSkip.start}` : null
+  const chaveEd = outroSkip ? `ed:${outroSkip.start}` : null
+  const mostrarPular = !useBufferedNative && !!introSkip && chaveOp !== skipDispensado &&
+    currentTime >= introSkip.start && currentTime <= introSkip.end
+  const mostrarProximo = !useBufferedNative && !!outroSkip && chaveEd !== skipDispensado &&
+    currentTime >= outroSkip.start && currentTime <= outroSkip.end
 
   useEffect(() => {
     if (embedded) return
@@ -11788,11 +11834,29 @@ const manager = new PlayerManager({
           }))
         : []
     const franquia = sagas.flatMap((s) => s.filmes)
+
+    /*
+     * MyAnimeList ID para a API AniSkip (abertura/encerramento).
+     *
+     * O mapa é gerado do catálogo real do servidor e vive em
+     * `lib/anime-mal-ids`.
+     *
+     * A busca é pelo NOME DA SÉRIE, não pelo episódio: `channel.name` num
+     * episódio é "Naruto Shippuden S01E01", e o mapa tem "naruto shippuden".
+     * Por isso `seriesName` vem primeiro — usar só `name` faz toda requisição
+     * sair com `seriesId=null` e o botão nunca aparece.
+     *
+     * E `channel.seriesId` não serve como plano B: esse é o stream_id do Xtream
+     * e a AniSkip responde 404 para ele.
+     */
+    const malId = malIdParaSerie(channel.seriesName || channel.name)
+
     void window.sturplay?.player?.setOverlayMeta?.({
       engine: engineLabel,
       title: channel.name,
       kind: channel.kind,
       currentId: channel.id,
+      seriesId: malId,
       list: items,
       favorites,
       franquia,
@@ -11929,6 +11993,9 @@ const manager = new PlayerManager({
       if (type === 'mute' && typeof action.value === 'boolean') {
         volumeRefFromOverlay.current = true
         setMuted(action.value)
+      }
+      if (type === 'seek' && typeof action.value === 'number') {
+        void managerRef.current?.command({ op: 'seek', seconds: action.value, relative: false })
       }
     })
     return () => off?.()
@@ -12173,6 +12240,63 @@ const manager = new PlayerManager({
           </div>
         )}
 
+        {/* Popups de pular (MPEG/interno; no nativo quem mostra ? o overlay) */}
+        {mostrarPular && introSkip && (
+          <div className="player-skip-slot">
+            <div className="po-proximo" role="dialog" aria-label="Pular abertura">
+              <span className="po-proximo-label">Pular abertura</span>
+              <span className="po-proximo-titulo">Salta para {formatPlayerTime(introSkip.end)}</span>
+              <div className="po-proximo-acoes">
+                <button
+                  type="button"
+                  className="po-proximo-btn po-proximo-btn-ghost"
+                  onClick={() => chaveOp && setSkipDispensado(chaveOp)}
+                >
+                  Agora n?o
+                </button>
+                <button
+                  type="button"
+                  className="po-proximo-btn po-proximo-btn-primary"
+                  onClick={() => {
+                    if (videoRef.current) videoRef.current.currentTime = introSkip.end
+                    if (chaveOp) setSkipDispensado(chaveOp)
+                  }}
+                >
+                  Pular
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {mostrarProximo && outroSkip && proximoEp && (
+          <div className="player-skip-slot">
+            <div className="po-proximo" role="dialog" aria-label="Pr?ximo epis?dio">
+              <span className="po-proximo-label">Encerramento</span>
+              <span className="po-proximo-titulo">{proximoEp.name}</span>
+              <div className="po-proximo-acoes">
+                <button
+                  type="button"
+                  className="po-proximo-btn po-proximo-btn-ghost"
+                  onClick={() => chaveEd && setSkipDispensado(chaveEd)}
+                >
+                  Agora n?o
+                </button>
+                <button
+                  type="button"
+                  className="po-proximo-btn po-proximo-btn-primary"
+                  onClick={() => {
+                    if (chaveEd) setSkipDispensado(chaveEd)
+                    onChange(proximoEp)
+                  }}
+                >
+                  Pr?ximo epis?dio
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Bottom container */}
         <div className="player-bottom-container">
           {/* Seekbar / Timeline scrubber (for movies & series) */}
@@ -12180,7 +12304,24 @@ const manager = new PlayerManager({
             <div className="player-seekbar-wrap">
               <div className="player-seekbar-row">
                 <span className="player-time-badge">{formatPlayerTime(currentTime)}</span>
-                <div className="player-seekbar-track-wrap">
+                <div
+                  className="player-seekbar-track-wrap"
+                  onMouseMove={(e) => {
+                    const r = e.currentTarget.getBoundingClientRect()
+                    if (!r.width || !(duration > 1)) return
+                    const pct = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
+                    setThumbHover({ x: e.clientX, y: r.top, t: pct * duration })
+                  }}
+                  onMouseLeave={() => setThumbHover(null)}
+                >
+                  {thumbHover && (
+                    <div
+                      className="player-thumb-preview"
+                      style={{ left: thumbHover.x, top: thumbHover.y - 8 }}
+                    >
+                      <span className="player-thumb-time">{formatPlayerTime(thumbHover.t)}</span>
+                    </div>
+                  )}
                   <input
                     type="range"
                     min="0"
