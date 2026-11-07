@@ -4,8 +4,8 @@ Player de IPTV para Windows, construído em Electron com o mpv como motor de ví
 
 ## Baixar
 
-- **[ST-PLAY-Setup-1.0.5.exe](https://github.com/StuartLipe/stplay/releases/download/v1.0.5/ST-PLAY-Setup-1.0.5.exe)** — instalador
-- **[ST-PLAY-1.0.5.exe](https://github.com/StuartLipe/stplay/releases/download/v1.0.5/ST-PLAY-1.0.5.exe)** — portátil, sem instalar
+- **[ST-PLAY-Setup-1.0.8.exe](https://github.com/StuartLipe/stplay/releases/download/v1.0.8/ST-PLAY-Setup-1.0.8.exe)** — instalador
+- **[ST-PLAY-1.0.8.exe](https://github.com/StuartLipe/stplay/releases/download/v1.0.8/ST-PLAY-1.0.8.exe)** — portátil, sem instalar
 
 O app verifica sozinho uma vez por dia e baixa em segundo plano.
 
